@@ -183,6 +183,7 @@ class CentralSelfTest:
         self._drive_targets = []     # [(report_id, kind, body)] we will inject + verify
         self._agent = None
         self._agent_registered = False
+        self._bonding = False        # guard: a Pair() is in flight (bond-before-discovery)
 
     # ---- dbus plumbing ----
     def _obj(self, path):
@@ -406,18 +407,89 @@ class CentralSelfTest:
             if bool(self._get(self.dev_path, DEVICE, "ServicesResolved", False)):
                 self._on_resolved()
             return
+        # ConnectDevice (and Connect) can report a "Connect failed" / timeout even though the LE link
+        # actually came up: BlueZ's connect wraps service resolution, and our peripheral only bonds
+        # ON DEMAND (at StartNotify of an encrypted char), so the higher-level connect can report
+        # failure while the device is genuinely Connected with its GATT tree browsable. Before failing,
+        # adopt an established link if one exists and proceed to wait for ServicesResolved.
+        if self._adopt_established_link():
+            return
         if self.backend == "dongle":
             return self._skip(
                 "BlueZ same-host GATT limitation: hci0 (central) cannot connect to the local hci1 "
                 f"HID peripheral on the same bluetoothd ({e})")
         self._fail(f"connect failed: {e}")
 
+    def _adopt_established_link(self) -> bool:
+        """If a device object for the peripheral is actually Connected, adopt it and continue.
+
+        Returns True if it recovered the link (and kicked off resolution), False otherwise. Locates
+        the device by the advertised address under the central adapter, since a ConnectDevice error
+        may fire before we captured the new object path from its reply.
+        """
+        dev_path = self.dev_path
+        if not dev_path and self.dev_address:
+            suffix = "dev_" + self.dev_address.upper().replace(":", "_")
+            dev_path = next(
+                (p for p in self._managed()
+                 if p.startswith(self.central_path + "/") and p.endswith(suffix)), None)
+        if not dev_path:
+            return False
+        if not bool(self._get(dev_path, DEVICE, "Connected", False)):
+            return False
+        self.dev_path = dev_path
+        self.result["steps"]["connect"] = "adopted-established"
+        try:
+            self.bus.add_signal_receiver(
+                self._on_dev_props, dbus_interface=PROP, signal_name="PropertiesChanged",
+                arg0=DEVICE, path=self.dev_path)
+        except dbus.DBusException:
+            pass
+        # Nudge resolution: it may already be resolved, or arrive via _on_dev_props shortly.
+        self._on_resolved()
+        return True
+
     def _on_dev_props(self, iface, changed, invalidated):
         if changed.get("ServicesResolved"):
             self._on_resolved()
 
-    def _on_resolved(self, _attempt=0):
+    def _ensure_bonded(self) -> bool:
+        """Bond over the ALREADY-ESTABLISHED link before discovery, if not bonded yet.
+
+        The MCU requires an encrypted link to expose/read its HID service (0x1812), so on a stack
+        where the on-demand-at-StartNotify bonding is too late (the HID service is hidden or its reads
+        time out pre-bond), we must Pair() first. Crucially the device is already CONNECTED here (via
+        Connect/ConnectDevice), so Pair() runs SMP over the existing link -- it does NOT trigger a
+        fresh LE Create Connection, so it avoids the accept-list auto-connect stall that made pairing
+        FROM DISCONNECTED unusable on this host. Returns True if a Pair() was kicked off (caller should
+        wait for its reply), False if already bonded (proceed straight to discovery).
+        """
+        if self._bonding or bool(self._get(self.dev_path, DEVICE, "Paired", False)):
+            return False
+        self._bonding = True
+        self.result["steps"]["bond"] = "pairing"
+        self._iface(self.dev_path, DEVICE).Pair(
+            reply_handler=self._on_paired, error_handler=self._on_pair_err,
+            timeout=CONNECT_TIMEOUT_S)
+        return True
+
+    def _on_paired(self):
+        self._bonding = False
+        self.result["steps"]["bond"] = "paired"
+        self._on_resolved()
+
+    def _on_pair_err(self, e):
+        # An already-in-progress or already-paired race is benign: fall through to discovery, which
+        # reads the encrypted chars and will surface a real failure if the link is genuinely unusable.
+        self._bonding = False
+        self.result["steps"]["bond"] = f"pair-err: {getattr(e, 'get_dbus_name', lambda: e)()}"
+        self._on_resolved(_force=True)
+
+    def _on_resolved(self, _attempt=0, _force=False):
         if self.result["steps"].get("resolved"):
+            return
+        # Establish encryption before we try to read the HID service (see _ensure_bonded).
+        if not _force and self._ensure_bonded():
             return
         objs = self._managed()
         # wait until the HID service + its report map char are populated (can lag ServicesResolved)
@@ -546,6 +618,9 @@ class CentralSelfTest:
         try:
             for _fw_id, kind, body in self._drive_targets:
                 res = self.transport.send([(kind, body)])
+                # record the board's ack so a "notified" vs "noconn" (board saw no central on the
+                # target slot) is visible in the verdict when a notification fails to arrive.
+                self.result["steps"].setdefault("inject_resp", {})[str(_fw_id)] = res.get("resp")
                 if not res.get("ok", True):
                     return self._fail(f"transport send failed: {res}")
         except Exception as e:  # noqa: BLE001

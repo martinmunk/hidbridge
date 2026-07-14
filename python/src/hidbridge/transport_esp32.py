@@ -404,7 +404,9 @@ class Esp32Transport:
                 return {"ok": False, "error": f"esp32 rejected {kind} frame: {resp!r}",
                         "sent": sent}
             sent += 1
-        return {"ok": True, "sent": sent, "backend": self.BACKEND, "port": self.port}
+        # `resp` is the last frame's ack ("OK" = notified the target slot's central, "OK noconn" =
+        # the board had no central on the target slot to notify).
+        return {"ok": True, "sent": sent, "resp": resp, "backend": self.BACKEND, "port": self.port}
 
     def ping(self) -> dict:
         if self._ser is None:
