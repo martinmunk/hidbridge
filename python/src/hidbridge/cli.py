@@ -12,10 +12,17 @@ BACKENDS (`--backend`):
                     the exact same report BYTES are emitted; pairing is done on the iPad Bluetooth
                     settings (see `pair-mode`). Minimal contributor hardware: a ~USD 6 Pico instead
                     of a BT dongle. `pico` needs no dbus/daemon.
+  esp32             an ESP32 (NimBLE HOG firmware) over USB serial -- same report layer as pico.
+  net               an Ethernet-equipped ESP32 running the same firmware, reached over TCP (no USB
+                    cable). Address it with --host <mDNS-name|IP> (default port 3333). The path is
+                    token-authenticated; set the token on the board over USB first with
+                    `net-provision`. `net` needs no dbus/daemon/serial.
 
 Subcommands:
   adapters              show detected adapters + which is the dongle (the one we use)
   pair-mode             bring the dongle up discoverable + advertising as a keyboard (runs daemon)
+  net-provision         set the network auth token on an Ethernet board (over USB serial)
+  net-status            show the board's Ethernet/TCP state (link, IP, mDNS, token, clients)
   devices               list bonded iPads/iPhones on the dongle
   connect <name|mac>    make the dongle available to a target so it (re)connects; wait for link
   disconnect [name|mac] drop the active BLE link (target stays bonded)
@@ -359,6 +366,89 @@ def cmd_tap_trust(args):
     print("tap-trust: nudged toward the Trust button + clicked (verify on screen).")
 
 
+def _read_or_create_net_token(explicit=None):
+    """Return the network auth token, creating a random 0600 ~/.config/bt_hid/net.token if needed.
+
+    Priority: --token > BT_HID_NET_TOKEN > the file. If none exists and none was given, mint a strong
+    random token and persist it 0600 (like the PIN file: outside the repo, never committed). Returns
+    the token string; the caller sends it to the board over serial and must not log it.
+    """
+    from hidbridge import transport_net as TN
+    tok = TN.load_token(explicit)
+    if tok:
+        return tok, False
+    import secrets
+    tok = secrets.token_urlsafe(18)          # ~24 chars, >> the firmware's 8-char minimum
+    path = TN.TOKEN_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, tok.encode("ascii"))
+    finally:
+        os.close(fd)
+    return tok, True
+
+
+def cmd_net_provision(args):
+    """Set the board's network auth token over USB serial (the ONLY channel the firmware accepts it).
+
+    Provisions the SAME token the host will present over TCP, so `--backend net` then just works.
+    """
+    from hidbridge.transport_esp32 import Esp32Transport, detect_port
+    from hidbridge.serial_link import open_serial
+    token, created = _read_or_create_net_token(args.token)
+    dev = args.esp32_port or detect_port()
+    if not dev:
+        print("error: no ESP32 serial port found; pass --esp32-port /dev/ttyUSBx "
+              "(the board must be connected over USB for provisioning)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        ser = open_serial(dev, 115200, 2.0, prefer_raw=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"error: cannot open {dev}: {e}", file=sys.stderr)
+        sys.exit(2)
+    tp = Esp32Transport(port=ser)
+    try:
+        res = tp.set_net_token(token)          # W<token> over serial; never logs the token
+        net = tp.net_status()
+    finally:
+        tp.close()
+    if not res.get("ok"):
+        print(f"error: board rejected the token: {res.get('resp')!r}", file=sys.stderr)
+        sys.exit(1)
+    where = "created" if created else "using existing"
+    print(f"provisioned network token on {dev} ({where} ~/.config/bt_hid/net.token).")
+    if net.get("ok"):
+        ip = net.get("ip") or "?"
+        mdns = net.get("mdns") or "?"
+        print(f"board network: eth={'up' if net.get('eth') else 'down'} ip={ip} "
+              f"mdns={mdns} port={net.get('port')}")
+        print(f"drive it with: hidbridge --backend net --host {mdns} type \"hello\"")
+    else:
+        print("note: this firmware has no network build; reflash env:esp32-ethernet-kit "
+              "(pio run -e esp32-ethernet-kit -t upload).")
+
+
+def cmd_net_status(args):
+    """Query the board's Ethernet/TCP state. Over TCP (--backend net) or USB (--backend esp32)."""
+    if _ALT_TRANSPORT is not None and hasattr(_ALT_TRANSPORT, "net_status"):
+        try:
+            net = _ALT_TRANSPORT.net_status()
+        except Exception as e:  # noqa: BLE001
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not net.get("ok"):
+            print(f"net-status: {net.get('resp')!r}")
+            return
+        print(f"eth={'up' if net.get('eth') else 'down'} ip={net.get('ip')} "
+              f"port={net.get('port')} mdns={net.get('mdns')} "
+              f"token={'set' if net.get('token') else 'UNSET'} clients={net.get('clients')}")
+        return
+    print("net-status needs a board transport; use --backend net --host <board> "
+          "or --backend esp32 --port <tty>", file=sys.stderr)
+    sys.exit(2)
+
+
 def cmd_status(args):
     if _ALT_TRANSPORT is not None:
         resp = _send({"cmd": "ping"})
@@ -463,8 +553,9 @@ def build_parser():
     p = argparse.ArgumentParser(prog="hidbridge", description=__doc__.splitlines()[0])
     p.add_argument("--backend", default=os.environ.get("BT_HID_BACKEND", "dongle"),
                    help="HID backend: 'dongle' (default, BlueZ+ble_hid) or an alternative "
-                        "transport, e.g. 'esp32' (an ESP32 BLE-HID board over USB serial) or "
-                        "'pico' (a Raspberry Pi Pico 2 W over USB serial)")
+                        "transport, e.g. 'esp32' (an ESP32 BLE-HID board over USB serial), "
+                        "'pico' (a Raspberry Pi Pico 2 W over USB serial), or 'net' (an "
+                        "Ethernet-equipped ESP32 over TCP; see --host + `net-provision`)")
     p.add_argument("--device", default=os.environ.get("BT_HID_DEVICE"),
                    help="drive a registered device by friendly name (e.g. 'mini6'); resolves its "
                         "backend target + bond from the targets registry (bt_hid targets). Explicit "
@@ -475,6 +566,9 @@ def build_parser():
                    help="serial device for a serial backend (e.g. --backend esp32 --port /dev/ttyUSB1)")
     p.add_argument("--pico-port", default=os.environ.get("BT_HID_PICO_PORT"),
                    help="pico backend: serial device (default: auto-detect the Pico's /dev/ttyACM*)")
+    p.add_argument("--host", default=os.environ.get("BT_HID_NET_HOST"),
+                   help="network backend host (mDNS name or IP), e.g. --backend net "
+                        "--host hidbridge-esp32.local")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("adapters", help="show detected adapters + which dongle is used")
@@ -488,6 +582,18 @@ def build_parser():
                     help="advertised name (default: wsb-hid-<hciN>, per-adapter)")
     sp.add_argument("--force-builtin", action="store_true")
     sp.set_defaults(func=cmd_pair_mode)
+
+    sp = sub.add_parser("net-provision",
+                        help="set the network auth token on an Ethernet board (over USB serial)")
+    sp.add_argument("--esp32-port", default=os.environ.get("BT_HID_ESP32_PORT"),
+                    help="the board's USB serial device (default: autodetect the ESP32 bridge)")
+    sp.add_argument("--token", help="the shared secret (>=8 chars); default: read/create "
+                                    "~/.config/bt_hid/net.token")
+    sp.set_defaults(func=cmd_net_provision)
+
+    sp = sub.add_parser("net-status",
+                        help="show the board's Ethernet/TCP state (link, IP, mDNS, token, clients)")
+    sp.set_defaults(func=cmd_net_status)
 
     sp = sub.add_parser("devices", help="list bonded devices on the dongle")
     sp.set_defaults(func=cmd_devices)
@@ -580,9 +686,16 @@ def _init_backend(args):
         return
     from hidbridge.controller import make_transport
     opts = {}
-    port = getattr(args, "port", None) or getattr(args, "pico_port", None)
-    if port:
-        opts["port"] = port
+    if _BACKEND == "net":
+        # network backend: addressed by host (mDNS name or IP), not a serial port. --host wins, then
+        # a --port that is really a host:port (kept for symmetry), then BT_HID_NET_HOST.
+        host = getattr(args, "host", None) or os.environ.get("BT_HID_NET_HOST")
+        if host:
+            opts["host"] = host
+    else:
+        port = getattr(args, "port", None) or getattr(args, "pico_port", None)
+        if port:
+            opts["port"] = port
     try:
         _ALT_TRANSPORT = make_transport(_BACKEND, **opts)
     except Exception as e:  # noqa: BLE001

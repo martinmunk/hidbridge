@@ -74,6 +74,25 @@ Convenience wrappers with one-time toolchain setup + chip auto-detect: `pico/bui
 `esp32/build_flash.sh [PORT]`. See each board's own notes ([`pico/README.md`](pico/README.md)) and
 the header comment in each `src/main.cpp`.
 
+## Network (Ethernet) -- drive the ESP32 with no USB cable
+
+An ESP32 with a wired Ethernet PHY (e.g. the **ESP32-Ethernet-Kit**) runs the *same* firmware, built
+with `-DHIDBRIDGE_NET`, and additionally serves the identical line protocol over **TCP 3333** with
+mDNS discovery (`hidbridge-esp32.local`). Same BLE bonds, same host slots, same report bytes.
+
+```bash
+cd esp32
+pio run -e esp32-ethernet-kit -t upload        # flash the network build (default esp32dev unchanged)
+hidbridge net-provision --esp32-port /dev/ttyUSB3   # one-time: set the auth token over USB
+hidbridge --backend net --host hidbridge-esp32.local type "hello"
+```
+
+The TCP path is **token-authenticated and fails closed** (no token provisioned ⇒ no network HID; the
+token is settable only over the physical serial cable). It is a trusted-network interface: report
+bytes cross the LAN in the clear. PHY pins are build flags (default = the ESP32-Ethernet-Kit's
+IP101GRI); override for another board. Full detail:
+[`../docs/bt-hid-network-backend.md`](../docs/bt-hid-network-backend.md).
+
 ## Pairing
 
 The MCU advertises on its own; pair from the **target's Bluetooth settings** (there is no host-side

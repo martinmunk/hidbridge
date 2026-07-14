@@ -30,3 +30,7 @@ firmware/*/.pio/
 *.pin
 idevice.pin
 targets.json
+# The network backend auth token also lives OUTSIDE the repo at ~/.config/bt_hid/net.token (0600);
+# block it anywhere in case it is ever copied into a tree.
+net.token
+*.token

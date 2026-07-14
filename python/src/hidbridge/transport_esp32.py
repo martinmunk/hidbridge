@@ -125,6 +125,52 @@ def _kv_tokens(resp: str) -> dict:
     return dict(t.split("=", 1) for t in (resp or "").split() if "=" in t)
 
 
+# --------------------------------------------------------------------------- #
+# NETWORK commands (an Ethernet-equipped board; firmware built with -DHIDBRIDGE_NET).
+#
+# The board serves this SAME line protocol on TCP 3333 (see transport_net.py). Two commands manage
+# that path, and both are meaningful over SERIAL:
+#   N        network status -> "OK net eth=<0|1> ip=<a.b.c.d> port=<n> mdns=<host> token=<0|1>
+#                              clients=<n>"   (a serial-only firmware answers eth=0)
+#   W<token> provision the network auth token. SERIAL ONLY -- the firmware refuses it over TCP, so
+#            the secret can only be set across the physical cable. The board never echoes it back.
+# --------------------------------------------------------------------------- #
+MIN_TOKEN_LEN = 8      # must match HB_MIN_TOKEN_LEN in firmware/esp32/src/main.cpp
+
+
+def encode_set_token(token: str) -> bytes:
+    """`W<token>` -- set the board's network auth token (send over SERIAL only).
+
+    SECURITY: the caller must never log the returned line -- it CONTAINS the secret.
+    """
+    if not isinstance(token, str) or len(token) < MIN_TOKEN_LEN:
+        raise Esp32Error(f"token must be a string of >= {MIN_TOKEN_LEN} chars")
+    if "\n" in token or "\r" in token:
+        raise Esp32Error("token must not contain a newline")
+    return f"W{token}\n".encode("ascii")
+
+
+def parse_net_status(resp: str) -> dict:
+    """Parse an `N` reply into {ok, eth, ip, port, mdns, token, clients, resp}.
+
+    `token` is whether a secret has been PROVISIONED (never the secret itself); `eth` is whether the
+    board has a live Ethernet link with an IP. A firmware without the network build answers eth=0.
+    """
+    toks = _kv_tokens(resp)
+    port = toks.get("port")
+    clients = toks.get("clients")
+    return {
+        "ok": (resp or "").startswith("OK"),
+        "eth": toks.get("eth") == "1",
+        "ip": toks.get("ip"),
+        "port": int(port) if port is not None and port.isdigit() else None,
+        "mdns": toks.get("mdns") or None,
+        "token": toks.get("token") == "1",
+        "clients": int(clients) if clients is not None and clients.isdigit() else None,
+        "resp": resp,
+    }
+
+
 def parse_slot_reply(resp: str) -> dict:
     """Parse an `I<n>` reply 'OK slot=<n> addr=<hex> conn=<0|1>' into a dict."""
     toks = _kv_tokens(resp)
@@ -247,8 +293,12 @@ class Esp32Transport:
     """HidController transport that streams report frames to the ESP32 over USB serial.
 
     `port` may be a device path (str, opened lazily via pyserial) or any object exposing
-    `write(bytes)` + `readline() -> bytes` (a fake serial for tests / an already-open handle).
+    `write(bytes)` + `readline() -> bytes` (a fake serial for tests / an already-open handle) --
+    which is also how `transport_net.NetTransport` reuses this whole command layer over a TCP
+    channel: the wire changes, the protocol does not.
     """
+
+    BACKEND = "esp32"          # label in the status dicts; subclasses (net) override it
 
     def __init__(self, port=None, baud: int = DEFAULT_BAUD, timeout: float = 2.0,
                  open_now: bool = True, prefer_raw: bool = True):
@@ -354,7 +404,7 @@ class Esp32Transport:
                 return {"ok": False, "error": f"esp32 rejected {kind} frame: {resp!r}",
                         "sent": sent}
             sent += 1
-        return {"ok": True, "sent": sent, "backend": "esp32", "port": self.port}
+        return {"ok": True, "sent": sent, "backend": self.BACKEND, "port": self.port}
 
     def ping(self) -> dict:
         if self._ser is None:
@@ -366,7 +416,7 @@ class Esp32Transport:
         # "OK wsb-hid-esp32 [subscribed=<0|1> ]conn=<0|1>"; an OLD firmware omits subscribed=.
         toks = dict(t.split("=", 1) for t in resp.split() if "=" in t)
         sub = toks.get("subscribed")
-        return {"ok": ok, "resp": resp, "backend": "esp32", "port": self.port,
+        return {"ok": ok, "resp": resp, "backend": self.BACKEND, "port": self.port,
                 "connected": toks.get("conn") == "1",
                 "subscribed": None if sub is None else (sub == "1")}
 
@@ -467,6 +517,27 @@ class Esp32Transport:
             self._open()
         self._ser.write(encode_slots_query())
         return parse_slots_status(self._readline())
+
+    # -- network path (an Ethernet-equipped board; see transport_net.py) --
+    def net_status(self) -> dict:
+        """Query the board's Ethernet/TCP state (`N`): link, IP, port, mDNS name, token, clients."""
+        if self._ser is None:
+            self._open()
+        self._ser.write(b"N\n")
+        return parse_net_status(self._readline())
+
+    def set_net_token(self, token: str) -> dict:
+        """Provision the board's network auth token (`W<token>`) -- over SERIAL only.
+
+        SECURITY: `token` is the shared secret. It crosses the (physical) serial cable and lands in
+        the board's NVS; the firmware never echoes it and neither does this method -- the returned
+        dict carries only the board's "OK token set" acknowledgement, never the token.
+        """
+        if self._ser is None:
+            self._open()
+        self._ser.write(encode_set_token(token))
+        resp = self._readline()
+        return {"ok": resp.startswith("OK"), "resp": resp}
 
     def _readline(self) -> str:
         # skip async EVT lines; return the first non-EVT reply (bounded)

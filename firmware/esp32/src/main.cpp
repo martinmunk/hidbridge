@@ -20,6 +20,10 @@
 //   pio run -t upload            # compile + flash (default env matches the connected board)
 // See firmware/esp32/build_flash.sh for the wrapper + one-time setup.
 //
+// TRANSPORTS: the SAME line protocol is served over USB serial AND (on a board with an Ethernet PHY,
+// built with -DHIDBRIDGE_NET) over TCP on port 3333. A command is answered on the channel it arrived
+// on; async EVT lines are broadcast to serial + every AUTHENTICATED network client. See "NETWORK".
+//
 // SERIAL PROTOCOL (115200 baud, newline-terminated ASCII lines; host -> ESP32):
 //   K<hex>   keyboard report body, 8 bytes = 16 hex chars  -> notify keyboard input report
 //   M<hex>   mouse report body, 4 bytes = 8 hex chars       -> notify mouse input report
@@ -34,6 +38,12 @@
 //                -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
 //   T<n>     set the SEND-target slot (K/M/A/D notify ONLY that slot's connection) -> "OK tgt=<n>"
 //   S        slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=1 c0=<0|1> c1=.. s0=<0|1> s1=.."
+//   N        network status -> "OK net eth=<0|1> ip=<a.b.c.d> port=<n> mdns=<host> token=<0|1>
+//                              clients=<n>"   (eth=0 / ip=0.0.0.0 on a build without -DHIDBRIDGE_NET)
+//   W<token> SET the network auth token (>=8 chars) in NVS. SERIAL ONLY -- refused over TCP, so the
+//            secret can only be provisioned over the physically-attached cable. -> "OK token set"
+//            (the token itself is NEVER echoed, logged, or readable back off the board).
+//   @<token> AUTHENTICATE this TCP session -> "OK auth" / "ERR auth". See "NETWORK" below.
 // NOTE: 'A' is overloaded -- a bare "A\n" (re)starts advertising; "A"+10 hex is an abs-mouse report.
 // They never collide because an abs-mouse frame always carries its 5-byte (10-hex) body.
 // ESP32 -> host replies are single lines: "OK ...", "OK noconn" (accepted but no central), or
@@ -58,11 +68,41 @@
 // keyboard input report (its CCCD) PER slot and exposes the target slot as subscribed=<0|1>, the
 // real "ready" signal the host (HidSession) awaits before sending. `subscribed=` is placed BEFORE
 // `conn=` so an older host's endswith("conn=1") parse still holds.
+//
+// NETWORK (-DHIDBRIDGE_NET; env:esp32-ethernet-kit -- an ESP32 with a wired Ethernet PHY):
+// the board joins the LAN over Ethernet (DHCP), advertises itself as `hidbridge-esp32.local` (mDNS),
+// and serves the SAME line protocol on TCP 3333 -- so the host can drive the HID target with no USB
+// cable at all (`hidbridge --backend net --host hidbridge-esp32.local`). USB serial keeps working
+// exactly as before; the two channels are interchangeable and may be used at the same time.
+//
+// AUTH -- a TCP port that injects keystrokes into a bonded, possibly UNLOCKED iPad (and can type its
+// passcode) is a REMOTE INPUT-INJECTION surface: anyone who can reach the port could type into the
+// target. So the network path is authenticated and FAILS CLOSED:
+//   * a shared secret is stored in NVS and is settable ONLY over USB serial (`W<token>`) -- never
+//     over TCP, never compiled into the image, never echoed back;
+//   * a fresh TCP session may ONLY ping (P/V/N) and authenticate (@<token>). EVERY report command
+//     (K/M/A/D) and all control (I/T/S/X/O) is refused with "ERR auth" until `@<token>` succeeds;
+//   * if NO token has been provisioned, `@` always fails -- so a board that is merely plugged into
+//     the LAN cannot be driven over it at all;
+//   * the compare is constant-time, and 5 failed attempts drop the session.
+// This does NOT make the link confidential -- the report bytes (INCLUDING the passcode frames that
+// `hidbridge unlock` emits) still cross the LAN in the clear, and the token itself is sent in the
+// clear on `@`. Treat TCP 3333 as a TRUSTED-NETWORK-ONLY interface: put it on a LAN/VLAN/VPN you
+// trust, and prefer the USB path for `unlock` on a hostile network. (A TLS/noise-framed channel is
+// the obvious next step if that is not enough -- see docs/bt-hid-network-backend.md.)
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <NimBLEServer.h>
+
+#ifdef HIDBRIDGE_NET
+#include <ETH.h>
+#include <ESPmDNS.h>
+#include <NetworkClient.h>
+#include <NetworkServer.h>
+#include <Preferences.h>
+#endif
 
 static const char* DEVICE_NAME = "wsb-hid-esp32";
 
@@ -80,6 +120,68 @@ static const char* DEVICE_NAME = "wsb-hid-esp32";
 #endif
 static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS >= NUM_SLOTS,
               "CONFIG_BT_NIMBLE_MAX_CONNECTIONS must be >= NUM_SLOTS to hold all slots at once");
+
+// --------------------------------------------------------------------------- //
+// NETWORK backend (-DHIDBRIDGE_NET) -- Ethernet PHY + TCP line server + mDNS.
+//
+// The PHY wiring differs PER BOARD, so every pin/mode is a build flag with the Espressif
+// ESP32-Ethernet-Kit (IP101GRI) as the default. Other boards override in platformio.ini, e.g.
+//   Olimex ESP32-POE : -DHB_ETH_PHY_TYPE=ETH_PHY_LAN8720 -DHB_ETH_PIN_POWER=12
+//                      -DHB_ETH_CLK_MODE=ETH_CLOCK_GPIO17_OUT
+//   WT32-ETH01       : -DHB_ETH_PHY_TYPE=ETH_PHY_LAN8720 -DHB_ETH_PIN_POWER=16
+//                      -DHB_ETH_CLK_MODE=ETH_CLOCK_GPIO0_IN
+// A WRONG PHY/clock config is the usual cause of "no link light / never gets an IP".
+// --------------------------------------------------------------------------- //
+#ifdef HIDBRIDGE_NET
+#ifndef HB_ETH_PHY_TYPE
+#define HB_ETH_PHY_TYPE   ETH_PHY_IP101          // ESP32-Ethernet-Kit: IP101GRI
+#endif
+#ifndef HB_ETH_PHY_ADDR
+#define HB_ETH_PHY_ADDR   1
+#endif
+#ifndef HB_ETH_PIN_MDC
+#define HB_ETH_PIN_MDC    23
+#endif
+#ifndef HB_ETH_PIN_MDIO
+#define HB_ETH_PIN_MDIO   18
+#endif
+#ifndef HB_ETH_PIN_POWER
+#define HB_ETH_PIN_POWER  5                      // enables the kit's 50MHz RMII oscillator
+#endif
+#ifndef HB_ETH_CLK_MODE
+#define HB_ETH_CLK_MODE   ETH_CLOCK_GPIO0_IN     // 50MHz clock from that oscillator INTO GPIO0
+#endif
+#ifndef HB_NET_PORT
+#define HB_NET_PORT       3333
+#endif
+#ifndef HB_MDNS_HOST
+#define HB_MDNS_HOST      "hidbridge-esp32"      // -> hidbridge-esp32.local
+#endif
+#ifndef HB_MAX_NET_CLIENTS
+#define HB_MAX_NET_CLIENTS 4
+#endif
+#define HB_MIN_TOKEN_LEN  8
+#define HB_MAX_AUTH_FAILS 5
+
+// One connected TCP client. `authed` starts FALSE: until `@<token>` succeeds this session may only
+// ping (see netCommandAllowed). `buf` accumulates a line the same way the serial reader does.
+struct NetSession {
+  NetworkClient client;
+  String        buf;
+  bool          authed = false;
+  uint8_t       fails  = 0;
+};
+static NetworkServer tcpServer(HB_NET_PORT);
+static NetSession    netSessions[HB_MAX_NET_CLIENTS];
+static Preferences   prefs;
+static bool          ethUp = false;
+#else
+// No network on this board: NetSession is never defined, but handleLine still takes a NetSession*
+// (always nullptr here) so there is ONE command handler shared by both builds -- a serial-only board
+// and an Ethernet board run byte-identical command code, which is what keeps the two transports from
+// drifting apart. A pointer to an incomplete type is all that needs.
+struct NetSession;
+#endif  // HIDBRIDGE_NET
 
 // ---- HID report map: byte-identical to reports.py REPORT_DESCRIPTOR ----
 static const uint8_t REPORT_MAP[] = {
@@ -231,6 +333,9 @@ static bool                parked = false;   // true = intentionally NOT adverti
 // Forward declarations: the server callbacks (below) resume/point advertising; defined after setup().
 static void selectSlotAdvertise(int n, const char* name);
 static void startAdvertisingSlot();
+#ifdef HIDBRIDGE_NET
+static void netSetup();                        // Ethernet + TCP line server; called from setup()
+#endif
 
 static int slotOfHandle(uint16_t h) {
   for (int i = 0; i < NUM_SLOTS; i++) {
@@ -246,12 +351,57 @@ static void defaultSlotName(int n, char* out, size_t cap) {
   else        snprintf(out, cap, "%s-s%d", DEVICE_NAME, n);
 }
 
+// ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
+// An EVT line ("EVT connected" / "EVT ready" / ...) is UNSOLICITED: it is not a reply to any one
+// channel's command, so it must reach every attached host, not just whoever spoke last. Unauthed TCP
+// sessions are deliberately excluded -- link state is not something an unauthenticated peer may
+// observe (they can still ping, which reports the same facts, only after they identify themselves).
+static void evt(const char* msg) {
+  Serial.println(msg);
+#ifdef HIDBRIDGE_NET
+  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
+    NetSession& s = netSessions[i];
+    if (s.authed && s.client.connected()) s.client.println(msg);
+  }
+#endif
+}
+
+// ---- network auth token (NVS) ---------------------------------------------------------------- //
+// Stored in NVS, written ONLY from the serial channel (`W<token>`), never echoed back. `hasToken()`
+// is the FAIL-CLOSED gate: with no token provisioned, `@` can never succeed, so an unprovisioned
+// board on the LAN cannot be driven over TCP at all.
+#ifdef HIDBRIDGE_NET
+static bool hasToken() {
+  prefs.begin("hidbridge", true);
+  bool has = prefs.isKey("token") && prefs.getString("token", "").length() >= HB_MIN_TOKEN_LEN;
+  prefs.end();
+  return has;
+}
+
+static bool tokenEquals(const String& given) {
+  prefs.begin("hidbridge", true);
+  String tok = prefs.getString("token", "");
+  prefs.end();
+  if (tok.length() < HB_MIN_TOKEN_LEN) return false;      // fail closed: unprovisioned
+  // CONSTANT-TIME compare: a length-then-memcmp check leaks the shared secret one byte at a time to
+  // anyone who can time our replies. Compare every byte and fold the differences.
+  bool lenOk = (given.length() == tok.length());
+  size_t n = tok.length();
+  uint8_t diff = lenOk ? 0 : 1;
+  for (size_t i = 0; i < n; i++) {
+    char g = (i < given.length()) ? given[i] : '\0';
+    diff |= (uint8_t)(tok[i] ^ g);
+  }
+  return diff == 0;
+}
+#endif  // HIDBRIDGE_NET
+
 // ---- server callbacks: track link PER slot + keep advertising the dropped slot ----
 class ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
     // The central connected on whatever identity we were advertising -> record it against advSlot.
     if (advSlot >= 0 && advSlot < NUM_SLOTS) slotConn[advSlot] = info.getConnHandle();
-    Serial.println("EVT connected");
+    evt("EVT connected");
   }
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
     int slot = slotOfHandle(info.getConnHandle());
@@ -259,7 +409,7 @@ class ServerCB : public NimBLEServerCallbacks {
       slotConn[slot] = BLE_HS_CONN_HANDLE_NONE;
       slotSub[slot] = false;              // link gone -> reports no longer enabled on this slot
     }
-    Serial.println("EVT disconnected");
+    evt("EVT disconnected");
     // Resume advertising the slot the HOST currently has selected (advSlot) -- do NOT hijack the
     // single legacy advertiser to the dropped slot. (The old code re-pointed advertising to the
     // dropped slot, so a mini6 flap while we were advertising slot1 for mini5's pair switched the
@@ -280,7 +430,7 @@ class KbdSubCB : public NimBLECharacteristicCallbacks {
     bool nowSub = (subValue != 0);
     if (nowSub != slotSub[slot]) {
       slotSub[slot] = nowSub;
-      Serial.println(nowSub ? "EVT ready" : "EVT unsubscribed");
+      evt(nowSub ? "EVT ready" : "EVT unsubscribed");
     }
   }
 };
@@ -382,6 +532,13 @@ void setup() {
   deriveSlotAddresses();                       // needs init() done (public address available)
   selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
   Serial.println("OK wsb-hid-esp32 ready");
+
+#ifdef HIDBRIDGE_NET
+  // AFTER BLE is up: bring Ethernet + the TCP line server up. Ethernet (EMAC) and the BLE radio are
+  // independent peripherals, so they coexist; DHCP runs in the background and the board keeps
+  // serving serial the whole time (no blocking wait for a lease).
+  netSetup();
+#endif
 }
 
 // ---- hex helpers ----
@@ -410,14 +567,15 @@ static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
   snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", v[5], v[4], v[3], v[2], v[1], v[0]);
 }
 
-static void sendReportToTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len) {
+static void sendReportToTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len,
+                               Print& out) {
   chr->setValue((uint8_t*)body, len);
   uint16_t h = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotConn[tgtSlot] : BLE_HS_CONN_HANDLE_NONE;
   if (h != BLE_HS_CONN_HANDLE_NONE) {
     chr->notify(h);                            // drive ONLY the target slot's central
-    Serial.println("OK");
+    out.println("OK");
   } else {
-    Serial.println("OK noconn");
+    out.println("OK noconn");
   }
 }
 
@@ -428,66 +586,111 @@ static bool anyConnected() {
   return false;
 }
 
-static void printSlotsStatus() {
-  Serial.print("OK slots=");
-  Serial.print(NUM_SLOTS);
-  Serial.print(" adv=");
-  Serial.print(advSlot);
-  Serial.print(" tgt=");
-  Serial.print(tgtSlot);
-  Serial.print(" multi=1");                    // NimBLE holds distinct identities simultaneously
+static void printSlotsStatus(Print& out) {
+  out.print("OK slots=");
+  out.print(NUM_SLOTS);
+  out.print(" adv=");
+  out.print(advSlot);
+  out.print(" tgt=");
+  out.print(tgtSlot);
+  out.print(" multi=1");                       // NimBLE holds distinct identities simultaneously
   for (int i = 0; i < NUM_SLOTS; i++) {
-    Serial.print(" c");
-    Serial.print(i);
-    Serial.print("=");
-    Serial.print(slotConn[i] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
+    out.print(" c");
+    out.print(i);
+    out.print("=");
+    out.print(slotConn[i] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
   }
   for (int i = 0; i < NUM_SLOTS; i++) {
-    Serial.print(" s");
-    Serial.print(i);
-    Serial.print("=");
-    Serial.print(slotSub[i] ? "1" : "0");
+    out.print(" s");
+    out.print(i);
+    out.print("=");
+    out.print(slotSub[i] ? "1" : "0");
   }
-  Serial.println();
+  out.println();
 }
 
-static void handleLine(String line) {
+// Network status (`N`). Answers on a non-net build too, so a host can always ask "do you have a
+// network path?" and get a definite no rather than "ERR unknown".
+static void printNetStatus(Print& out) {
+#ifdef HIDBRIDGE_NET
+  int clients = 0;
+  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
+    if (netSessions[i].client.connected()) clients++;
+  }
+  out.print("OK net eth=");
+  out.print(ethUp ? "1" : "0");
+  out.print(" ip=");
+  out.print(ethUp ? ETH.localIP().toString() : String("0.0.0.0"));
+  out.print(" port=");
+  out.print(HB_NET_PORT);
+  out.print(" mdns=");
+  out.print(HB_MDNS_HOST ".local");
+  out.print(" token=");
+  out.print(hasToken() ? "1" : "0");           // provisioned? (never the token itself)
+  out.print(" clients=");
+  out.println(clients);
+#else
+  out.println("OK net eth=0 ip=0.0.0.0 port=0 mdns= token=0 clients=0");
+#endif
+}
+
+// AUTH GATE. `sess == nullptr` means the line came from USB SERIAL, which is trusted by construction
+// (it requires physical access to the board -- the same access that could just reflash it). A TCP
+// session may ONLY ping (P/V/N) and authenticate (@) until `@<token>` succeeds; everything that can
+// move the pointer, press a key, or reconfigure the BLE identities is refused with "ERR auth".
+#ifdef HIDBRIDGE_NET
+static bool commandAllowed(NetSession* sess, char cmd, Print& out) {
+  if (sess == nullptr) return true;                        // serial: trusted
+  if (cmd == '@' || cmd == 'P' || cmd == 'V' || cmd == 'N') return true;
+  if (!sess->authed) { out.println("ERR auth"); return false; }
+  return true;
+}
+#endif
+
+// `sess` is the originating TCP session, or nullptr when the line came from USB serial.
+static void handleLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
   char cmd = line[0];
   String arg = line.substring(1);
 
+#ifdef HIDBRIDGE_NET
+  if (!commandAllowed(sess, cmd, out)) return;
+#else
+  (void)sess;
+#endif
+
   if (cmd == 'K') {
     uint8_t body[KBD_BODY_LEN];
-    if (!parseHexBody(arg, body, KBD_BODY_LEN)) { Serial.println("ERR badkbd"); return; }
-    sendReportToTarget(inputKbd, body, KBD_BODY_LEN);
+    if (!parseHexBody(arg, body, KBD_BODY_LEN)) { out.println("ERR badkbd"); return; }
+    sendReportToTarget(inputKbd, body, KBD_BODY_LEN, out);
   } else if (cmd == 'M') {
     uint8_t body[MOUSE_BODY_LEN];
-    if (!parseHexBody(arg, body, MOUSE_BODY_LEN)) { Serial.println("ERR badmouse"); return; }
-    sendReportToTarget(inputMouse, body, MOUSE_BODY_LEN);
+    if (!parseHexBody(arg, body, MOUSE_BODY_LEN)) { out.println("ERR badmouse"); return; }
+    sendReportToTarget(inputMouse, body, MOUSE_BODY_LEN, out);
   } else if (cmd == 'D') {
     uint8_t body[DIGITIZER_BODY_LEN];
-    if (!parseHexBody(arg, body, DIGITIZER_BODY_LEN)) { Serial.println("ERR baddigi"); return; }
-    sendReportToTarget(inputDigitizer, body, DIGITIZER_BODY_LEN);
+    if (!parseHexBody(arg, body, DIGITIZER_BODY_LEN)) { out.println("ERR baddigi"); return; }
+    sendReportToTarget(inputDigitizer, body, DIGITIZER_BODY_LEN, out);
   } else if (cmd == 'P') {
     // Report the TARGET slot's state (default slot 0 = legacy single-central behaviour).
     // subscribed= BEFORE conn= so a legacy host's endswith("conn=1") parse still works.
     bool sub = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) && slotSub[tgtSlot];
     bool con = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) &&
                slotConn[tgtSlot] != BLE_HS_CONN_HANDLE_NONE;
-    Serial.print("OK wsb-hid-esp32 subscribed=");
-    Serial.print(sub ? "1" : "0");
-    Serial.print(" conn=");
-    Serial.println(con ? "1" : "0");
+    out.print("OK wsb-hid-esp32 subscribed=");
+    out.print(sub ? "1" : "0");
+    out.print(" conn=");
+    out.println(con ? "1" : "0");
   } else if (cmd == 'A') {
     // 'A' is overloaded: bare "A" -> (re)start advertising the current slot; "A"+10 hex -> abs-mouse.
     if (arg.length() == 0) {
       NimBLEDevice::startAdvertising();
-      Serial.println("OK adv");
+      out.println("OK adv");
     } else {
       uint8_t body[ABS_MOUSE_BODY_LEN];
-      if (!parseHexBody(arg, body, ABS_MOUSE_BODY_LEN)) { Serial.println("ERR badabs"); return; }
-      sendReportToTarget(inputAbsMouse, body, ABS_MOUSE_BODY_LEN);
+      if (!parseHexBody(arg, body, ABS_MOUSE_BODY_LEN)) { out.println("ERR badabs"); return; }
+      sendReportToTarget(inputAbsMouse, body, ABS_MOUSE_BODY_LEN, out);
     }
   } else if (cmd == 'I') {
     // I<n>[:name] -- select host slot n as the advertising identity (+ optional per-slot name) +
@@ -497,30 +700,62 @@ static void handleLine(String line) {
     String nStr = (sep >= 0) ? arg.substring(0, sep) : arg;
     String nm = (sep >= 0) ? arg.substring(sep + 1) : String("");
     int n = nStr.toInt();
-    if (nStr.length() == 0 || n < 0 || n >= NUM_SLOTS) { Serial.println("ERR badslot"); return; }
+    if (nStr.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
     selectSlotAdvertise(n, nm.length() ? nm.c_str() : nullptr);
     char ah[16];
     addrHex(slotAddr[n], ah, sizeof(ah));
-    Serial.print("OK slot=");
-    Serial.print(n);
-    Serial.print(" addr=");
-    Serial.print(ah);
-    Serial.print(" name=");
-    Serial.print(slotName[n]);
-    Serial.print(" conn=");
-    Serial.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
+    out.print("OK slot=");
+    out.print(n);
+    out.print(" addr=");
+    out.print(ah);
+    out.print(" name=");
+    out.print(slotName[n]);
+    out.print(" conn=");
+    out.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
   } else if (cmd == 'T') {
     // T<n> -- route subsequent K/M/A/D reports to slot n's connection.
     int n = arg.toInt();
-    if (arg.length() == 0 || n < 0 || n >= NUM_SLOTS) { Serial.println("ERR badslot"); return; }
+    if (arg.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
     tgtSlot = n;
-    Serial.print("OK tgt=");
-    Serial.println(n);
+    out.print("OK tgt=");
+    out.println(n);
   } else if (cmd == 'S') {
-    printSlotsStatus();
+    printSlotsStatus(out);
+  } else if (cmd == 'N') {
+    printNetStatus(out);
   } else if (cmd == 'V') {
-    Serial.print("OK wsb-hid-esp32 ");
-    Serial.println(anyConnected() ? "connected" : "advertising");
+    out.print("OK wsb-hid-esp32 ");
+    out.println(anyConnected() ? "connected" : "advertising");
+  } else if (cmd == 'W') {
+    // W<token> -- provision the network auth secret. SERIAL ONLY: accepting this over TCP would let
+    // an already-authenticated (or, worse, a future unauthenticated) peer ROTATE the secret and lock
+    // the owner out, so the only way in is the physical cable. The token is never echoed back.
+#ifdef HIDBRIDGE_NET
+    if (sess != nullptr) { out.println("ERR auth"); return; }        // never over the network
+    if (arg.length() < HB_MIN_TOKEN_LEN) { out.println("ERR shorttoken"); return; }
+    prefs.begin("hidbridge", false);
+    prefs.putString("token", arg);
+    prefs.end();
+    out.println("OK token set");
+#else
+    out.println("ERR nonet");
+#endif
+  } else if (cmd == '@') {
+    // @<token> -- authenticate THIS TCP session (see the AUTH note in the header).
+#ifdef HIDBRIDGE_NET
+    if (sess == nullptr) { out.println("OK auth"); return; }         // serial is already trusted
+    if (!hasToken()) { out.println("ERR notoken"); return; }         // fail closed: unprovisioned
+    if (tokenEquals(arg)) {
+      sess->authed = true;
+      sess->fails = 0;
+      out.println("OK auth");
+    } else {
+      out.println("ERR auth");
+      if (++sess->fails >= HB_MAX_AUTH_FAILS) sess->client.stop();   // stop online guessing
+    }
+#else
+    out.println("ERR nonet");
+#endif
   } else if (cmd == 'X') {
     // Disconnect the TARGET slot's central but KEEP the bond, then PARK (stop advertising) so the
     // released iPad is free to attach to ANOTHER board (deterministic cross-board handoff). The host
@@ -529,9 +764,9 @@ static void handleLine(String line) {
     parked = true;                            // onDisconnect must NOT auto-re-advertise
     if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) {
       server->disconnect(h);
-      Serial.println("OK disc");
+      out.println("OK disc");
     } else {
-      Serial.println("OK noconn");
+      out.println("OK noconn");
     }
     NimBLEDevice::stopAdvertising();
   } else if (cmd == 'O') {
@@ -539,23 +774,108 @@ static void handleLine(String line) {
     // without this board grabbing an iPad. Resume with I<n>.
     parked = true;
     NimBLEDevice::stopAdvertising();
-    Serial.println("OK parked");
+    out.println("OK parked");
   } else {
-    Serial.println("ERR unknown");
+    out.println("ERR unknown");
   }
 }
+
+// ---- network service: accept clients + feed their lines through the SAME handleLine ------------ //
+#ifdef HIDBRIDGE_NET
+static void netPoll() {
+  NetworkClient incoming = tcpServer.accept();
+  if (incoming) {
+    int slot = -1;
+    for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
+      if (!netSessions[i].client.connected()) { slot = i; break; }
+    }
+    if (slot < 0) {
+      incoming.println("ERR busy");            // all session slots in use
+      incoming.stop();
+    } else {
+      NetSession& s = netSessions[slot];
+      s.client.stop();                         // reclaim a dead-but-not-stopped slot
+      s.client = incoming;
+      s.client.setNoDelay(true);               // HID frames are tiny + latency-sensitive: no Nagle
+      s.buf = "";
+      s.authed = false;                        // every new session must authenticate
+      s.fails = 0;
+    }
+  }
+
+  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
+    NetSession& s = netSessions[i];
+    if (!s.client.connected()) { s.client.stop(); continue; }
+    while (s.client.available()) {
+      char c = (char)s.client.read();
+      if (c == '\n') {
+        String line = s.buf;
+        s.buf = "";
+        handleLine(line, s.client, &s);
+      } else if (c != '\r') {
+        s.buf += c;
+        if (s.buf.length() > 128) s.buf = "";  // same runaway-input guard as the serial reader
+      }
+    }
+  }
+}
+
+static void onNetEvent(arduino_event_id_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      Serial.println("EVT net link");
+      break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      ethUp = true;
+      Serial.print("EVT net up ip=");
+      Serial.println(ETH.localIP().toString());
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+    case ARDUINO_EVENT_ETH_STOP:
+      ethUp = false;
+      Serial.println("EVT net down");
+      break;
+    default:
+      break;
+  }
+}
+
+static void netSetup() {
+  Network.onEvent(onNetEvent);
+  if (!ETH.begin(HB_ETH_PHY_TYPE, HB_ETH_PHY_ADDR, HB_ETH_PIN_MDC, HB_ETH_PIN_MDIO,
+                 HB_ETH_PIN_POWER, HB_ETH_CLK_MODE)) {
+    Serial.println("ERR eth init");            // wrong PHY/pins for this board, or no PHY at all
+    return;
+  }
+  ETH.setHostname(HB_MDNS_HOST);
+  tcpServer.begin();
+  tcpServer.setNoDelay(true);
+  if (MDNS.begin(HB_MDNS_HOST)) {
+    MDNS.addService("hidbridge", "tcp", HB_NET_PORT);
+  }
+  Serial.print("OK net listening port=");
+  Serial.print(HB_NET_PORT);
+  Serial.print(" mdns=");
+  Serial.print(HB_MDNS_HOST ".local");
+  Serial.print(" token=");
+  Serial.println(hasToken() ? "1" : "0");      // 0 = unprovisioned: TCP cannot drive HID yet
+}
+#endif  // HIDBRIDGE_NET
 
 void loop() {
   static String buf;
   while (Serial.available()) {
     char c = (char)Serial.read();
     if (c == '\n') {
-      handleLine(buf);
+      handleLine(buf, Serial, nullptr);        // serial: the trusted channel
       buf = "";
     } else if (c != '\r') {
       buf += c;
       if (buf.length() > 128) buf = "";  // guard against runaway input
     }
   }
+#ifdef HIDBRIDGE_NET
+  netPoll();
+#endif
   delay(2);
 }

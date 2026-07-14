@@ -14,6 +14,10 @@ Two backends, one report layer:
   `../firmware/`, reached over **USB serial**. The MCU owns its own BLE stack + bond database,
   so it sidesteps the iOS HID-over-GATT CCCD/Report-Reference quirk that trips BlueZ. Needs only
   `pyserial`; no dbus, no daemon, no root.
+- **net** -- an **Ethernet-equipped ESP32** running that same firmware, reached over **TCP** (no USB
+  cable): `--backend net --host hidbridge-esp32.local`. Token-authenticated and fails closed; set the
+  token on the board over USB once with `hidbridge net-provision`. Stdlib-only (sockets); no pyserial,
+  dbus, daemon, or root. See [`../docs/bt-hid-network-backend.md`](../docs/bt-hid-network-backend.md).
 
 Both backends emit the **exact same report bytes** via `hidbridge.reports` (the single source of
 truth for the HID report descriptor), so behaviour is identical regardless of transport.
