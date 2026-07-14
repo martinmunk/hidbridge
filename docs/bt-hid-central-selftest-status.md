@@ -136,3 +136,37 @@ Harness robustness added for this (helps everywhere, masks nothing):
 
 Net result: reliable on a healthy BLE-central host; on this dev box it needs the ConnectDevice escape
 plus retries, and BlueZ may still drop the link before delivery on any given attempt.
+
+## Update 2026-07-14 (2) -- HCI-level root cause: it was NOT a "post-StartNotify link drop"
+
+Dug into the apparent "link drops right after StartNotify" with btmon + a pairing-agent trace. The
+earlier characterisation was largely WRONG; the real causes:
+
+1. **TWO boards advertise the same name (dominant cause).** Both ESP32s on the bench advertise
+   `wsb-hid-esp32` -- the CP2102 board (`AA:BB:CC:DD:EE:04`) and the Ethernet board
+   (`AA:BB:CC:DD:EE:03`). The self-test matched the scan by NAME, so on ~half the attempts the host
+   central connected + subscribed to the WRONG board, while the `net` inject always went over TCP to
+   the Ethernet board -> that board had no central -> `OK noconn`, the verdict failed, and the test's
+   own TEARDOWN disconnected the (wrong) board. That teardown is the "disconnect right after
+   StartNotify" I first saw -- not a spontaneous BlueZ drop. **Fix:** pin the central to the DRIVEN
+   board's BLE address, not the shared name (`central._board_ble_address` + `_matches`; the transport
+   reports its slot-0 address). This also matters for the plain `esp32` backend whenever two boards
+   run the same firmware.
+
+2. **Flaky LE Secure-Connections Just-Works PAIRING (secondary).** When the central does reach the
+   right board, pairing sometimes stalls: btmon shows SMP reaching the `User Confirmation Request`
+   (confirm hint 0x01 = auto-accept), then bluetoothd issues `Disconnect` with reason **0x16
+   (Connection Terminated By Local Host)** ~0.85 s later, and the kernel auto-connect retries in a
+   ~3 s loop. A pairing-agent trace showed bluetoothd calls the agent's `RequestAuthorization` (HID
+   service auth -- we accept it) but NEVER `RequestConfirmation`, and the journal logs
+   `device_confirm_passkey: Operation not permitted`. So the confirmation is never completed and the
+   half-paired link is torn down. This is a pairing-layer issue on this host's BlueZ 5.82 / kernel
+   6.12 (aggravated by asymmetric bond state from heavy re-pairing, and possibly ESP32 SC-ECDH timing
+   under the Ethernet board's concurrent network load) -- NOT an idle-link or notify policy.
+
+**Conclusion:** there is no "notify-then-drop" behaviour to fix. When the central is on the RIGHT
+board AND pairing completes, the link holds and delivery works (the byte-exact PASS above). The
+remedies are correct board-address targeting (fixed) + the existing transient-retry for flaky
+pairing. Registering the pairing agent as the DEFAULT agent (RequestDefaultAgent) is load-bearing:
+the kernel auto-connect path routes the pairing confirmation to the default agent, and its outcome is
+now recorded in the verdict (`steps.agent`).

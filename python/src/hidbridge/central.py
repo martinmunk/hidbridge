@@ -137,6 +137,29 @@ def make_transport(profile):
     return None, f"unknown driver {profile.driver!r}"
 
 
+def _board_ble_address(transport) -> str | None:
+    """The BLE address the target board advertises, as 'AA:BB:CC:DD:EE:FF', or None.
+
+    CRUCIAL when more than one board runs the same firmware: they all advertise the SAME LocalName
+    (`wsb-hid-esp32`), so matching the scan by NAME can connect the central to a DIFFERENT board than
+    the one the transport drives -- the central then subscribes to board A while the injected frame
+    goes to board B, so board B has no central to notify (`OK noconn`) and the test spuriously fails.
+    Pinning the central to the DRIVEN board's address removes that ambiguity. Uses the MCU's slot-0
+    query (also (re)asserts slot 0 = the public identity as the advertised one). Best-effort: returns
+    None for a transport that cannot report it (e.g. the dongle daemon), and the caller falls back to
+    name matching."""
+    fn = getattr(transport, "select_slot", None)
+    if fn is None:
+        return None
+    try:
+        a = (fn(0).get("addr") or "").strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if len(a) == 12 and all(c in "0123456789abcdefABCDEF" for c in a):
+        return ":".join(a[i:i + 2] for i in range(0, 12, 2)).upper()
+    return None
+
+
 def _free_board(transport) -> None:
     """Between retries: drop any orphaned central our failed attempt left on the board, and
     re-advertise so it is connectable again. Best-effort + backend-agnostic (guarded by hasattr):
@@ -208,6 +231,7 @@ class CentralSelfTest:
         self._agent = None
         self._agent_registered = False
         self._bonding = False        # guard: a Pair() is in flight (bond-before-discovery)
+        self.target_address = None   # the DRIVEN board's BLE address (disambiguates same-name boards)
 
     # ---- dbus plumbing ----
     def _obj(self, path):
@@ -262,16 +286,26 @@ class CentralSelfTest:
         return False
 
     def _register_agent(self):
-        """Register + default a headless Just Works pairing agent (best-effort)."""
+        """Register + default a headless Just Works pairing agent.
+
+        BOTH steps matter: the pairing our peripheral needs is Secure-Connections Just Works, whose
+        User Confirmation must be auto-accepted -- and when the link is brought up via the kernel
+        auto-connect path (ConnectDevice adds the device with Action=Auto-connect), bluetoothd routes
+        that confirmation to the DEFAULT agent, not the caller's. So if RequestDefaultAgent does not
+        take, pairing dies with 'No agent available for request type 2' and the board loops
+        connect/pair-fail/disconnect. We record the outcome so a failure here is visible in the
+        verdict instead of silently sinking the whole test.
+        """
         try:
             self._agent = AutoAcceptAgent(self.bus, AGENT_PATH)
             mgr = dbus.Interface(self._obj("/org/bluez"), AGENT_MANAGER)
             mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+            self._agent_registered = True
             try:
                 mgr.RequestDefaultAgent(AGENT_PATH)
-            except dbus.DBusException:
-                pass
-            self._agent_registered = True
+                self.result["steps"]["agent"] = "default"
+            except dbus.DBusException as e:
+                self.result["steps"]["agent"] = f"registered-not-default: {e}"
         except dbus.DBusException as e:
             self.result["steps"]["agent"] = f"register-failed: {e}"
 
@@ -280,6 +314,11 @@ class CentralSelfTest:
         self._prior_powered = bool(self._get(self.central_path, ADAPTER, "Powered", False))
         ad_props.Set(ADAPTER, "Powered", dbus.Boolean(True))
         self._register_agent()
+        # Pin the central to the SPECIFIC board this transport drives (by BLE address), so a second
+        # board running the same firmware / advertising the same name can't be connected instead.
+        self.target_address = _board_ble_address(self.transport)
+        if self.target_address:
+            self.result["steps"]["target_addr"] = self.target_address
         try:
             self._iface(self.central_path, ADAPTER).SetDiscoveryFilter(
                 {"Transport": dbus.String("le")})
@@ -291,8 +330,7 @@ class CentralSelfTest:
             if DEVICE not in ifaces or not path.startswith(self.central_path + "/dev_"):
                 continue
             props = ifaces[DEVICE]
-            name = str(props.get("Name", props.get("Alias", "")))
-            if name == want:
+            if self._matches(props):
                 self.dev_path = path
                 self._capture_address(props)
                 self.result["steps"]["discover"] = "already-known"
@@ -323,14 +361,21 @@ class CentralSelfTest:
         if DEVICE in ifaces:
             self._look_for_device({path: ifaces})
 
+    def _matches(self, props) -> bool:
+        """Is this device the board we drive? Prefer the DRIVEN board's exact BLE address (set when
+        the transport can report it -- see _board_ble_address); otherwise fall back to the advertised
+        LocalName. Address wins because multiple boards can share the name."""
+        if self.target_address:
+            return str(props.get("Address", "")).upper() == self.target_address
+        name = str(props.get("Name", props.get("Alias", "")))
+        return name == self.profile.advert_name
+
     def _look_for_device(self, objs):
-        want = self.profile.advert_name
         for path, ifaces in objs.items():
             if DEVICE not in ifaces or not path.startswith(self.central_path + "/dev_"):
                 continue
             props = ifaces[DEVICE]
-            name = str(props.get("Name", props.get("Alias", "")))
-            if name == want:
+            if self._matches(props):
                 self.dev_path = path
                 self._added_device = True
                 self._capture_address(props)
