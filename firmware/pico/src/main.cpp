@@ -2,7 +2,7 @@
  * wsb-hid-pico -- BLE HID for a Raspberry Pi Pico 2 W: keyboard(1) + relative mouse(2)
  *                 + absolute mouse(3) + digitizer/touchscreen(4).
  *
- * Part of the a private project bt_hid toolbox: the PICO BACKEND. A ~USD 6 alternative to a USB Bluetooth
+ * Part of the hidbridge toolbox: the PICO BACKEND. A ~USD 6 alternative to a USB Bluetooth
  * dongle for controlling an iPad/iPhone/Mac from Linux. Built on the earlephilhower arduino-pico
  * core, whose BTstack HID-over-GATT (HOG) implementation is iOS-compatible OUT OF THE BOX -- which
  * is the whole point: the Linux BlueZ/dongle path gets stuck on iOS not subscribing to the HID
