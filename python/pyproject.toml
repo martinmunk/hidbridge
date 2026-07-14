@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hidbridge"
+version = "0.1.0"
+description = "Drive a Bluetooth-HID target (iPad / iPhone / any host) from Linux -- keyboard + pointer over the host BlueZ stack or a Pico 2W / ESP32 serial-attached BLE peripheral"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Martin Munk Hansen" }]
+keywords = ["bluetooth", "ble", "hid", "hog", "keyboard", "mouse", "ipad", "bluez", "pico", "esp32"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware :: Universal Serial Bus (USB) :: Human Interface Device (HID)",
+]
+
+# Core runtime is stdlib-only for the PURE report layer (hidbridge.reports).
+# Backends pull extra deps -- install the extra(s) you need:
+#   pip install "hidbridge[mcu]"      # Pico / ESP32 over USB serial (pyserial)
+#   pip install "hidbridge[dongle]"   # the host's own BlueZ stack (dbus + PyGObject)
+# On Debian/Ubuntu the dongle backend deps are usually the apt packages
+# python3-dbus + python3-gi (system-python only); the [dongle] extra is provided
+# for venvs built with --system-site-packages.
+dependencies = []
+
+[project.optional-dependencies]
+mcu = ["pyserial>=3.5"]
+dongle = ["dbus-python>=1.2", "PyGObject>=3.40"]
+dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "pyserial>=3.5"]
+
+[project.scripts]
+hidbridge = "hidbridge.cli:main"
+
+[project.urls]
+Homepage = "https://example.invalid/hidbridge"   # TODO(martin): set once the repo is created
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hidbridge"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/hidbridge", "tests", "README.md", "pyproject.toml"]
+
+# --- lint: mirrors the source project's scoped ruleset (dense bit-parser style is deliberate) ---
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["W"]            # pycodestyle warnings on top of the default (E4/E7/E9 + F)
+ignore = [
+    "E701", "E702", "E703",      # multi-statement one-liners: deliberate in the report/bit code
+    "E401",                       # `import a,b,c`: deliberate house style
+    "E402",                       # imports after a guarded block
+    "E731", "E741",              # lambda-assign / ambiguous names (l, I, O): harmless here
+    "F841",                       # unused locals often capture a parsed field with a side effect
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: requires real hardware (BT adapter / MCU / iPad); deselected by default",
+]

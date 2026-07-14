@@ -1,0 +1,11 @@
+#!/usr/bin/python3
+"""bt_hid launcher -- MUST run under the system python (needs dbus + AF_BLUETOOTH; uv's CPython
+lacks both). Thin shim onto bt_hid.cli.main().
+"""
+import os
+import sys
+
+from hidbridge.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    main()

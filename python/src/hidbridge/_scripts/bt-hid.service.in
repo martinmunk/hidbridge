@@ -1,0 +1,19 @@
+[Unit]
+Description=bt_hid BLE HID keyboard+mouse peripheral on adapter %i (dongle only)
+Documentation=file://__REPO__/tools/bt_hid/README.md
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+# Instance %i is the ADAPTER id (hciN / MAC / USB-path). Each instance pins ONE dongle and gets its
+# OWN per-adapter control socket + D-Bus objects + advertised name (see tools/bt_hid/naming.py), so
+# you can run bt-hid@hci1 and bt-hid@hci2 side by side to two different iPads. Do NOT set a fixed
+# BT_HID_SOCK here -- that would force every instance onto one socket and re-introduce the collision.
+ExecStart=/usr/bin/python3 __REPO__/tools/bt_hid/bt_hid --adapter %i pair-mode
+Restart=on-failure
+RestartSec=2
+# The daemon refuses the built-in adapter by design; it only ever configures the dongle.
+
+[Install]
+WantedBy=multi-user.target

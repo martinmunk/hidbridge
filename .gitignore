@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.whl
+*.tar.gz
+
+# --- PlatformIO / firmware build output ---
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/*/.pio/
+
+# --- editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# --- local secrets / runtime state (NEVER commit) ---
+# The device passcode PIN lives OUTSIDE the repo at ~/.config/bt_hid/idevice.pin (0600).
+*.pin
+idevice.pin
+targets.json
