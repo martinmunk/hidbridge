@@ -48,7 +48,10 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("BT_HID_CENTRAL") != "1",
     reason="hardware-gated: set BT_HID_CENTRAL=1 (needs the built-in adapter + an MCU + root)")
 
-BACKENDS = ["pico", "esp32", "dongle"]
+# net = the SAME ESP32 board as `esp32`, but the injected frame is driven OVER TCP (the network
+# backend) instead of USB serial -- the end-to-end proof that net -> board -> BLE delivery works.
+# It self-skips unless the board is reachable + provisioned (BT_HID_NET_HOST / net.token).
+BACKENDS = ["pico", "esp32", "dongle", "net"]
 
 # System python that has dbus + gi + AF_BLUETOOTH (uv's CPython does not).
 SYS_PY = os.environ.get("BT_HID_SYS_PY", sys.executable)

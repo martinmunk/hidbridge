@@ -493,7 +493,7 @@ class BackendProfile:
     mouse_report_id  the firmware's actual mouse report id (for the notification check)
     mouse_pad_zero   True if the firmware pads the mouse body with trailing zero byte(s)
     map_subset       True if the firmware builds its own descriptor -> subset field compare
-    driver           how to drive it: "serial_pico" | "serial_esp32" | "daemon"
+    driver           how to drive it: "serial_pico" | "serial_esp32" | "daemon" | "net"
     """
 
     name: str
@@ -520,6 +520,14 @@ BACKEND_PROFILES: dict[str, BackendProfile] = {
         name="esp32", advert_name="wsb-hid-esp32", report_id_remap={},
         byte_exact_map=False, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
         map_subset=False, driver="serial_esp32"),
+    # SAME ESP32 board + firmware as "esp32" (same advertised name, same byte-for-byte report map),
+    # but DRIVEN OVER TCP instead of USB serial. This is the end-to-end proof of the network backend:
+    # the host adapter is the BLE central, a frame is injected over the LAN (NetTransport), and the
+    # exact bytes must arrive as a GATT notification -- so the whole net -> board -> BLE path is real.
+    "net": BackendProfile(
+        name="net", advert_name="wsb-hid-esp32", report_id_remap={},
+        byte_exact_map=False, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
+        map_subset=False, driver="net"),
     # arduino-pico builds its OWN combined keyboard(id 1)+mouse(id 3) descriptor (NOT reports.py's)
     # and its TinyUSB relative mouse body is 5 bytes = reports.py's 4 + pan=0. So: parse+load-bearing
     # compare (not byte-exact), mouse id remapped 2->3, and tolerate the trailing pan byte.

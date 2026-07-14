@@ -116,6 +116,18 @@ def make_transport(profile):
         if not detect_port():
             return None, "no ESP32 serial device present (10c4/CP2102)"
         return Esp32Transport(open_now=False), None
+    if profile.driver == "net":
+        # Drive the ESP32 over TCP (the network backend). Host from BT_HID_NET_HOST (mDNS name or
+        # IP); default the mDNS name. Skip (not fail) if the board is unreachable or unprovisioned,
+        # so the suite stays green on a host without the Ethernet board.
+        from hidbridge.transport_net import NetError, load_token, make_transport
+        host = os.environ.get("BT_HID_NET_HOST") or "hidbridge-esp32.local"
+        if not load_token():
+            return None, "no network token (run `hidbridge net-provision`; set BT_HID_NET_TOKEN)"
+        try:
+            return make_transport(host=host), None
+        except NetError as e:
+            return None, f"net backend unreachable at {host}: {e}"
     if profile.driver == "daemon":
         from hidbridge.controller import CONTROL_SOCK, SocketTransport
         if not os.path.exists(CONTROL_SOCK):
@@ -136,7 +148,7 @@ def transport_connected(transport, profile) -> bool | None:
     if profile.driver == "serial_pico":
         # PONG name=wsb-hid-pico conn=<0|1>
         return res.get("reply", "").rstrip().endswith("conn=1")
-    if profile.driver == "serial_esp32":
+    if profile.driver in ("serial_esp32", "net"):
         return bool(res.get("connected"))
     return None
 
@@ -501,7 +513,8 @@ class CentralSelfTest:
         mod = None
         if self.profile.driver == "serial_pico":
             from hidbridge import transport_pico as mod
-        elif self.profile.driver == "serial_esp32":
+        elif self.profile.driver in ("serial_esp32", "net"):
+            # net drives the same ESP32 firmware; the frame encoding is identical.
             from hidbridge import transport_esp32 as mod
         if mod is not None:
             mod.encode_frame(kind, body)

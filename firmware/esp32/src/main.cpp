@@ -841,6 +841,13 @@ static void onNetEvent(arduino_event_id_t event) {
 }
 
 static void netSetup() {
+  // Create the NVS namespace up front. Opening it READ-ONLY (hasToken/tokenEquals) before it has
+  // ever been written logs an ESP error to the UART -- "nvs_open failed: NOT_FOUND" -- which
+  // interleaves with and CORRUPTS a protocol reply line (seen garbling an `N` response). A one-time
+  // read-write begin()/end() materialises the namespace so every later read-only open is clean.
+  prefs.begin("hidbridge", false);
+  prefs.end();
+
   Network.onEvent(onNetEvent);
   if (!ETH.begin(HB_ETH_PHY_TYPE, HB_ETH_PHY_ADDR, HB_ETH_PIN_MDC, HB_ETH_PIN_MDIO,
                  HB_ETH_PIN_POWER, HB_ETH_CLK_MODE)) {

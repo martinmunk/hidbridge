@@ -315,7 +315,8 @@ def _synthetic_map_for(profile) -> bytes:
     no abs). pico: arduino-pico-style keyboard(1)+mouse(3)+pan (renumbered + extended)."""
     if profile.name == "dongle":
         return R.REPORT_DESCRIPTOR
-    if profile.name == "esp32":
+    if profile.name in ("esp32", "net"):
+        # net drives the SAME ESP32 firmware over TCP -> same keyboard(1)+mouse(2) report map.
         return _prefix_two_reports()
     if profile.name == "pico":
         return _pico_like_map()
