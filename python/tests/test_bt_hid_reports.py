@@ -2,8 +2,7 @@
 
 This is a STANDARD USB boot-protocol HID emulator (keyboard reportID 1 + mouse reportID 2) that we
 present to an iPad/iPhone over a USB Bluetooth dongle, so we can wake/unlock/type/click without a
-physical poke. The report layer is PURE (no bluetooth deps) so it unit-tests fully offline; it
-mirrors the encoding style + test pattern of continuity/universalcontrol/hid_report.py, but the
+physical poke. The report layer is PURE (no bluetooth deps) so it unit-tests fully offline; the
 byte layouts here are the standard USB-HID boot layouts (NOT Apple's UniversalHID), because the
 iPad talks standard HID to a Bluetooth peripheral.
 

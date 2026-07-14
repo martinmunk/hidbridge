@@ -2,11 +2,9 @@
 
 Two roles:
   1. ops helper: wake / unlock / type / move / click / scroll an iPad-iPhone over the dongle.
-  2. a scriptable, deterministic input generator to DEVELOP + TEST Sidecar's HID relay support --
-     the intended fixture for a device-gated closed-loop e2e: engage the iPad as a Sidecar display,
-     inject known key/pointer events with THIS API, and assert they arrive decoded over our Sidecar
-     HIDRelay stream. (This is standard USB-HID; it cross-checks the host->iPad UniversalHID codec
-     in `continuity/universalcontrol/hid_report.py`, which is Apple's private relay path.)
+  2. a scriptable, deterministic input generator to DEVELOP + TEST HID delivery -- e.g. a
+     device-gated closed-loop e2e that injects known key/pointer events with THIS API and asserts
+     they arrive decoded on the target. This is standard USB-HID.
 
 Design: this layer builds deterministic report FRAMES from the pure `reports` module and hands them
 to a pluggable `transport`. That keeps it dependency-free and unit-testable (a RecordingTransport

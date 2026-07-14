@@ -3,9 +3,8 @@
 We present a STANDARD USB boot-protocol HID device (keyboard reportID 1 + mouse reportID 2) to an
 iPad/iPhone over a USB Bluetooth dongle, so we can programmatically wake / unlock / type / click
 without a physical poke. iPads speak standard HID to a Bluetooth peripheral, so the byte layouts
-here are the STANDARD USB-HID boot layouts -- NOT Apple's private UniversalHID (that lives in
-continuity/universalcontrol/hid_report.py; this file mirrors its ENCODING STYLE + test pattern but
-is a distinct, standards-based device).
+here are the STANDARD USB-HID boot layouts -- NOT Apple's private UniversalHID; this is a distinct,
+standards-based device.
 
 This module is intentionally dependency-free (only stdlib) so it imports + unit-tests fully offline
 under uv, and can equally be imported by the emulator running under the system python (which is the
