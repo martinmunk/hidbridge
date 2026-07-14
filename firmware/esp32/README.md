@@ -1,9 +1,9 @@
-# wsb-hid-esp32 -- ESP32 BLE HID firmware
+# HIDBRIDGE-esp32 -- ESP32 BLE HID firmware
 
 iOS-compatible **BLE HID keyboard + pointer** firmware for an **ESP32** (classic / S3 / C3), the
 low-cost **ESP32 backend** for `hidbridge`. It presents four HID reports -- **keyboard (ID 1)**,
 **relative mouse (ID 2)**, **absolute mouse (ID 3)**, and a **digitizer/touch (ID 4)** -- advertises
-as **`wsb-hid-esp32`**, and relays the report bytes the host streams over USB serial as BLE HID
+as **`HIDBRIDGE-esp32`**, and relays the report bytes the host streams over USB serial as BLE HID
 input notifications.
 
 The HID report map is a **byte-for-byte copy of `python/src/hidbridge/reports.py`

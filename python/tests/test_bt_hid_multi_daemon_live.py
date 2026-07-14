@@ -1,7 +1,7 @@
 """DEVICE-GATED live test: a per-adapter ble_hid daemon isolates + cleans up.
 
 Proves on REAL hardware what the offline tests can only mock: a daemon pinned to a spare dongle
-gets its OWN per-adapter control socket + per-adapter advertised name (wsb-hid-<hciN>), the CLI
+gets its OWN per-adapter control socket + per-adapter advertised name (HIDBRIDGE-dongle-<hciN>), the CLI
 resolves that socket, and a SIGTERM (systemctl stop / timeout / pkill) shuts it down CLEANLY with
 NO leftover socket. This is the regression guard for the two bugs found live 2026-07-10: the shared
 socket/name (multi-daemon collision) and the SIGTERM socket leak.
@@ -75,7 +75,7 @@ def test_per_adapter_socket_and_name(daemon):
     out = subprocess.run(["/usr/bin/python3", BT_HID, "--adapter", ADAPTER, "status"],
                          capture_output=True, text=True).stdout
     assert f"daemon UP on {ADAPTER}" in out
-    assert f"wsb-hid-{ADAPTER}" in out
+    assert f"HIDBRIDGE-dongle-{ADAPTER}" in out
 
 
 def test_sigterm_cleans_up_socket(daemon):

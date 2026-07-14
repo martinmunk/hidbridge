@@ -1,7 +1,7 @@
 """ESP32 HID backend transport for bt_hid.
 
 An ESP32 (~$5) is an alternative HID BACKEND: instead of a USB Bluetooth dongle driven by BlueZ, an
-ESP32 running the `wsb-hid-esp32` firmware (hidbridge/firmware/esp32/) is the BLE HID keyboard+
+ESP32 running the `HIDBRIDGE-esp32` firmware (hidbridge/firmware/esp32/) is the BLE HID keyboard+
 mouse peripheral, and this host talks to it over USB serial. It plugs into `HidController` as a
 drop-in transport (`.send(frames)`), so `reports.py` stays the SINGLE source of truth for the report
 bytes -- the ESP32 only relays them as BLE HID input notifications.
@@ -16,13 +16,13 @@ Serial wire protocol (must match the firmware; newline-terminated ASCII lines, h
     M<hex>   mouse report body, 4 bytes (8 hex chars)          -> BLE mouse input notification
     A<hex>   abs-mouse report body, 5 bytes (10 hex chars)      -> BLE abs-mouse input notification
     D<hex>   digitizer report body, 6 bytes (12 hex chars)      -> BLE digitizer input notification
-    P        ping   -> "OK wsb-hid-esp32 subscribed=<0|1> conn=<0|1>"
+    P        ping   -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
     A        (re)start advertising -> "OK adv"  (bare 'A' with NO hex body; disambiguated by length)
 The ESP32 answers each line with a single "OK..."/"ERR..." line. Asynchronous link state is emitted
 as "EVT connected"/"EVT disconnected", and HID-report subscription as "EVT ready"/"EVT unsubscribed"
 (iOS wrote/cleared the report CCCDs). The ping's subscribed= field is the readiness signal HidSession
 awaits; it is placed BEFORE conn= so a legacy endswith("conn=1") parser still works. An older
-firmware without the field replies "OK wsb-hid-esp32 conn=<0|1>" (subscribed parses as unknown).
+firmware without the field replies "OK HIDBRIDGE-esp32 conn=<0|1>" (subscribed parses as unknown).
 
 This module is import-safe WITHOUT pyserial: pyserial is imported lazily only when opening a real
 device, so the pure framing (`encode_frame`) + a duck-typed port are fully unit-testable offline.
@@ -96,7 +96,7 @@ def encode_slot_select(slot: int, name: str | None = None) -> bytes:
     """`I<n>` / `I<n>:<name>` -- select/create host slot n as the advertising identity + advertise.
 
     An optional `name` sets that slot's advertised BLE LocalName so the identity names its TARGET
-    iPad (e.g. `wsb-esp32-mini5`); see naming.slot_identity_name. The firmware disambiguates the
+    iPad (e.g. `HIDBRIDGE-esp32-mini5`); see naming.slot_identity_name. The firmware disambiguates the
     two forms by the ':' separator.
     """
     if not isinstance(slot, int) or slot < 0:
@@ -348,7 +348,7 @@ class Esp32Transport:
             raw = self._ser.readline()
             if not raw:
                 return   # quiet line == no reset; ready immediately (no-reset fast path)
-            if b"wsb-hid-esp32 ready" in raw or b"POWERON_RESET" in raw or b"rst:0x" in raw:
+            if b"HIDBRIDGE-esp32 ready" in raw or b"POWERON_RESET" in raw or b"rst:0x" in raw:
                 self._rebooted_on_open = True   # a cold reset happened; keep draining briefly
         return
 
@@ -415,7 +415,7 @@ class Esp32Transport:
         resp = self._readline()
         ok = resp.startswith("OK")
         # Parse space-separated key=value tokens, order-independent. The firmware reply is
-        # "OK wsb-hid-esp32 [subscribed=<0|1> ]conn=<0|1>"; an OLD firmware omits subscribed=.
+        # "OK HIDBRIDGE-esp32 [subscribed=<0|1> ]conn=<0|1>"; an OLD firmware omits subscribed=.
         toks = dict(t.split("=", 1) for t in resp.split() if "=" in t)
         sub = toks.get("subscribed")
         return {"ok": ok, "resp": resp, "backend": self.BACKEND, "port": self.port,
@@ -491,7 +491,7 @@ class Esp32Transport:
 
         Slot 0 = the board's native identity (existing bond); slots >=1 = distinct static-random
         identities. An optional `name` sets that slot's advertised BLE name (target-scoped, e.g.
-        `wsb-esp32-mini5`). Use this to bring a specific bonded iPad's identity up so IT reconnects,
+        `HIDBRIDGE-esp32-mini5`). Use this to bring a specific bonded iPad's identity up so IT reconnects,
         and to add a SECOND identity while the first is still connected (simultaneous hold).
         """
         if self._ser is None:

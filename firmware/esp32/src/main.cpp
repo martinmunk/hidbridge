@@ -1,4 +1,4 @@
-// wsb-hid-esp32 -- iOS-compatible BLE HID keyboard+mouse peripheral, driven over USB serial.
+// HIDBRIDGE-esp32 -- iOS-compatible BLE HID keyboard+mouse peripheral, driven over USB serial.
 //
 // PURPOSE (see docs/bt-hid-toolbox-README.md "ESP32 backend"): a ~$5 ESP32 is an alternative HID BACKEND
 // for bt_hid, for a contributor who has an ESP32 instead of a USB Bluetooth dongle. Where the
@@ -29,9 +29,9 @@
 //   M<hex>   mouse report body, 4 bytes = 8 hex chars       -> notify mouse input report
 //   A<hex>   abs-mouse report body, 5 bytes = 10 hex chars  -> notify abs-mouse input report
 //   D<hex>   digitizer report body, 6 bytes = 12 hex chars  -> notify digitizer input report
-//   P        ping                        -> "OK wsb-hid-esp32 subscribed=<0|1> conn=<0|1>"
+//   P        ping                        -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
 //   A        (re)start advertising (bare 'A', no hex body)  -> "OK adv"
-//   V        version/status                                 -> "OK wsb-hid-esp32 <state>"
+//   V        version/status                                 -> "OK HIDBRIDGE-esp32 <state>"
 //   X        disconnect the target slot's central (keep bond) + PARK -> "OK disc" / "OK noconn"
 //   O        park: stop advertising, keep connections + bonds -> "OK parked"
 //   I<n>[:name]  select host SLOT n as the advertising identity (+ optional per-slot name) + advertise
@@ -59,7 +59,7 @@
 // drive each independently (T<n> picks which). The classic ESP32 (BT4.2) has NO extended
 // advertising, so only ONE identity ADVERTISES at a time -- a second/reconnecting central is served
 // by selecting its slot (I<n>) and advertising -- but once connected, connections are held
-// simultaneously. Each slot advertises a TARGET-scoped name (wsb-esp32-<ipad>) so an iPad's
+// simultaneously. Each slot advertises a TARGET-scoped name (HIDBRIDGE-esp32-<ipad>) so an iPad's
 // Bluetooth settings show which entry is meant for it (host sets it via I<n>:name).
 //
 // READINESS (subscribed=): a link being up (conn=1) is NOT "ready to use" -- after a (re)connect iOS
@@ -104,7 +104,7 @@
 #include <Preferences.h>
 #endif
 
-static const char* DEVICE_NAME = "wsb-hid-esp32";
+static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 
 // Number of BLE host slots (distinct identities). Slot 0 = native public address; slots >=1 =
 // derived static-random addresses. Overridable at build time (-DNUM_SLOTS=N). Two iPads need 2.
@@ -345,8 +345,8 @@ static int slotOfHandle(uint16_t h) {
 }
 
 static void defaultSlotName(int n, char* out, size_t cap) {
-  // Fallback name until the host sets a target-scoped one via I<n>:name. wsb-hid-esp32 for slot 0
-  // (matches the legacy DEVICE_NAME so an old bond still sees a familiar name), wsb-hid-esp32-sN else.
+  // Fallback name until the host sets a target-scoped one via I<n>:name. HIDBRIDGE-esp32 for slot 0
+  // (matches the legacy DEVICE_NAME so an old bond still sees a familiar name), HIDBRIDGE-esp32-sN else.
   if (n == 0) snprintf(out, cap, "%s", DEVICE_NAME);
   else        snprintf(out, cap, "%s-s%d", DEVICE_NAME, n);
 }
@@ -413,7 +413,7 @@ class ServerCB : public NimBLEServerCallbacks {
     // Resume advertising the slot the HOST currently has selected (advSlot) -- do NOT hijack the
     // single legacy advertiser to the dropped slot. (The old code re-pointed advertising to the
     // dropped slot, so a mini6 flap while we were advertising slot1 for mini5's pair switched the
-    // advertiser back to slot0 -- mini5 then never saw wsb-esp32-mini5.) On the classic ESP32 only
+    // advertiser back to slot0 -- mini5 then never saw HIDBRIDGE-esp32-mini5.) On the classic ESP32 only
     // ONE identity advertises at a time; the host picks it with I<n>, and a dropped bonded device
     // reconnects when the host next advertises ITS slot. BUT if the host PARKED us (X/O), stay
     // parked -- so a deliberately-released iPad is free to attach to ANOTHER board (deterministic
@@ -441,18 +441,27 @@ static void startAdvertisingSlot() {
   // adv->addServiceUUID()/setName() repeatedly -> service UUIDs ACCUMULATED across slot switches and
   // the name lived in a scan response that did not refresh, so a slot could advertise the WRONG
   // slot's name -- proven by btmon: slot1's address broadcast slot0's name. Building explicit adv
-  // data with clearData() each time fixes it.) Everything (flags+name+appearance+HID UUID = ~28B)
-  // fits in the 31-byte main packet, so no scan response is needed.
+  // data each time fixes it.)
+  //
+  // PACKET SPLIT: the CHANGING per-slot name stays in the MAIN packet (flags + name); the CONSTANT
+  // HID appearance + service UUID go in the SCAN RESPONSE. The name in the main packet is why the
+  // stale-name bug is gone (it is rebuilt every slot); putting only the constant bits in the scan
+  // response means there is nothing there to go stale, AND it frees room -- flags(3)+name fits a
+  // longer LocalName (e.g. HIDBRIDGE-esp32-mini6, 21 bytes) that would overflow the 31-byte AD if
+  // appearance+UUID also sat in the main packet. iOS actively scans, so it still gets the scan
+  // response (keyboard icon + HID UUID).
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->stop();
   adv->clearData();
-  adv->enableScanResponse(false);
   NimBLEAdvertisementData d;
   d.setFlags(0x06);                           // LE General Discoverable, BR/EDR not supported
-  d.setName(slotName[advSlot]);               // the ACTIVE slot's target-scoped name
-  d.setAppearance(0x03C1);                    // HID Keyboard
-  d.addServiceUUID(hid->getHidService()->getUUID());
+  d.setName(slotName[advSlot]);               // the ACTIVE slot's target-scoped name (main packet)
   adv->setAdvertisementData(d);
+  NimBLEAdvertisementData sr;                  // scan response: constant across slots
+  sr.setAppearance(0x03C1);                   // HID Keyboard (the iPad Bluetooth-list icon)
+  sr.addServiceUUID(hid->getHidService()->getUUID());
+  adv->setScanResponseData(sr);
+  adv->enableScanResponse(true);
   adv->start();
 }
 
@@ -522,7 +531,7 @@ void setup() {
   inputAbsMouse = hid->getInputReport(ABS_MOUSE_REPORT_ID);
   inputDigitizer = hid->getInputReport(DIGITIZER_REPORT_ID);
 
-  hid->setManufacturer("wsb");
+  hid->setManufacturer("hidbridge");
   hid->setPnp(0x02, 0x05AC, 0x820A, 0x0001);   // Apple vendor id, keyboard-ish product
   hid->setHidInfo(0x00, 0x01);                 // country 0, flags: remote-wake
   hid->setReportMap((uint8_t*)REPORT_MAP, sizeof(REPORT_MAP));
@@ -531,7 +540,7 @@ void setup() {
   server->start();                             // starts the HID + battery + devinfo services
   deriveSlotAddresses();                       // needs init() done (public address available)
   selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
-  Serial.println("OK wsb-hid-esp32 ready");
+  Serial.println("OK HIDBRIDGE-esp32 ready");
 
 #ifdef HIDBRIDGE_NET
   // AFTER BLE is up: bring Ethernet + the TCP line server up. Ethernet (EMAC) and the BLE radio are
@@ -678,7 +687,7 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     bool sub = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) && slotSub[tgtSlot];
     bool con = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) &&
                slotConn[tgtSlot] != BLE_HS_CONN_HANDLE_NONE;
-    out.print("OK wsb-hid-esp32 subscribed=");
+    out.print("OK HIDBRIDGE-esp32 subscribed=");
     out.print(sub ? "1" : "0");
     out.print(" conn=");
     out.println(con ? "1" : "0");
@@ -724,7 +733,7 @@ static void handleLine(String line, Print& out, NetSession* sess) {
   } else if (cmd == 'N') {
     printNetStatus(out);
   } else if (cmd == 'V') {
-    out.print("OK wsb-hid-esp32 ");
+    out.print("OK HIDBRIDGE-esp32 ");
     out.println(anyConnected() ? "connected" : "advertising");
   } else if (cmd == 'W') {
     // W<token> -- provision the network auth secret. SERIAL ONLY: accepting this over TCP would let

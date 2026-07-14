@@ -2,7 +2,7 @@
 
 This catches the class of bug found live on 2026-07-14: after mini6 connected on slot 0, selecting
 slot 1 for mini5's pairing switched the advertising ADDRESS to slot 1 but kept advertising slot 0's
-NAME (`wsb-esp32-mini6`) -- so mini5 never saw `wsb-esp32-mini5`. Root causes (both fixed): the auto
+NAME (`HIDBRIDGE-esp32-mini6`) -- so mini5 never saw `HIDBRIDGE-esp32-mini5`. Root causes (both fixed): the auto
 adv-build path accumulated service UUIDs + kept the name in a stale scan response, and `onDisconnect`
 re-pointed the single legacy advertiser to the dropped slot. The firmware now builds the adv payload
 explicitly (name in the main packet) and keeps the host-selected slot.
@@ -117,7 +117,7 @@ def esp32():
 
 @pytest.mark.parametrize("slot,ipad", [(0, "mini6"), (1, "mini5")])
 def test_slot_advertises_its_target_scoped_name(esp32, sniff_hci, slot, ipad):
-    """Selecting slot N must put slot N's address ON AIR advertising `wsb-esp32-<ipad>`."""
+    """Selecting slot N must put slot N's address ON AIR advertising `HIDBRIDGE-esp32-<ipad>`."""
     expected_name = N.slot_identity_name("esp32", ipad)
     sel = esp32.select_slot(slot, expected_name)
     assert sel["ok"] and sel["addr"], f"slot {slot} select failed: {sel}"

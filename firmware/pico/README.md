@@ -1,9 +1,9 @@
-# wsb-hid-pico -- Raspberry Pi Pico 2 W BLE HID firmware
+# HIDBRIDGE-pico -- Raspberry Pi Pico 2 W BLE HID firmware
 
 BLE HID firmware for a **Raspberry Pi Pico 2 W** (RP2350 + CYW43439), the low-cost **Pico backend**
 for `bt_hid`. It presents four HID reports -- **keyboard (ID 1)**, **relative mouse (ID 2)**,
 **absolute mouse (ID 3)**, and a **digitizer / touchscreen (ID 4)** -- advertises as
-**`wsb-hid-pico`**, and lets this Linux host wake / unlock / type / move / click / tap-at-exact-
+**`HIDBRIDGE-pico`**, and lets this Linux host wake / unlock / type / move / click / tap-at-exact-
 coordinates an iPad, iPhone, or Mac over Bluetooth LE -- an alternative to the USB Bluetooth dongle
 backend.
 
@@ -63,12 +63,12 @@ sudo cp .pio/build/rpipico2w/firmware.uf2 /mnt/rp2350/ ; sync
 ```
 
 The Pico flashes, reboots into the app, disconnects the drive, and comes up as a USB-CDC serial
-device (`/dev/ttyACM*`, by-id `usb-Raspberry_Pi_Pico_2W_*`) while BLE-advertising as `wsb-hid-pico`.
+device (`/dev/ttyACM*`, by-id `usb-Raspberry_Pi_Pico_2W_*`) while BLE-advertising as `HIDBRIDGE-pico`.
 
 Watch its log:
 
 ```
-pio device monitor -b 115200    # prints "READY name=wsb-hid-pico", EV lines, OK/ERR per report
+pio device monitor -b 115200    # prints "READY name=HIDBRIDGE-pico", EV lines, OK/ERR per report
 ```
 
 ## Serial command protocol (host <-> Pico)
@@ -83,7 +83,7 @@ keeps `python/src/hidbridge/reports.py` the single source of truth for the repor
 | `M <8 hex>`    | relative mouse, 4-byte body `buttons,dx,dy,wheel` -> ID 2                  |
 | `A <10 hex>`   | absolute mouse, 5-byte body `buttons,Xlo,Xhi,Ylo,Yhi` -> ID 3              |
 | `D <12 hex>`   | digitizer/touch, 6-byte body `flags,contactID,Xlo,Xhi,Ylo,Yhi` -> ID 4     |
-| `P`            | ping -> `PONG name=wsb-hid-pico conn=<0|1>`                                |
+| `P`            | ping -> `PONG name=HIDBRIDGE-pico conn=<0|1>`                                |
 
 Reply per line: `OK` on success, `ERR <reason>` (`notconnected` / `badframe` / `unknowncmd` /
 `toolong`). The firmware prepends only the report ID; the body bytes are exactly what
@@ -95,11 +95,11 @@ lines by hand -- use the `bt_hid` CLI (below).
 
 ## One-time pairing (the maintainer, physical -- on the iPad)
 
-While the Pico is powered it advertises `wsb-hid-pico` automatically (no daemon on the host). Pair
+While the Pico is powered it advertises `HIDBRIDGE-pico` automatically (no daemon on the host). Pair
 once:
 
 1. On the iPad/iPhone: **Settings > Bluetooth**.
-2. Under *Other Devices* tap **`wsb-hid-pico`**.
+2. Under *Other Devices* tap **`HIDBRIDGE-pico`**.
 3. Approve the pairing prompt (**Pair**).
 
 After that the bond is stored and the device reconnects on demand.

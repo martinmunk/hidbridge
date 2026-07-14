@@ -68,24 +68,31 @@ def agent_path(slug: str) -> str:
     return f"{DBUS_ROOT}/{_sanitize(slug)}/agent"
 
 
+# All advertised BLE LocalNames follow one scheme: `HIDBRIDGE-<board>[-<client>]`. The `HIDBRIDGE-`
+# prefix is a fixed brand token (uppercase); the board family + client label are lowercase, sanitised
+# tokens. See the firmware DEVICE_NAME/BASE_NAME defaults (`HIDBRIDGE-esp32`, `HIDBRIDGE-pico`) which
+# must stay consistent with these.
+BLE_NAME_PREFIX = "HIDBRIDGE"
+
+
 def slot_identity_name(board: str, target: str) -> str:
     """Advertised BLE name for a per-bond IDENTITY (host slot), scoped to its TARGET iPad.
 
     A board presents a DISTINCT identity per bonded iPad; each identity advertises a name that names
     the iPad it is FOR, so in an iPad's Bluetooth settings you can tell which entry is meant for it
-    (the plain `wsb-hid-esp32` only named the host). Convention: `wsb-<board>-<target>`, e.g.
-    `wsb-esp32-mini6`, `wsb-pico-mini5`. Both components are sanitised (BLE LocalName is free-form
-    but we keep it to a safe token). `board` is the backend family (esp32/pico); `target` is the
-    iPad's friendly bond name.
+    (the plain `HIDBRIDGE-esp32` only names the board). Convention: `HIDBRIDGE-<board>-<target>`, e.g.
+    `HIDBRIDGE-esp32-mini6`, `HIDBRIDGE-pico-mini5`. Both components are sanitised (BLE LocalName is
+    free-form but we keep it to a safe token). `board` is the backend family (esp32/pico); `target`
+    is the iPad's friendly bond name.
     """
-    return f"wsb-{_sanitize(board).lower()}-{_sanitize(target).lower()}"
+    return f"{BLE_NAME_PREFIX}-{_sanitize(board).lower()}-{_sanitize(target).lower()}"
 
 
 def default_name(slug: str) -> str:
-    """Default advertised BLE name for this adapter's daemon (distinct per adapter).
+    """Default advertised BLE name for the DONGLE backend's daemon (distinct per adapter).
 
-    Two daemons must not advertise the same LocalName (the iPad would show one ambiguous entry),
-    so the default embeds the slug: `wsb-hid-hci1`, `wsb-hid-hci2`, ... An operator can still pin
-    any name via --name / BT_HID_NAME.
+    Two daemons must not advertise the same LocalName (the iPad would show one ambiguous entry), so
+    the default embeds the adapter slug: `HIDBRIDGE-dongle-hci1`, `HIDBRIDGE-dongle-hci2`, ... An
+    operator can still pin any name via --name / BT_HID_NAME.
     """
-    return f"wsb-hid-{_sanitize(slug)}"
+    return f"{BLE_NAME_PREFIX}-dongle-{_sanitize(slug)}"

@@ -28,7 +28,7 @@ from .controller import make_transport
 
 
 def _pong_connected(reply: str) -> bool:
-    """Parse a Pico 'PONG name=wsb-hid-pico conn=<0|1>' reply for the link state."""
+    """Parse a Pico 'PONG name=HIDBRIDGE-pico conn=<0|1>' reply for the link state."""
     return "conn=1" in (reply or "")
 
 
@@ -125,7 +125,7 @@ class PicoLinkBackend(LinkBackend):
     def select_identity(self, slot: int, name: str | None = None) -> dict:
         """Select/create host slot `slot` as the advertising identity + (re)advertise (`I<n>`).
 
-        Optional `name` sets that slot's target-scoped advertised BLE name (e.g. `wsb-pico-mini5`)."""
+        Optional `name` sets that slot's target-scoped advertised BLE name (e.g. `HIDBRIDGE-pico-mini5`)."""
         return self._tp.select_slot(slot, name)
 
     def target_identity(self, slot: int) -> dict:

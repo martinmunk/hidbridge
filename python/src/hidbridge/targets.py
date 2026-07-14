@@ -39,8 +39,8 @@ from . import naming as _naming
 # Sane project defaults seeded when no config file exists yet. The two iPads we actually drive:
 # mini6 (iPadOS-26, paints) and mini5 (iPadOS 18.7 / 26.5.2). These reflect the LIVE wsb rig (verified
 # 2026-07-13 by an esp32/pico probe + the on-disk BlueZ bonds; see docs/testbed/inventory.yaml):
-# mini6's PRIMARY board is the ESP32 (wsb-hid-esp32) on the CP2102 bridge /dev/ttyUSB1, and mini5's
-# PRIMARY board is the Raspberry Pi Pico 2 W (wsb-hid-pico) on /dev/ttyACM0. Both are MCU backends, so
+# mini6's PRIMARY board is the ESP32 (HIDBRIDGE-esp32) on the CP2102 bridge /dev/ttyUSB1, and mini5's
+# PRIMARY board is the Raspberry Pi Pico 2 W (HIDBRIDGE-pico) on /dev/ttyACM0. Both are MCU backends, so
 # they never trip the shared-MAC dongle warning and can be driven at the same time.
 #
 # MULTI-BOARD ROUTES (2026-07-14, task: both boards bonded to mini5 + per-board mini5<->mini6 switch):
@@ -70,9 +70,9 @@ from . import naming as _naming
 # but its wrapper is single-connection, so it switches slots time-sliced (see the resolver methods).
 DEFAULT_ENTRIES: dict[str, dict] = {
     "mini6": {"target": "esp32:/dev/ttyUSB1", "bond": "mini6", "slot": 0,
-              "note": "iPad mini 6 (iPadOS 26); ESP32 wsb-hid-esp32 /dev/ttyUSB1 slot 0 (native id)"},
+              "note": "iPad mini 6 (iPadOS 26); ESP32 HIDBRIDGE-esp32 /dev/ttyUSB1 slot 0 (native id)"},
     "mini5": {"target": "pico:/dev/ttyACM0", "bond": "mini5", "slot": 0,
-              "note": "iPad mini 5 (iPadOS 26.5.2); Pico 2 W wsb-hid-pico /dev/ttyACM0 slot 0 (native id)"},
+              "note": "iPad mini 5 (iPadOS 26.5.2); Pico 2 W HIDBRIDGE-pico /dev/ttyACM0 slot 0 (native id)"},
     "mini5-esp32": {"target": "esp32:/dev/ttyUSB1", "bond": "mini5", "slot": 1,
                     "note": "mini5 on the ESP32 slot 1 (static-random id) -> ESP32 holds mini5+mini6 at once"},
     "mini6-pico": {"target": "pico:/dev/ttyACM0", "bond": "mini6", "slot": 1,

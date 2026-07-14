@@ -57,7 +57,7 @@ protects them at the link level, and `encrypt-notify` was blocking the iOS subsc
 Run `bt_hid preflight` first: it audits every adapter and WARNS on the same-BD-address trap (the two
 TP-Link UB500 dongles share `E8:48:B8:C8:20:00` -- a UB500 V1 defect that corrupts BlueZ routing; run
 only one at a time). Each `ble_hid` daemon is now PER-ADAPTER (own control socket + D-Bus objects +
-`wsb-hid-<hciN>` name), so `bt-hid@hci1` and `bt-hid@hci2` run side by side to two iPads. Target a
+`HIDBRIDGE-dongle-<hciN>` name), so `bt-hid@hci1` and `bt-hid@hci2` run side by side to two iPads. Target a
 dongle by `hciN` / MAC / USB-path / product. Connect-on-demand for one dongle + several iPads:
 
 ```python
@@ -85,9 +85,9 @@ The report layer (`reports.py`) is the single source of truth for the HID bytes;
 
 | `--backend` | hardware | how it presents | advertises as |
 |-------------|----------|-----------------|---------------|
-| `dongle` (default) | a USB Bluetooth dongle + this host's BlueZ | `ble_hid` daemon (HOG) | `wsb-hid-<hciN>` |
-| `esp32`     | any **ESP32** dev board (~$5) on USB | ESP32 NimBLE HOG firmware, driven over USB serial | `wsb-hid-esp32` |
-| `pico`      | a **Raspberry Pi Pico 2 W** (~$6) on USB | Pico BTstack HOG firmware, driven over USB serial | `wsb-hid-pico` |
+| `dongle` (default) | a USB Bluetooth dongle + this host's BlueZ | `ble_hid` daemon (HOG) | `HIDBRIDGE-dongle-<hciN>` |
+| `esp32`     | any **ESP32** dev board (~$5) on USB | ESP32 NimBLE HOG firmware, driven over USB serial | `HIDBRIDGE-esp32` |
+| `pico`      | a **Raspberry Pi Pico 2 W** (~$6) on USB | Pico BTstack HOG firmware, driven over USB serial | `HIDBRIDGE-pico` |
 
 The Pico's BTstack HID-over-GATT stack is iOS-compatible out of the box (it handles the
 CCCD / Report-Reference subscription the BlueZ path can get stuck on) and needs no dbus/daemon.
@@ -150,7 +150,7 @@ Set `BT_HID_ESP32_PORT=/dev/ttyUSB1` to omit `--port` (the port is also auto-det
 `/dev/ttyUSB*` / `/dev/ttyACM*`, preferring a CP210x/CH340 bridge).
 
 **One-time pairing (physical -- the maintainer taps once):** with the board powered (advertising as
-`wsb-hid-esp32`), on the iPad/iPhone open **Settings > Bluetooth**, tap **`wsb-hid-esp32`** under
+`HIDBRIDGE-esp32`), on the iPad/iPhone open **Settings > Bluetooth**, tap **`HIDBRIDGE-esp32`** under
 *Other Devices*, and tap **Pair** (Just Works -- nothing to type). After that it reconnects on its
 own and `type/key/move/click` register.
 
@@ -224,11 +224,11 @@ The unit installs to `/etc/systemd/system/bt-hid@<NAME>.service` and runs
 
 ## Pairing (the maintainer does this ONCE per device -- physical)
 
-1. Make sure the daemon is running (see above); the dongle advertises as **`wsb-hid-kbd`**.
+1. Make sure the daemon is running (see above); the dongle advertises as **`HIDBRIDGE-dongle`**.
 2. On the **iPad/iPhone**: **Settings > Bluetooth**.
-   - If `wsb-hid-kbd` already appears under *My Devices*, tap the (i) and **Forget This Device**
+   - If `HIDBRIDGE-dongle` already appears under *My Devices*, tap the (i) and **Forget This Device**
      first (clears any stale/unauthenticated bond).
-   - Under *Other Devices* tap **`wsb-hid-kbd`**.
+   - Under *Other Devices* tap **`HIDBRIDGE-dongle`**.
    - A pairing dialog appears (LE Secure Connections; iOS may show a 6-digit code). **Tap "Pair".**
      Our agent auto-confirms on this side -- there is nothing to type.
    - It moves to *My Devices / Connected* and STAYS (the auto-trust watcher keeps the bond).
@@ -315,8 +315,8 @@ bond survives a reflash); **slots >=1 = derived static-random addresses**. Each 
 **target-scoped name** so you can tell which entry is for which iPad in the iPad's Bluetooth settings:
 
 ```
-wsb-esp32-mini6   ESP32 slot 0  (mini6)     wsb-pico-mini5   Pico slot 0 (mini5, native/preserved)
-wsb-esp32-mini5   ESP32 slot 1  (mini5)     wsb-pico-mini6   Pico slot 1 (mini6)
+HIDBRIDGE-esp32-mini6   ESP32 slot 0  (mini6)     HIDBRIDGE-pico-mini5   Pico slot 0 (mini5, native/preserved)
+HIDBRIDGE-esp32-mini5   ESP32 slot 1  (mini5)     HIDBRIDGE-pico-mini6   Pico slot 1 (mini6)
 ```
 
 The name is derived from `(board, target)` by `naming.slot_identity_name()` / `TargetEntry.identity_name()`.
@@ -339,7 +339,7 @@ RELEASE an iPad from one board and PARK that board so the iPad deterministically
 
 **Pairing per (board, iPad).** To bond a NEW iPad on slot n, the host selects that slot (`I<n>:name`)
 so the board advertises that identity, then on the iPad open **Settings > Bluetooth**, tap the
-slot's name (e.g. `wsb-esp32-mini5`) under *Other Devices*, and tap **Pair** ("Par" on a Danish iPad).
+slot's name (e.g. `HIDBRIDGE-esp32-mini5`) under *Other Devices*, and tap **Pair** ("Par" on a Danish iPad).
 A just-restarted iPad will not auto-reconnect a bonded BLE-HID board until its FIRST unlock (BFU).
 
 **Re-pair after flashing the per-bond-identity firmware.** Changing identities invalidates bonds
@@ -514,13 +514,13 @@ workflow -- legitimate. Safeguards:
 - `transport_esp32.py` -- the **ESP32 backend**: streams report frames to an ESP32 over USB serial
   (lazy pyserial; pure `encode_frame` is offline-tested). Selected by `--backend esp32`.
 - `firmware/esp32/` -- the ESP32 NimBLE HOG firmware as a **PlatformIO** project (`platformio.ini`
-  + `src/main.cpp`), plus `build_flash.sh`. Advertises as `wsb-hid-esp32`.
+  + `src/main.cpp`), plus `build_flash.sh`. Advertises as `HIDBRIDGE-esp32`.
 - `transport_pico.py` -- the **Pico backend** transport: ships reports over USB serial to a Pico 2 W
   running `firmware/pico/`. Pure framing helpers + Pico-vendor-gated port autodetect; pyserial is
   imported lazily so the framing + tests run offline
   (`python/tests/test_bt_hid_transport_pico.py`). Selected by `--backend pico`.
 - `firmware/pico/` -- the Pico 2 W BLE HID firmware (PlatformIO / arduino-pico, advertises
-  `wsb-hid-pico`). See `firmware/pico/README.md`.
+  `HIDBRIDGE-pico`). See `firmware/pico/README.md`.
 - `cli.py` / `bt_hid` -- the CLI (system python: needs `dbus` for the dongle path; the serial
   backends `--backend esp32` / `--backend pico` need only `pyserial`).
 - `pair-mode.sh` -- one-command foreground discoverable bring-up.

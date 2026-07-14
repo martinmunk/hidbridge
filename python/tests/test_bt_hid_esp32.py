@@ -157,7 +157,7 @@ def test_transport_skips_async_evt_lines():
 
 
 def test_ping_parses_connection_state():
-    fake = FakeSerial(replies=[b"OK wsb-hid-esp32 conn=1\n"])
+    fake = FakeSerial(replies=[b"OK HIDBRIDGE-esp32 conn=1\n"])
     tp = TE.Esp32Transport(port=fake)
     resp = tp.ping()
     assert resp["ok"] and resp["connected"] is True

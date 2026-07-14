@@ -7,8 +7,8 @@ way out of the box, so it enables the input reports where BlueZ fights us. This 
 first-class, low-cost, interchangeable HID BACKEND: a contributor who has a Pico instead of a USB
 Bluetooth dongle can still wake / unlock / type / click an iPad-iPhone-Mac.
 
-The Pico runs the firmware in `firmware/pico/` (BTstack HOG, advertising as `wsb-hid-pico` -- a
-distinct name so it does NOT collide with the dongle's `wsb-hid-kbd`). This host ships each HID
+The Pico runs the firmware in `firmware/pico/` (BTstack HOG, advertising as `HIDBRIDGE-pico` -- a
+distinct name so it does NOT collide with the dongle's `HIDBRIDGE-dongle`). This host ships each HID
 report as ONE ASCII line over the Pico's USB-CDC serial; the Pico adds only the reportID and emits
 it as a BLE HID notification. `reports.py` stays the SINGLE SOURCE OF TRUTH for the report BYTES --
 we send the exact 8-byte keyboard / 4-byte mouse body it builds; the Pico never re-derives them.
@@ -18,7 +18,7 @@ Line protocol (ASCII, one report per line, `\n`-terminated), host -> Pico:
     M <8 hex>    relative mouse      (4-byte body: buttons,dx,dy,wheel)           -> report ID 2
     A <10 hex>   absolute mouse      (5-byte body: buttons,Xlo,Xhi,Ylo,Yhi)       -> report ID 3
     D <12 hex>   digitizer/touch     (6-byte body: flags,contactID,Xlo,Xhi,Ylo,Yhi) -> report ID 4
-    P            ping           -> Pico replies e.g. `PONG name=wsb-hid-pico conn=1`
+    P            ping           -> Pico replies e.g. `PONG name=HIDBRIDGE-pico conn=1`
 Pico -> host reply, one line per command: `OK` on success, `ERR <reason>` on failure.
 
 `pyserial` is imported LAZILY (only when actually opening a port), so the pure framing helpers +
@@ -38,7 +38,7 @@ _KIND_PREFIX = {"keyboard": "K", "mouse": "M", "abs_mouse": "A", "digitizer": "D
 _KIND_BODYLEN = {"keyboard": 8, "mouse": 4, "abs_mouse": 5, "digitizer": 6}
 _PREFIX_KIND = {v: k for k, v in _KIND_PREFIX.items()}
 
-PICO_ADVERT_NAME = "wsb-hid-pico"
+PICO_ADVERT_NAME = "HIDBRIDGE-pico"
 DEFAULT_BAUD = 115200
 
 
@@ -300,7 +300,7 @@ class PicoSerialTransport:
     def select_slot(self, slot: int, name: str | None = None) -> dict:
         """Select host slot `slot` as the advertising identity + (re)advertise (`I<n>`).
 
-        Optional `name` sets that slot's target-scoped advertised BLE name (e.g. `wsb-pico-mini5`)."""
+        Optional `name` sets that slot's target-scoped advertised BLE name (e.g. `HIDBRIDGE-pico-mini5`)."""
         return parse_slot_reply(self._cmd(encode_slot_select(slot, name)))
 
     def target_slot(self, slot: int) -> dict:

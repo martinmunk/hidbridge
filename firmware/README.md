@@ -6,8 +6,8 @@ supported; pick whichever you have.
 
 | Board | Dir | BLE stack | Env / toolchain | Advertises as |
 |-------|-----|-----------|-----------------|---------------|
-| **Raspberry Pi Pico 2 W** (RP2350 + CYW43439) | [`pico/`](pico/) | BTstack HOG (earlephilhower arduino-pico core) | PlatformIO `rpipico2w` | `wsb-hid-pico` |
-| **ESP32** (classic / S3 / C3) | [`esp32/`](esp32/) | NimBLE-Arduino 2.x (esp32 core 3.x) | PlatformIO `esp32dev` (+ variants) | `wsb-hid-esp32` |
+| **Raspberry Pi Pico 2 W** (RP2350 + CYW43439) | [`pico/`](pico/) | BTstack HOG (earlephilhower arduino-pico core) | PlatformIO `rpipico2w` | `HIDBRIDGE-pico` |
+| **ESP32** (classic / S3 / C3) | [`esp32/`](esp32/) | NimBLE-Arduino 2.x (esp32 core 3.x) | PlatformIO `esp32dev` (+ variants) | `HIDBRIDGE-esp32` |
 
 Both implement the **same HID report map** -- keyboard (report ID 1), relative mouse (ID 2),
 **absolute mouse (ID 3)**, and **digitizer/touch (ID 4)** -- installed **byte-for-byte from the host's

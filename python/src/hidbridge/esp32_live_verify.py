@@ -15,7 +15,7 @@ GATED ones (does iOS honour absolute HID); pass --skip-abs to run only the prove
 Usage:
     hidbridge/esp32_live_verify.py [--port /dev/ttyUSB1] [--cam /dev/video5]
                                       [--text ESP32HIDOK] [--out captures/esp32_verify_<ts>]
-Prereq: the iPad is already PAIRED to wsb-hid-esp32 (one-time physical tap). Needs pyserial + ffmpeg.
+Prereq: the iPad is already PAIRED to HIDBRIDGE-esp32 (one-time physical tap). Needs pyserial + ffmpeg.
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def main(argv=None) -> int:
     ser.open()
     try:
         print(f"opened {args.port}; waiting for boot banner ...")
-        _drain(ser, 4, "wsb-hid-esp32", log)
+        _drain(ser, 4, "HIDBRIDGE-esp32", log)
         print(f"waiting up to {args.wait:.0f}s for the iPad to auto-reconnect (EVT connected) ...")
         connected = _drain(ser, args.wait, "EVT connected", log)
         ser.write(b"P\n"); ser.flush(); time.sleep(0.3); _drain(ser, 2, None, log)

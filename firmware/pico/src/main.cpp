@@ -1,5 +1,5 @@
 /*
- * wsb-hid-pico -- BLE HID for a Raspberry Pi Pico 2 W: keyboard(1) + relative mouse(2)
+ * HIDBRIDGE-pico -- BLE HID for a Raspberry Pi Pico 2 W: keyboard(1) + relative mouse(2)
  *                 + absolute mouse(3) + digitizer/touchscreen(4).
  *
  * Part of the hidbridge toolbox: the PICO BACKEND. A ~USD 6 alternative to a USB Bluetooth
@@ -8,7 +8,7 @@
  * is the whole point: the Linux BlueZ/dongle path gets stuck on iOS not subscribing to the HID
  * input reports (a CCCD / Report-Reference GATT quirk); the Pico's HOG stack does it right.
  *
- * The device advertises as "wsb-hid-pico" (distinct from the dongle's "wsb-hid-kbd"). The host
+ * The device advertises as "HIDBRIDGE-pico" (distinct from the dongle's "HIDBRIDGE-dongle"). The host
  * (wsb) drives it over USB-CDC serial with a tiny ASCII line protocol -- ONE HID report per line --
  * so python/src/hidbridge/reports.py stays the SINGLE SOURCE OF TRUTH for the report bytes:
  *
@@ -16,7 +16,7 @@
  *     M <8 hex>\n    relative mouse      (4-byte body: buttons,dx,dy,wheel)          -> report ID 2
  *     A <10 hex>\n   absolute mouse      (5-byte body: buttons,Xlo,Xhi,Ylo,Yhi)      -> report ID 3
  *     D <12 hex>\n   digitizer/touch     (6-byte body: flags,contactID,Xlo,Xhi,Ylo,Yhi) -> ID 4
- *     P\n            ping  -> replies "PONG name=wsb-hid-pico conn=<0|1>"
+ *     P\n            ping  -> replies "PONG name=HIDBRIDGE-pico conn=<0|1>"
  *     I<n>[:name]\n  select host SLOT n as the advertising identity (+ optional name) + advertise
  *                    -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
  *     T<n>\n         set the send-target slot -> "OK tgt=<n>"
@@ -28,7 +28,7 @@
  * PER-BOND IDENTITY (host slots -- docs/bt-hid-mcu-approach.md): the board presents a DISTINCT BLE
  * identity/address PER bonded iPad. Slot 0 = the CYW43439 NATIVE public address, so an EXISTING bond
  * survives a reflash; slots >=1 = deterministic STATIC-RANDOM addresses set via BTstack
- * gap_random_address_set(). Each slot advertises a TARGET-scoped name (wsb-pico-<ipad>) so an iPad's
+ * gap_random_address_set(). Each slot advertises a TARGET-scoped name (HIDBRIDGE-pico-<ipad>) so an iPad's
  * Bluetooth settings show which entry is meant for it (host sets it with I<n>:name). NOTE: the
  * arduino-pico PicoBluetoothBLEHID wrapper tracks a SINGLE connection handle (_con_handle), so the
  * Pico switches identities SEQUENTIALLY (deterministic time-sliced slot selection: select a slot ->
@@ -114,7 +114,7 @@ static const uint8_t RID_DIGITIZER = 4;
 #define NUM_SLOTS 2
 #endif
 
-static const char *BASE_NAME = "wsb-hid-pico";
+static const char *BASE_NAME = "HIDBRIDGE-pico";
 static bd_addr_t slot_addr[NUM_SLOTS];        // BTstack bd_addr_t: big-endian (addr[0] = MSB)
 static char      slot_name[NUM_SLOTS][24];
 static bool      slot_addr_ready = false;     // slot addresses derived (needs HCI up)
@@ -123,10 +123,12 @@ static int       tgt_slot = 0;                // send-target slot (single-conn w
 static int       conn_slot = -1;              // slot whose central is connected (-1 = none)
 static hci_con_handle_t pico_con_handle = HCI_CON_HANDLE_INVALID;  // for X (disconnect)
 
-// Build the LE advertising payload with a given LocalName (mirrors PicoBluetoothBLEHID::_buildAdvData
-// so we can re-advertise a per-slot NAME). Flags + complete local name + HID service UUID +
-// appearance. Returns the byte count written into out[] (<=31).
-static uint8_t build_adv_data(const char *name, uint16_t appearance, uint8_t *out) {
+// Build the MAIN LE advertising payload for a given per-slot LocalName: flags + complete local name.
+// The CONSTANT HID service UUID + appearance moved to the SCAN RESPONSE (build_scan_response_data)
+// so this main packet is just flags(3) + name(2+N) -- leaving room for a longer LocalName (e.g.
+// HIDBRIDGE-pico-mini5) that would overflow the 31-byte AD if the UUID+appearance also sat here.
+// Returns the byte count written into out[] (<=31).
+static uint8_t build_adv_data(const char *name, uint8_t *out) {
     int i = 0;
     out[i++] = 0x02;
     out[i++] = BLUETOOTH_DATA_TYPE_FLAGS;
@@ -136,6 +138,14 @@ static uint8_t build_adv_data(const char *name, uint16_t appearance, uint8_t *ou
     out[i++] = BLUETOOTH_DATA_TYPE_COMPLETE_LOCAL_NAME;
     memcpy(out + i, name, nlen);
     i += nlen;
+    return (uint8_t)i;
+}
+
+// Build the SCAN RESPONSE: HID service UUID + appearance (constant across slots, so nothing here goes
+// stale on a slot switch). A host that actively scans (iOS does) requests this and gets the keyboard
+// icon + HID recognition.
+static uint8_t build_scan_response_data(uint16_t appearance, uint8_t *out) {
+    int i = 0;
     out[i++] = 0x03;
     out[i++] = BLUETOOTH_DATA_TYPE_COMPLETE_LIST_OF_16_BIT_SERVICE_CLASS_UUIDS;
     out[i++] = ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE & 0xff;
@@ -148,6 +158,7 @@ static uint8_t build_adv_data(const char *name, uint16_t appearance, uint8_t *ou
 }
 
 static uint8_t slot_adv_buf[31];
+static uint8_t slot_scan_rsp_buf[31];
 
 // Derive the slot address table once HCI is up: slot 0 = native public address; slots >=1 = the
 // public address with the two MSBits of the MSB forced to 0b11 (BT "static random" signature) and
@@ -180,12 +191,14 @@ static void select_slot_advertise(int n, const char *name) {
         gap_random_address_set_mode(GAP_RANDOM_ADDRESS_TYPE_STATIC);
         gap_random_address_set(slot_addr[n]);                         // distinct static-random id
     }
-    uint8_t n_adv = build_adv_data(slot_name[n], __BLEGetAppearance(), slot_adv_buf);
+    uint8_t n_adv = build_adv_data(slot_name[n], slot_adv_buf);
+    uint8_t n_sr  = build_scan_response_data(__BLEGetAppearance(), slot_scan_rsp_buf);
     uint16_t itv = 0x0030;
     bd_addr_t null_addr;
     memset(null_addr, 0, 6);
-    gap_advertisements_set_params(itv, itv, 0, 0, null_addr, 0x07, 0x00);
+    gap_advertisements_set_params(itv, itv, 0, 0, null_addr, 0x07, 0x00);   // ADV_IND: scannable
     gap_advertisements_set_data(n_adv, slot_adv_buf);
+    gap_scan_response_set_data(n_sr, slot_scan_rsp_buf);                     // constant across slots
     adv_slot = n;
     gap_advertisements_enable(1);
 }
@@ -237,7 +250,7 @@ static void handle_line(char *line) {
 
     char kind = line[0];
     if (kind == 'P' || kind == 'p') {
-        Serial.print("PONG name=wsb-hid-pico conn=");
+        Serial.print("PONG name=HIDBRIDGE-pico conn=");
         Serial.println(PicoBluetoothBLEHID.connected() ? 1 : 0);
         return;
     }
@@ -339,7 +352,7 @@ static void handle_line(char *line) {
 void setup() {
     Serial.begin(115200);
     // Per-slot default names (until the host sets a target-scoped one via I<n>:name). Slot 0 keeps
-    // the legacy "wsb-hid-pico" so an EXISTING bond still sees a familiar name; slots >=1 = -sN.
+    // the legacy "HIDBRIDGE-pico" so an EXISTING bond still sees a familiar name; slots >=1 = -sN.
     for (int i = 0; i < NUM_SLOTS; i++) {
         if (i == 0) snprintf(slot_name[i], sizeof(slot_name[i]), "%s", BASE_NAME);
         else        snprintf(slot_name[i], sizeof(slot_name[i]), "%s-s%d", BASE_NAME, i);
@@ -357,11 +370,11 @@ void setup() {
     });
 
     // Install OUR report map (keyboard 1 + rel mouse 2 + abs mouse 3 + digitizer 4) directly, so
-    // the report IDs + layouts are byte-identical to reports.py. Advertise as slot 0 = "wsb-hid-pico".
+    // the report IDs + layouts are byte-identical to reports.py. Advertise as slot 0 = "HIDBRIDGE-pico".
     // __BLEGetAppearance() == 0x03C0 (generic HID) with both keyboard + mouse force-linked.
     PicoBluetoothBLEHID.startHID(slot_name[0], BASE_NAME, __BLEGetAppearance(),
                                  HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
-    Serial.println("READY name=wsb-hid-pico");
+    Serial.println("READY name=HIDBRIDGE-pico");
 }
 
 void loop() {

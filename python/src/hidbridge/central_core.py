@@ -517,7 +517,7 @@ BACKEND_PROFILES: dict[str, BackendProfile] = {
     # abs-pointer (id 3) + digitizer (id 4) reports exist only once the abs firmware is flashed;
     # the harness discovers whichever report ids the live Report Map actually declares.
     "esp32": BackendProfile(
-        name="esp32", advert_name="wsb-hid-esp32", report_id_remap={},
+        name="esp32", advert_name="HIDBRIDGE-esp32", report_id_remap={},
         byte_exact_map=False, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
         map_subset=False, driver="serial_esp32"),
     # SAME ESP32 board + firmware as "esp32" (same advertised name, same byte-for-byte report map),
@@ -525,20 +525,20 @@ BACKEND_PROFILES: dict[str, BackendProfile] = {
     # the host adapter is the BLE central, a frame is injected over the LAN (NetTransport), and the
     # exact bytes must arrive as a GATT notification -- so the whole net -> board -> BLE path is real.
     "net": BackendProfile(
-        name="net", advert_name="wsb-hid-esp32", report_id_remap={},
+        name="net", advert_name="HIDBRIDGE-esp32", report_id_remap={},
         byte_exact_map=False, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
         map_subset=False, driver="net"),
     # arduino-pico builds its OWN combined keyboard(id 1)+mouse(id 3) descriptor (NOT reports.py's)
     # and its TinyUSB relative mouse body is 5 bytes = reports.py's 4 + pan=0. So: parse+load-bearing
     # compare (not byte-exact), mouse id remapped 2->3, and tolerate the trailing pan byte.
     "pico": BackendProfile(
-        name="pico", advert_name="wsb-hid-pico", report_id_remap={_ID_MOUSE: 3},
+        name="pico", advert_name="HIDBRIDGE-pico", report_id_remap={_ID_MOUSE: 3},
         byte_exact_map=False, mouse_report_id=3, mouse_pad_zero=True,
         map_subset=True, driver="serial_pico"),
     # The dongle path drives our own ble_hid daemon (reports.py descriptor byte-for-byte, kbd 1 +
     # mouse 2). Attempted same-host (hci0 central -> hci1 peripheral); BlueZ may refuse it.
     "dongle": BackendProfile(
-        name="dongle", advert_name="wsb-hid-kbd", report_id_remap={},
+        name="dongle", advert_name="HIDBRIDGE-dongle", report_id_remap={},
         byte_exact_map=True, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
         map_subset=False, driver="daemon"),
 }

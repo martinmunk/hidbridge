@@ -1,7 +1,7 @@
 # bt_hid BLE-central self-test -- status + live blocker (2026-07-10)
 
-Branch: `bt-hid-selftest-central`. Goal: validate the MCU BT-HID peripherals (Pico `wsb-hid-pico`,
-ESP32 `wsb-hid-esp32`) END TO END with NO iPad, using the wsb BUILT-IN Bluetooth adapter (hci0) as a
+Branch: `bt-hid-selftest-central`. Goal: validate the MCU BT-HID peripherals (Pico `HIDBRIDGE-pico`,
+ESP32 `HIDBRIDGE-esp32`) END TO END with NO iPad, using the wsb BUILT-IN Bluetooth adapter (hci0) as a
 transient BLE CENTRAL -- connect, byte-verify the HID Report Map (0x2A4B) + Report References
 (0x2908) against `python/src/hidbridge/reports.py` (the single source of truth), and for each driveable
 report kind inject a known frame over the MCU serial and assert the exact bytes arrive back as a GATT
@@ -101,8 +101,8 @@ sudo /usr/bin/python3 python/src/hidbridge/central.py --backend esp32 --connect-
 sudo /usr/bin/python3 python/src/hidbridge/central.py --backend esp32 --central hci1 --json   # dongle-as-central
 ```
 
-Verified BEFORE the connect wall: hci0 discovers `wsb-hid-esp32` by name; the ESP32 abs firmware
-boots ("OK wsb-hid-esp32 ready"). The report-map / report-ref / notification VERIFY steps could not
+Verified BEFORE the connect wall: hci0 discovers `HIDBRIDGE-esp32` by name; the ESP32 abs firmware
+boots ("OK HIDBRIDGE-esp32 ready"). The report-map / report-ref / notification VERIFY steps could not
 run because the connection never completes.
 
 ## Update 2026-07-14 -- `net` backend added + a full PASS captured (UB500 central)
@@ -143,7 +143,7 @@ Dug into the apparent "link drops right after StartNotify" with btmon + a pairin
 earlier characterisation was largely WRONG; the real causes:
 
 1. **TWO boards advertise the same name (dominant cause).** Both ESP32s on the bench advertise
-   `wsb-hid-esp32` -- the CP2102 board (`AA:BB:CC:DD:EE:04`) and the Ethernet board
+   `HIDBRIDGE-esp32` -- the CP2102 board (`AA:BB:CC:DD:EE:04`) and the Ethernet board
    (`AA:BB:CC:DD:EE:03`). The self-test matched the scan by NAME, so on ~half the attempts the host
    central connected + subscribed to the WRONG board, while the `net` inject always went over TCP to
    the Ethernet board -> that board had no central -> `OK noconn`, the verdict failed, and the test's

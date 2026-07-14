@@ -29,7 +29,7 @@ def test_app_and_agent_paths_distinct_and_nested():
 
 
 def test_default_name_distinct_per_slug():
-    assert N.default_name("hci1") == "wsb-hid-hci1"
+    assert N.default_name("hci1") == "HIDBRIDGE-dongle-hci1"
     assert N.default_name("hci1") != N.default_name("hci2")
 
 

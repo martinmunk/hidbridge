@@ -260,38 +260,38 @@ def test_resolved_target_exposes_slot_and_simultaneous_capability():
 # 5b. per-slot BLE name names the TARGET iPad (so you can tell which identity is for which iPad)
 # --------------------------------------------------------------------------- #
 def test_naming_slot_identity_name():
-    assert N.slot_identity_name("esp32", "mini6") == "wsb-esp32-mini6"
-    assert N.slot_identity_name("esp32", "mini5") == "wsb-esp32-mini5"
-    assert N.slot_identity_name("pico", "mini5") == "wsb-pico-mini5"
-    assert N.slot_identity_name("pico", "mini6") == "wsb-pico-mini6"
+    assert N.slot_identity_name("esp32", "mini6") == "HIDBRIDGE-esp32-mini6"
+    assert N.slot_identity_name("esp32", "mini5") == "HIDBRIDGE-esp32-mini5"
+    assert N.slot_identity_name("pico", "mini5") == "HIDBRIDGE-pico-mini5"
+    assert N.slot_identity_name("pico", "mini6") == "HIDBRIDGE-pico-mini6"
 
 
 def test_registry_entry_identity_name_is_target_scoped():
     reg = T.TargetRegistry.load(path="/nonexistent-seed-defaults")
-    assert reg.get("mini6").identity_name() == "wsb-esp32-mini6"
-    assert reg.get("mini5-esp32").identity_name() == "wsb-esp32-mini5"
-    assert reg.get("mini5").identity_name() == "wsb-pico-mini5"
-    assert reg.resolve("mini5-esp32").identity_name == "wsb-esp32-mini5"
+    assert reg.get("mini6").identity_name() == "HIDBRIDGE-esp32-mini6"
+    assert reg.get("mini5-esp32").identity_name() == "HIDBRIDGE-esp32-mini5"
+    assert reg.get("mini5").identity_name() == "HIDBRIDGE-pico-mini5"
+    assert reg.resolve("mini5-esp32").identity_name == "HIDBRIDGE-esp32-mini5"
 
 
 def test_encode_slot_select_with_name_sets_advertised_name():
-    assert TE.encode_slot_select(1, "wsb-esp32-mini5") == b"I1:wsb-esp32-mini5\n"
-    assert TP.encode_slot_select(1, "wsb-pico-mini6") == b"I1:wsb-pico-mini6\n"
+    assert TE.encode_slot_select(1, "HIDBRIDGE-esp32-mini5") == b"I1:HIDBRIDGE-esp32-mini5\n"
+    assert TP.encode_slot_select(1, "HIDBRIDGE-pico-mini6") == b"I1:HIDBRIDGE-pico-mini6\n"
     # no name -> bare form (backward compatible)
     assert TE.encode_slot_select(0) == b"I0\n"
 
 
 def test_parse_slot_reply_includes_name():
-    got = TE.parse_slot_reply("OK slot=1 addr=c2a1b2c3d4e5 name=wsb-esp32-mini5 conn=1")
-    assert got["name"] == "wsb-esp32-mini5" and got["slot"] == 1
+    got = TE.parse_slot_reply("OK slot=1 addr=c2a1b2c3d4e5 name=HIDBRIDGE-esp32-mini5 conn=1")
+    assert got["name"] == "HIDBRIDGE-esp32-mini5" and got["slot"] == 1
 
 
 def test_select_slot_transport_passes_name():
-    fake = FakeSerial(replies=[b"OK slot=1 addr=c2a1b2c3d4e5 name=wsb-esp32-mini5 conn=0\n"])
+    fake = FakeSerial(replies=[b"OK slot=1 addr=c2a1b2c3d4e5 name=HIDBRIDGE-esp32-mini5 conn=0\n"])
     tp = TE.Esp32Transport(port=fake)
-    got = tp.select_slot(1, "wsb-esp32-mini5")
-    assert fake.written == [b"I1:wsb-esp32-mini5\n"]
-    assert got["name"] == "wsb-esp32-mini5"
+    got = tp.select_slot(1, "HIDBRIDGE-esp32-mini5")
+    assert fake.written == [b"I1:HIDBRIDGE-esp32-mini5\n"]
+    assert got["name"] == "HIDBRIDGE-esp32-mini5"
 
 
 @pytest.mark.parametrize("rel", [

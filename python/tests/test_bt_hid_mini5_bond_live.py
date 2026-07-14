@@ -1,6 +1,6 @@
 """HARDWARE-GATED live test: BOTH MCU boards bonded to mini5 + per-board mini5<->mini6 switching.
 
-Task (2026-07-14): the Pico (wsb-hid-pico, /dev/ttyACM0) AND the ESP32 (wsb-hid-esp32, /dev/ttyUSB1)
+Task (2026-07-14): the Pico (HIDBRIDGE-pico, /dev/ttyACM0) AND the ESP32 (HIDBRIDGE-esp32, /dev/ttyUSB1)
 must each be BONDED to iPad mini5 and able to DRIVE it, and each board must switch its target between
 mini5 and mini6 WITHOUT re-pairing. The registry (bt_hid.targets) expresses this with board-qualified
 routes: mini5 on the Pico = `mini5`, mini5 on the ESP32 = `mini5-esp32`; mini6 on the ESP32 = `mini6`,

@@ -65,11 +65,11 @@ consecutive-frame diff). Absolute coordinates are ignored by iPadOS (memory
 
 ## mini5 (Pico) wake blocker -- BT HID cannot even START (2026-07-14)
 
-Trying the matrix on mini5 (Pico `wsb-hid-pico` on `/dev/ttyACM0`, Danish alert) hit a
+Trying the matrix on mini5 (Pico `HIDBRIDGE-pico` on `/dev/ttyACM0`, Danish alert) hit a
 peripheral-role wall BEFORE any key could be sent: **mini5's screen was OFF (auto-locked) and it
 would not (re)connect to the bonded Pico.** A BLE-HID device is the PERIPHERAL; the iPad (central)
 initiates the link, so a sleeping/locked iPad that has torn down the link cannot be woken from the
-peripheral side. Evidence: the Pico firmware was alive + advertising (`PONG name=wsb-hid-pico
+peripheral side. Evidence: the Pico firmware was alive + advertising (`PONG name=HIDBRIDGE-pico
 conn=0`) the whole time, and polling `conn=` for 95s showed no reconnect; the current Pico firmware
 exposes only send + ping (no directed-advertise / wake command). mini6 drove fine only because it
 was already awake showing its prompt. So over BT HID, mini5 is unreachable while asleep -- the
@@ -98,8 +98,8 @@ Confirming/repairing trust is left to the USB/`idevicepair` route (reserved for 
 ## Rig facts reconciled here
 
 `bt_hid.targets` DEFAULT_ENTRIES were stale (both iPads pointed at dongle `hciN`). Reconciled to the
-LIVE wsb rig (probed 2026-07-13): **mini6 = ESP32 `wsb-hid-esp32` on `/dev/ttyUSB1`** (CP2102),
-**mini5 = Pico 2 W `wsb-hid-pico` on `/dev/ttyACM0`**. Both are per-device-identity MCU backends
+LIVE wsb rig (probed 2026-07-13): **mini6 = ESP32 `HIDBRIDGE-esp32` on `/dev/ttyUSB1`** (CP2102),
+**mini5 = Pico 2 W `HIDBRIDGE-pico` on `/dev/ttyACM0`**. Both are per-device-identity MCU backends
 (no shared-MAC dongle warning; drivable simultaneously). The dongle `hci1` still holds a stale
 "iPad" bond (AA:BB:CC:DD:EE:01); the live HID links are the MCUs. See `docs/testbed/inventory.yaml`.
 

@@ -43,14 +43,14 @@ def _esp32(lines):
 # ESP32 ping now surfaces conn + subscribed (order-independent, backward compatible)
 # --------------------------------------------------------------------------- #
 def test_esp32_ping_parses_subscribed_and_conn():
-    t = _esp32([b"OK wsb-hid-esp32 subscribed=1 conn=1\n"])
+    t = _esp32([b"OK HIDBRIDGE-esp32 subscribed=1 conn=1\n"])
     st = t.ping()
     assert st["connected"] is True
     assert st["subscribed"] is True
 
 
 def test_esp32_ping_subscribed_zero():
-    t = _esp32([b"OK wsb-hid-esp32 subscribed=0 conn=1\n"])
+    t = _esp32([b"OK HIDBRIDGE-esp32 subscribed=0 conn=1\n"])
     st = t.ping()
     assert st["connected"] is True
     assert st["subscribed"] is False
@@ -58,7 +58,7 @@ def test_esp32_ping_subscribed_zero():
 
 def test_esp32_ping_old_firmware_has_no_subscribed_field():
     # An OLD firmware that only reports conn= must still parse (subscribed -> None = unknown).
-    t = _esp32([b"OK wsb-hid-esp32 conn=1\n"])
+    t = _esp32([b"OK HIDBRIDGE-esp32 conn=1\n"])
     st = t.ping()
     assert st["connected"] is True
     assert st["subscribed"] is None
@@ -66,14 +66,14 @@ def test_esp32_ping_old_firmware_has_no_subscribed_field():
 
 def test_esp32_is_ready_and_wait_ready():
     # not subscribed on the first poll, subscribed on the second
-    t = _esp32([b"OK wsb-hid-esp32 subscribed=0 conn=1\n",
-                b"OK wsb-hid-esp32 subscribed=1 conn=1\n"])
+    t = _esp32([b"OK HIDBRIDGE-esp32 subscribed=0 conn=1\n",
+                b"OK HIDBRIDGE-esp32 subscribed=1 conn=1\n"])
     assert t.wait_ready(timeout=5.0, poll=0.0) is True
 
 
 def test_esp32_old_firmware_ping_still_ends_with_conn1():
     # regression: the NEW reply orders subscribed BEFORE conn so a legacy endswith("conn=1") holds
-    reply = "OK wsb-hid-esp32 subscribed=1 conn=1"
+    reply = "OK HIDBRIDGE-esp32 subscribed=1 conn=1"
     assert reply.rstrip().endswith("conn=1")
 
 
@@ -88,9 +88,9 @@ class FakeReadyTp:
     def ping(self):
         s = "" if self._sub is None else f"subscribed={int(self._sub)} "
         if self._pico:
-            return {"ok": True, "reply": f"PONG name=wsb-hid-pico {s}conn=1"}
+            return {"ok": True, "reply": f"PONG name=HIDBRIDGE-pico {s}conn=1"}
         return {"ok": True, "subscribed": self._sub, "connected": True,
-                "resp": f"OK wsb-hid-esp32 {s}conn=1"}
+                "resp": f"OK HIDBRIDGE-esp32 {s}conn=1"}
 
     def is_ready(self):
         return self._sub is True

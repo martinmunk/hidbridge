@@ -19,7 +19,7 @@ Root cause (verified): the Linux tty layer ASSERTS DTR+RTS when it activates a p
 wired to EN (reset) and DTR to GPIO0 (boot), so that assert pulses EN and reboots the chip.
 pyserial's documented `dtr=False; rts=False` before `open()` does NOT help -- the kernel raise
 happens INSIDE `os.open()`, before pyserial can clear the lines. (Live proof: the ESP32 ROM boot
-log + `wsb-hid-esp32 ready` banner reprints on every such open of /dev/ttyUSB1.)
+log + `HIDBRIDGE-esp32 ready` banner reprints on every such open of /dev/ttyUSB1.)
 
 ## The no-reset open (task 1) -- `python/src/hidbridge/serial_link.py`
 
@@ -103,7 +103,7 @@ identity** (its efuse/OTP public address) so an EXISTING bond survives a reflash
 >=1 = deterministic STATIC-RANDOM addresses** derived from the public address (two MSBits of the
 MSB forced to `0b11` = the BT static-random signature, slot index XORed into the LSB, so each slot
 differs from public + from every other slot). Each slot advertises a TARGET-scoped BLE name
-(`wsb-<board>-<ipad>`, e.g. `wsb-esp32-mini5`) so an iPad's Bluetooth settings show which entry is
+(`wsb-<board>-<ipad>`, e.g. `HIDBRIDGE-esp32-mini5`) so an iPad's Bluetooth settings show which entry is
 meant for it (`python/src/hidbridge/naming.py:slot_identity_name`).
 
 Serial protocol (both boards -- `transport_esp32.py` / `transport_pico.py`, offline-tested):
@@ -142,11 +142,11 @@ Flashing this firmware CHANGES what identity each iPad sees, so bonds may need r
 - **ESP32:** slot 0 keeps the board's public address, so a bond made on the OLD single-identity
   firmware to the public address would in principle survive as slot 0. In practice the ESP32 had no
   usable mini5 bond (mini6 won the single slot in ~400ms), so the flash step RE-PAIRS both: mini6 on
-  slot 0 (`wsb-esp32-mini6`) and mini5 on slot 1 (`wsb-esp32-mini5`, a static-random address = a
+  slot 0 (`HIDBRIDGE-esp32-mini6`) and mini5 on slot 1 (`HIDBRIDGE-esp32-mini5`, a static-random address = a
   NEW device to iOS, so a fresh pair).
 - **Pico:** slot 0 keeps the CYW43439 public address, so the mini5 bond made NOW on the current
-  `wsb-hid-pico` firmware is PRESERVED as slot 0 -- no Pico re-pair required. A second iPad on Pico
-  slot 1 (`wsb-pico-mini6`) is a fresh pair when/if wanted.
+  `HIDBRIDGE-pico` firmware is PRESERVED as slot 0 -- no Pico re-pair required. A second iPad on Pico
+  slot 1 (`HIDBRIDGE-pico-mini6`) is a fresh pair when/if wanted.
 
 The live acceptance test is `python/tests/test_bt_hid_dual_identity_live.py` (`BT_HID_LIVE_DUAL=1`):
 it brings slot 0 up (mini6 connects), slot 1 up (mini5 connects WITHOUT dropping slot 0), asserts
@@ -198,7 +198,7 @@ bonds/slots).
   the SAME PlatformIO env `esp32dev` and the SAME `src/main.cpp` build + run unchanged. No
   board-specific change was needed. (If a future Ethernet-Kit unit is WROVER-based, add an
   `esp32-wrover-kit` env; our firmware does not use PSRAM so it is env-agnostic in practice.)
-- Verified: our firmware boots, advertises as `wsb-hid-esp32`, and answers the full serial protocol
+- Verified: our firmware boots, advertises as `HIDBRIDGE-esp32`, and answers the full serial protocol
   (`P`/`V`/`A`/`K`/`M`/abs/`D`/`X`) on the Ethernet-Kit. iPad-gated keystroke-lands test is pending
   a pairing (coordinate via 'main'); note both boards advertise the SAME name, so pair only one at a
   time until the per-device-identity firmware lands.
@@ -248,7 +248,7 @@ The REAL readiness signal per backend:
 
 - **ESP32 (NimBLE):** a `NimBLECharacteristicCallbacks::onSubscribe` on the KEYBOARD input report
   tracks when iOS writes its CCCD; the firmware exposes it as a new `subscribed=<0|1>` field in the
-  `P` ping reply (`OK wsb-hid-esp32 subscribed=<0|1> conn=<0|1>`) and an async `EVT ready` /
+  `P` ping reply (`OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>`) and an async `EVT ready` /
   `EVT unsubscribed`. `transport_esp32.wait_ready()` polls it; `link_esp32` reports
   `readiness_supported=True`. BACKWARD COMPATIBLE: the GATT / report map is UNCHANGED (existing iOS
   bonds survive a reflash -- only a serial field + a CCCD callback were added), and `subscribed=` is

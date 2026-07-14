@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build + flash the wsb-hid-esp32 firmware with PlatformIO.
+# Build + flash the HIDBRIDGE-esp32 firmware with PlatformIO.
 #
 # One-time toolchain (idempotent -- this script installs what is missing):
 #   - PlatformIO Core (`pio`), installed to ~/.local/bin via `uv tool install platformio`
@@ -40,7 +40,7 @@ if [ -n "$PORT" ]; then
   [ -n "$CHIP" ] && echo "[esp32] port $PORT reports chip '$CHIP' (building env $PIO_ENV)"
   echo "[esp32] building + flashing env=$PIO_ENV to $PORT ..."
   pio run -e "$PIO_ENV" -t upload --upload-port "$PORT"
-  echo "[esp32] done. The board now advertises as 'wsb-hid-esp32'."
+  echo "[esp32] done. The board now advertises as 'HIDBRIDGE-esp32'."
   echo "        Watch it: pio device monitor -b 115200 -p $PORT"
 else
   echo "[esp32] building env=$PIO_ENV (no flash; pass a serial port to flash) ..."

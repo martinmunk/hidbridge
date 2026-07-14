@@ -11,7 +11,7 @@ open can kill the link, which is exactly the "iPad stayed conn=0 after our port-
 
 pyserial's documented `dtr=False; rts=False` BEFORE `open()` does NOT prevent this: the kernel
 raise happens INSIDE `os.open()`, before pyserial gets a chance to clear the lines. (Verified live
-on the wsb CP2102 at /dev/ttyUSB1, 2026-07-10: the ESP32 ROM boot log + "wsb-hid-esp32 ready"
+on the wsb CP2102 at /dev/ttyUSB1, 2026-07-10: the ESP32 ROM boot log + "HIDBRIDGE-esp32 ready"
 banner reprints on every such open.)
 
 THE FIX (verified: 3 consecutive opens, no boot banner, iPad conn stayed 1)

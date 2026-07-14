@@ -46,9 +46,9 @@ class FakeMcuTransport:
         sub = f"subscribed={int(self._subscribed)} "
         if self._pico:
             return {"ok": True,
-                    "reply": f"PONG name=wsb-hid-pico {sub}conn={int(self._connected)}"}
+                    "reply": f"PONG name=HIDBRIDGE-pico {sub}conn={int(self._connected)}"}
         return {"ok": True, "connected": self._connected, "subscribed": self._subscribed,
-                "resp": f"OK wsb-hid-esp32 {sub}conn={int(self._connected)}"}
+                "resp": f"OK HIDBRIDGE-esp32 {sub}conn={int(self._connected)}"}
 
     def is_ready(self):
         return bool(self._subscribed and self._connected)
@@ -122,6 +122,6 @@ def test_pico_hidsession_lifecycle(monkeypatch):
 
 
 def test_pico_connected_parse():
-    assert link_pico._pong_connected("PONG name=wsb-hid-pico conn=1") is True
-    assert link_pico._pong_connected("PONG name=wsb-hid-pico conn=0") is False
+    assert link_pico._pong_connected("PONG name=HIDBRIDGE-pico conn=1") is True
+    assert link_pico._pong_connected("PONG name=HIDBRIDGE-pico conn=0") is False
     assert link_pico._pong_connected("") is False

@@ -223,8 +223,8 @@ def cmd_pair_mode(args):
     if _ALT_TRANSPORT is not None:
         # Alternative backends (e.g. ESP32) self-advertise from firmware; just kick advertising and
         # print the one-time pairing steps. There is no host daemon. The firmware advertises as
-        # wsb-hid-<backend> (e.g. wsb-hid-esp32), a distinct name from the dongle's wsb-hid-kbd.
-        name = f"wsb-hid-{_BACKEND}"
+        # HIDBRIDGE-<backend> (e.g. HIDBRIDGE-esp32), a distinct name from the dongle's HIDBRIDGE-dongle.
+        name = f"HIDBRIDGE-{_BACKEND}"
         if hasattr(_ALT_TRANSPORT, "advertise"):
             resp = _ALT_TRANSPORT.advertise()
             print(f"advertising: {resp.get('resp') or resp}")
@@ -235,7 +235,7 @@ def cmd_pair_mode(args):
         return
     # Delegate to the daemon (foreground). It sets the dongle discoverable + advertising.
     # Only forward --name if the operator pinned one; otherwise the daemon derives the per-adapter
-    # default (wsb-hid-<hciN>) so two daemons never share a name.
+    # default (HIDBRIDGE-dongle-<hciN>) so two daemons never share a name.
     from hidbridge import ble_hid
     ble_hid.main((["--name", args.name] if args.name else [])
                  + (["--adapter", args.adapter] if args.adapter else [])
@@ -579,7 +579,7 @@ def build_parser():
 
     sp = sub.add_parser("pair-mode", help="dongle discoverable + advertising as a keyboard")
     sp.add_argument("--name", default=os.environ.get("BT_HID_NAME"),
-                    help="advertised name (default: wsb-hid-<hciN>, per-adapter)")
+                    help="advertised name (default: HIDBRIDGE-dongle-<hciN>, per-adapter)")
     sp.add_argument("--force-builtin", action="store_true")
     sp.set_defaults(func=cmd_pair_mode)
 

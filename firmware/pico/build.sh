@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the wsb-hid-pico firmware (Raspberry Pi Pico 2 W BLE HID) with PlatformIO.
+# Build the HIDBRIDGE-pico firmware (Raspberry Pi Pico 2 W BLE HID) with PlatformIO.
 #
 # Compiles src/main.cpp for board rpipico2w (arduino-pico core + BTstack HOG) and leaves the
 # flashable image at .pio/build/rpipico2w/firmware.uf2. This is OFFLINE-safe: it only compiles;
@@ -25,6 +25,6 @@ if ! command -v "$PIO" >/dev/null 2>&1; then
     fi
 fi
 
-echo "Building wsb-hid-pico firmware (board rpipico2w) via $PIO ..."
+echo "Building HIDBRIDGE-pico firmware (board rpipico2w) via $PIO ..."
 "$PIO" run "$@"
 echo "OK -> $HERE/.pio/build/rpipico2w/firmware.uf2"

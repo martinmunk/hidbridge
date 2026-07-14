@@ -5,7 +5,7 @@
 #
 # Multi-adapter: set BT_HID_ADAPTER=hciN to pin a specific dongle (default: auto-detect the sole
 # dongle -- errors if ambiguous; run `tools/bt_hid/bt_hid preflight`). The advertised name defaults
-# to wsb-hid-<hciN> (per-adapter) unless BT_HID_NAME is set.
+# to HIDBRIDGE-dongle-<hciN> (per-adapter) unless BT_HID_NAME is set.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --adapter is a PARENT (pre-subcommand) option; --name/--force-builtin are pair-mode options.

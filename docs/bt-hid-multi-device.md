@@ -54,7 +54,7 @@ What is per-adapter now (all derived from the adapter slug = `hciN`, see `python
 | control socket      | `/run/bt_hid.sock`             | `/run/bt_hid/hci1.sock`, `hci2.sock`... |
 | D-Bus app path      | `/org/martinmunk/bthid`        | `/org/martinmunk/bthid/hci1`, `/hci2`   |
 | D-Bus agent path    | `/org/martinmunk/bthid/agent`  | `/org/martinmunk/bthid/hci1/agent`      |
-| advertised name     | `wsb-hid-kbd`                  | `wsb-hid-hci1`, `wsb-hid-hci2` (default)|
+| advertised name     | `HIDBRIDGE-dongle`                  | `HIDBRIDGE-dongle-hci1`, `HIDBRIDGE-dongle-hci2` (default)|
 
 Why `hciN` is the slug, not the BD address: the two UB500s SHARE a BD address, so the address is not
 unique; the kernel still assigns each physical dongle a DISTINCT `hciN`. Runtime artifacts live in
@@ -101,20 +101,20 @@ dongles each have their own MAC). Keep at most ONE UB500 of a duplicate pair pow
 python/src/hidbridge/bt_hid preflight
 
 # a persistent daemon per adapter (instance = the hciN):
-sudo python/src/hidbridge/service.sh install hci2      # daemon on hci2, advertises wsb-hid-hci2
-sudo python/src/hidbridge/service.sh install hci3      # daemon on hci3, advertises wsb-hid-hci3
+sudo python/src/hidbridge/service.sh install hci2      # daemon on hci2, advertises HIDBRIDGE-dongle-hci2
+sudo python/src/hidbridge/service.sh install hci3      # daemon on hci3, advertises HIDBRIDGE-dongle-hci3
 # or a throwaway foreground daemon:
 BT_HID_ADAPTER=hci2 python/src/hidbridge/pair-mode.sh
 ```
 
 Each daemon binds its own `/run/bt_hid/hciN.sock`, exports `/org/martinmunk/bthid/hciN`, and
-advertises `wsb-hid-hciN` -- so they never collide. Verified live: an `hci2` daemon ran alongside
+advertises `HIDBRIDGE-dongle-hciN` -- so they never collide. Verified live: an `hci2` daemon ran alongside
 the existing `hci1` daemon with no D-Bus/socket conflict.
 
 ### 4.2 Pairing (one iPad per dongle)
 
 Bring up the daemon for the dongle, then on that iPad open Settings > Bluetooth and tap
-`wsb-hid-hciN`. `bt_hid --adapter hciN devices` lists what is bonded on that dongle. Because the
+`HIDBRIDGE-dongle-hciN`. `bt_hid --adapter hciN devices` lists what is bonded on that dongle. Because the
 CLI now resolves the PER-ADAPTER socket from `--adapter`, `bt_hid --adapter hci2 type ...` reaches
 the hci2 daemon, not a global one.
 

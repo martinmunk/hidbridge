@@ -16,9 +16,9 @@ backends; only the pairing name + the physical board differ.
 
 | backend | hardware | advertises as | notes |
 |---------|----------|---------------|-------|
-| `dongle` | USB Bluetooth dongle + this host's BlueZ | `wsb-hid-<hciN>` (default `wsb-hid-kbd`) | most integrated; the BlueZ HOG path needed the CCCD / Report-Reference fixes (see README) |
-| `esp32` | any ESP32 dev board on USB serial | `wsb-hid-esp32` | most iOS-robust HOG stack (NimBLE); used for the reboot recipe |
-| `pico`  | Raspberry Pi Pico 2 W on USB serial | `wsb-hid-pico` | BTstack HOG; renumbers the mouse to reportID 3 + pads a pan byte (handled transparently) |
+| `dongle` | USB Bluetooth dongle + this host's BlueZ | `HIDBRIDGE-dongle-<hciN>` (default `HIDBRIDGE-dongle`) | most integrated; the BlueZ HOG path needed the CCCD / Report-Reference fixes (see README) |
+| `esp32` | any ESP32 dev board on USB serial | `HIDBRIDGE-esp32` | most iOS-robust HOG stack (NimBLE); used for the reboot recipe |
+| `pico`  | Raspberry Pi Pico 2 W on USB serial | `HIDBRIDGE-pico` | BTstack HOG; renumbers the mouse to reportID 3 + pads a pan byte (handled transparently) |
 
 All three are driven from Linux the same way (CLI or `HidSession`); see section 4.
 
@@ -29,24 +29,24 @@ All three are driven from Linux the same way (CLI or `HidSession`); see section 
 Pairing is Just Works / LE Secure Connections; nothing to type on the iPad. Do it ONCE per
 (device, backend); the bond persists and the device auto-reconnects afterwards.
 
-### dongle (`wsb-hid-kbd`)
+### dongle (`HIDBRIDGE-dongle`)
 1. Start the daemon so the dongle advertises: `sudo python/src/hidbridge/service.sh install` (or a throwaway
-   `sudo python/src/hidbridge/pair-mode.sh`). It advertises as `wsb-hid-kbd`.
-2. On the iPad: **Settings > Bluetooth**. If `wsb-hid-kbd` already shows under *My Devices*, tap the
+   `sudo python/src/hidbridge/pair-mode.sh`). It advertises as `HIDBRIDGE-dongle`.
+2. On the iPad: **Settings > Bluetooth**. If `HIDBRIDGE-dongle` already shows under *My Devices*, tap the
    (i) and **Forget This Device** first (clears any stale/unauthenticated bond).
-3. Under *Other Devices* tap **`wsb-hid-kbd`**, then **Pair**. Our agent auto-confirms; it moves to
+3. Under *Other Devices* tap **`HIDBRIDGE-dongle`**, then **Pair**. Our agent auto-confirms; it moves to
    *My Devices / Connected* and stays (the dongle-scoped auto-trust watcher keeps the bond).
 
-### ESP32 (`wsb-hid-esp32`)
+### ESP32 (`HIDBRIDGE-esp32`)
 1. Power the board (it advertises from firmware immediately). Verify: `bt_hid --backend esp32 --port
    /dev/ttyUSB1 status`. NEVER point `--port` at `/dev/ttyUSB0` (that is the CH340 KVM adapter -- the
    ESP32 backend hard-excludes USB vendor `1a86` and prefers the CP2102 `10c4`).
-2. On the iPad: **Settings > Bluetooth > Other Devices > `wsb-hid-esp32` > Pair**.
+2. On the iPad: **Settings > Bluetooth > Other Devices > `HIDBRIDGE-esp32` > Pair**.
 
-### Pico (`wsb-hid-pico`)
+### Pico (`HIDBRIDGE-pico`)
 1. Power the Pico 2 W (advertises from firmware). Verify: `bt_hid --backend pico status` (autodetect
    is Pico-vendor-gated to USB `2e8a`; pin with `--pico-port /dev/ttyACMx` / `BT_HID_PICO_PORT`).
-2. On the iPad: **Settings > Bluetooth > Other Devices > `wsb-hid-pico` > Pair**.
+2. On the iPad: **Settings > Bluetooth > Other Devices > `HIDBRIDGE-pico` > Pair**.
 
 > **Quirk -- one active central at a time.** A BLE HID peripheral serves ONE central. The ESP32 /
 > Pico bond only ONE iPad at a time on their firmware; the dongle stores an independent bond per

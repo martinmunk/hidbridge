@@ -141,7 +141,7 @@ def _board_ble_address(transport) -> str | None:
     """The BLE address the target board advertises, as 'AA:BB:CC:DD:EE:FF', or None.
 
     CRUCIAL when more than one board runs the same firmware: they all advertise the SAME LocalName
-    (`wsb-hid-esp32`), so matching the scan by NAME can connect the central to a DIFFERENT board than
+    (`HIDBRIDGE-esp32`), so matching the scan by NAME can connect the central to a DIFFERENT board than
     the one the transport drives -- the central then subscribes to board A while the injected frame
     goes to board B, so board B has no central to notify (`OK noconn`) and the test spuriously fails.
     Pinning the central to the DRIVEN board's address removes that ambiguity. Uses the MCU's slot-0
@@ -193,7 +193,7 @@ def transport_connected(transport, profile) -> bool | None:
     except Exception:  # noqa: BLE001
         return None
     if profile.driver == "serial_pico":
-        # PONG name=wsb-hid-pico conn=<0|1>
+        # PONG name=HIDBRIDGE-pico conn=<0|1>
         return res.get("reply", "").rstrip().endswith("conn=1")
     if profile.driver in ("serial_esp32", "net"):
         return bool(res.get("connected"))

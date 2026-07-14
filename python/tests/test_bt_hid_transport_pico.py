@@ -152,10 +152,10 @@ def test_send_without_ack_does_not_read():
 
 
 def test_ping_returns_pong_line():
-    t, fake = _transport(replies=[b"PONG name=wsb-hid-pico conn=1\n"])
+    t, fake = _transport(replies=[b"PONG name=HIDBRIDGE-pico conn=1\n"])
     resp = t.ping()
     assert resp["ok"] is True
-    assert resp["reply"] == "PONG name=wsb-hid-pico conn=1"
+    assert resp["reply"] == "PONG name=HIDBRIDGE-pico conn=1"
     assert fake.written == b"P\n"
 
 
