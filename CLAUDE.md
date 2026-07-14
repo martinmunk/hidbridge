@@ -1,0 +1,129 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`hidbridge` drives a BLE-HID target (iPad / iPhone / any HOG host) from Linux: type text, press keys,
+move/click the pointer, tap at absolute screen coordinates, enter a lock-screen passcode. Two halves
+in one repo because they share a strict contract (the HID report descriptor + the serial wire
+protocol): `python/` (the package + CLI) and `firmware/` (Pico 2 W / ESP32 PlatformIO firmware).
+
+`hidbridge` is a **placeholder name pending a rename**. The code predates it: modules, env vars
+(`BT_HID_*`), config paths (`~/.config/bt_hid/`), and docstrings still say `bt_hid`. That mismatch is
+expected -- don't "fix" it piecemeal.
+
+## Commands
+
+Python (from `python/`). A venv already exists at `python/.venv`, built with
+`include-system-site-packages = true` so the dongle backend's apt-installed `dbus`/`gi` remain
+visible; run the tools through it:
+
+```bash
+.venv/bin/python -m pytest -q    # offline suite (260 pass, ~21 skip with no hardware attached)
+.venv/bin/python -m pytest tests/test_bt_hid_reports.py::test_name -x     # a single test
+.venv/bin/python -m ruff check .
+uv build                         # wheel + sdist. NOT `python -m build`: this host has no
+                                 # ensurepip/python3-venv, so the build backend can't bootstrap.
+
+pip install -e ".[dev,mcu]"      # dev tooling + the serial (Pico/ESP32) backend
+pip install -e ".[dongle]"       # BlueZ backend; see the system-python caveat below
+```
+
+Firmware (needs PlatformIO Core; from `firmware/pico/` or `firmware/esp32/`):
+
+```bash
+pio run                          # compile
+pio run -t upload                # compile + flash (port auto-detected)
+pio device monitor -b 115200
+```
+
+There is no CI yet.
+
+## Test gating
+
+The suite is offline by default and must stay that way: `pytest` on a box with no hardware runs
+clean. Tests needing real hardware gate on an env var and skip otherwise -- `BT_HID_LOOPBACK=1` (two
+adapters + root), `BT_HID_CENTRAL=1` (built-in adapter + an MCU), `BT_HID_HW_ESP32=1`, and the
+`*_live.py` files (`BT_HID_LIVE_*`, need a real bonded iPad). `BT_HID_PICO_PORT` / `BT_HID_ESP32_PORT`
+point at the boards. New tests for pure logic must not reach for hardware; new hardware tests must
+follow the skip convention.
+
+## Architecture
+
+Layers, top to bottom -- each is injectable at the layer below, which is why the whole
+connect/act/disconnect lifecycle unit-tests with no hardware:
+
+- **`reports.py`** -- pure stdlib, zero bluetooth deps. `REPORT_DESCRIPTOR` plus the byte builders for
+  keyboard (ID 1), relative mouse (ID 2), absolute mouse (ID 3), digitizer/touch (ID 4). The single
+  source of truth for every byte on the wire. Keep it import-clean (no socket/dbus/gi) -- it must
+  import under both uv's CPython and the system python.
+- **`controller.py`** -- `HidController` turns actions into `(kind, body)` frames and hands them to a
+  pluggable transport. `RecordingTransport` asserts exact frames in tests.
+- **`conn.py`** -- `HidSession`, the backend-agnostic connect-on-demand context manager: enter =
+  connect that target, exit = disconnect but keep the bond. Backends declare traits via
+  `capabilities` (e.g. `per_device_identity`).
+- **`cli.py`** -- thin wrapper over the two above.
+
+Backends are duck-typed and discovered by module name, so **adding one means dropping in a file, not
+editing a registry**: `transport_<name>.py` exposes `make_transport(**opts)` (report path);
+`link_<name>.py` implements the `LinkBackend` lifecycle (connect/disconnect path). The two shipped
+families:
+
+- **dongle** -- the host's own BlueZ stack. The `ble_hid.py` daemon exports the HID-over-GATT
+  peripheral and the CLI talks to it over a per-adapter Unix socket; device management is BlueZ D-Bus
+  scoped to `/org/bluez/hciN`. Needs the **system python** (`dbus` + PyGObject + `AF_BLUETOOTH` only
+  exist there) and usually root. A venv sees them only if built with `--system-site-packages`.
+- **mcu** (`pico`, `esp32`) -- the board runs its own BLE stack and owns its bond database, reached
+  over USB serial. Needs only pyserial: no dbus, no daemon, no root. This path exists because BlueZ
+  loses the fight with iOS over HID input-report CCCD / Report-Reference subscription; BTstack and
+  NimBLE serve HOG the iOS-compatible way.
+- **net** -- an Ethernet-equipped ESP32 (`esp32-ethernet-kit` firmware, `-DHIDBRIDGE_NET`) serving the
+  same line protocol over TCP 3333 + mDNS. `transport_net`/`link_net` are thin subclasses of the
+  esp32 transport/link -- the wire changes (a `socket_link.SocketLine` instead of a tty), the protocol
+  and command layer are inherited verbatim. Token-authenticated, fail-closed (see below).
+
+Both backends emit identical report bytes, so behaviour is transport-independent.
+
+## Invariants that will bite you
+
+- **Firmware/host report-map parity.** The firmware installs `REPORT_DESCRIPTOR` byte-for-byte;
+  `python/tests/test_bt_hid_esp32.py` parses `firmware/esp32/src/main.cpp` and fails on drift. Never
+  edit the report map on one side alone.
+- **The reset-free serial open in `serial_link.py` is load-bearing, not clever code.** It leaves the
+  tty at baud B0 on close so the kernel skips `tty_port_raise_dtr_rts()` on the next open -- otherwise
+  RTS pulses EN, the ESP32 reboots, and its bonded BLE link to the iPad dies. pyserial's documented
+  `dtr=False; rts=False` does *not* prevent this (the kernel raise happens inside `os.open`). Any
+  refactor of the open path must preserve this.
+- **Readiness gate before the first keystroke.** iOS has an activation window where reports are
+  dropped. Wait for `EVT ready` / `subscribed=1` (MCU) or the daemon's `status` subscription reply
+  (dongle) -- that's what `HidSession` does.
+- **The passcode is a secret with a hard rule.** Read at run time from `~/.config/bt_hid/idevice.pin`
+  (0600, outside the repo), expanded to HID frames locally, never logged, never in a repr, never sent
+  as text. `reports.passcode_reports()` keeps no copy. The **network auth token**
+  (`~/.config/bt_hid/net.token`, 0600, git-ignored) follows the same rule -- never logged/repr'd, and
+  provisioned onto the board over USB only (the firmware refuses `W<token>` over TCP).
+- **The `net` TCP path is remote input-injection and must stay fail-closed.** No token provisioned =>
+  `@` auth can never succeed => the board can't be driven over the LAN. Report bytes (incl. passcode
+  frames) cross the LAN in the clear -- it's a trusted-network interface, not a confidential one. All
+  firmware network code is behind `#ifdef HIDBRIDGE_NET`; the `esp32dev` serial build is unaffected.
+- **Per-adapter naming isn't cosmetic.** `naming.py` derives the socket path, D-Bus object paths, and
+  advertised name from the `hciN` slug so multiple daemons coexist. Keying on the BD address would
+  break: the TP-Link UB500 dongles here *share* one, non-reprogrammable.
+- **A BlueZ dongle has one BLE identity for all its bonds**, so it can't be steered to "the right
+  iPad" by identity and holds one at a time; `targets.py::resolve()` warns on that collision. MCU
+  boards get per-bond identities ("host slots", `I<n>`/`T<n>`) -- the ESP32 can hold two iPads
+  connected at once.
+
+## Conventions
+
+The ruff ruleset in `pyproject.toml` is deliberately scoped: pyflakes correctness is enforced, but
+the dense one-liner report/bit-parser style (`E701`, `E702`, `import a,b,c`) is house style and
+tolerated. Don't reformat it. Module docstrings here carry the *why* -- the hardware quirk, the
+verdict, the date it was verified live. Match that when you add one.
+
+## Further reading
+
+`docs/` holds the deep dives (MCU approach and host slots, multi-device routing, absolute pointer,
+trust-overlay dismissal, integration notes). The serial wire protocol (`K`/`M`/`A`/`D` frames,
+`P`/`X`/`O`/`I`/`T`/`S` commands, `EVT` events) is tabulated in `firmware/README.md`.
