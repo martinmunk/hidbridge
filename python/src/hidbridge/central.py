@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import dbus
 import dbus.mainloop.glib
@@ -134,6 +135,29 @@ def make_transport(profile):
             return None, f"ble_hid daemon socket {CONTROL_SOCK} absent"
         return SocketTransport(), None
     return None, f"unknown driver {profile.driver!r}"
+
+
+def _free_board(transport) -> None:
+    """Between retries: drop any orphaned central our failed attempt left on the board, and
+    re-advertise so it is connectable again. Best-effort + backend-agnostic (guarded by hasattr):
+    the MCU transports expose disconnect()/select_slot()/advertise(); the daemon backend exposes
+    none, so this is a no-op there. A short settle lets advertising resume before the next attempt.
+    """
+    disc = getattr(transport, "disconnect", None)
+    if disc:
+        try:
+            disc()                       # firmware 'X': drop the target slot's central (keep bond)
+        except Exception:  # noqa: BLE001
+            pass
+    for meth, a in (("select_slot", (0,)), ("advertise", ())):
+        fn = getattr(transport, meth, None)
+        if fn:
+            try:
+                fn(*a)                   # re-advertise (un-park) so the central can reconnect
+                break
+            except Exception:  # noqa: BLE001
+                pass
+    time.sleep(2)
 
 
 def transport_connected(transport, profile) -> bool | None:
@@ -461,11 +485,15 @@ class CentralSelfTest:
         time out pre-bond), we must Pair() first. Crucially the device is already CONNECTED here (via
         Connect/ConnectDevice), so Pair() runs SMP over the existing link -- it does NOT trigger a
         fresh LE Create Connection, so it avoids the accept-list auto-connect stall that made pairing
-        FROM DISCONNECTED unusable on this host. Returns True if a Pair() was kicked off (caller should
-        wait for its reply), False if already bonded (proceed straight to discovery).
+        FROM DISCONNECTED unusable on this host. Returns True if the caller must WAIT (a Pair() is in
+        flight or was just kicked off), False if already bonded (proceed straight to discovery).
         """
-        if self._bonding or bool(self._get(self.dev_path, DEVICE, "Paired", False)):
-            return False
+        if bool(self._get(self.dev_path, DEVICE, "Paired", False)):
+            return False                 # already bonded -> discovery may proceed
+        if self._bonding:
+            return True                  # a Pair() is ALREADY in flight -> keep waiting (do NOT
+            #                              fall through to discovery: a racing ServicesResolved event
+            #                              must not run discovery on the still-unencrypted link)
         self._bonding = True
         self.result["steps"]["bond"] = "pairing"
         self._iface(self.dev_path, DEVICE).Pair(
@@ -770,6 +798,9 @@ def main(argv=None):
         print(json.dumps(out) if args.json else f"SKIP: {skip}")
         return 2
 
+    # If the board is ALREADY connected to a central at the very start, that is (probably) a real
+    # iPad -- skip rather than disturb it. (An orphaned link from one of OUR own retries below is
+    # freed between attempts, not here.)
     conn = transport_connected(transport, profile)
     if conn is True:
         reason = (f"{profile.advert_name} is already connected to another central (an iPad?); a BLE "
@@ -785,6 +816,7 @@ def main(argv=None):
     test = CentralSelfTest(args.backend, central, transport, connect_method=connect_method)
     result = test.run()
     result["connect_method"] = connect_method
+    result["retryable"] = CC.is_retryable_failure(result)
 
     if args.json:
         print(json.dumps(result))

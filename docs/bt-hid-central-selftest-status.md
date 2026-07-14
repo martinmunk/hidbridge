@@ -104,3 +104,35 @@ sudo /usr/bin/python3 python/src/hidbridge/central.py --backend esp32 --central 
 Verified BEFORE the connect wall: hci0 discovers `wsb-hid-esp32` by name; the ESP32 abs firmware
 boots ("OK wsb-hid-esp32 ready"). The report-map / report-ref / notification VERIFY steps could not
 run because the connection never completes.
+
+## Update 2026-07-14 -- `net` backend added + a full PASS captured (UB500 central)
+
+The self-test now parametrizes over a `net` backend too: same host-radio-as-central harness, but the
+injected frame is driven to the board **over TCP** (the network backend) instead of USB serial -- the
+end-to-end proof of the network HID path with **no iPad**.
+
+**A full green verdict was captured** on this host using the TP-Link **UB500 (hci1)** as the central
+(`--central hci1 --connect-method connectdevice`, bluetoothd Experimental on): connect -> bond ->
+byte-exact report map (all 4 reports) -> report refs -> notify armed -> inject over TCP -> the
+injected keyboard `0000040000000000` ('a') and mouse `00030000` (dx=3) arrived **byte-exact as GATT
+notifications**. So `hidbridge --backend net` -> board -> BLE HID delivery is verified end to end.
+
+**Still flaky on THIS host, both adapters.** The built-in hci0 stall (above) is not adapter-specific:
+the UB500 shows the same `org.bluez.Error.InProgress` on the scan/Connect path, and even via
+ConnectDevice the ACL frequently **drops right after StartNotify** -- the board then reports `OK
+noconn` at inject time (no central to notify). Observed per-attempt success is low here, so the pass
+above took several tries. This is a host BlueZ/kernel defect, not the network code (the board reaches
+`c0=1`; the notify path is the same firmware the serial esp32 test uses).
+
+Harness robustness added for this (helps everywhere, masks nothing):
+- **bond BEFORE discovery** (`_ensure_bonded`): the MCU needs an encrypted link to expose its HID
+  service, and on this stack the on-demand-at-StartNotify bond was too late; Pair() runs SMP over the
+  already-established link (no fresh Create Connection, so no accept-list stall).
+- **adopt an established link** if Connect/ConnectDevice reports failure while the device is actually
+  Connected.
+- **transient-only retry** (`is_retryable_failure` + `BT_HID_CENTRAL_ATTEMPTS`, default 8): retries a
+  flaky connect / a link that died before delivery, but NEVER a real report-map or notification-byte
+  mismatch (those are returned immediately as a genuine failure).
+
+Net result: reliable on a healthy BLE-central host; on this dev box it needs the ConnectDevice escape
+plus retries, and BlueZ may still drop the link before delivery on any given attempt.

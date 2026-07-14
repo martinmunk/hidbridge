@@ -542,3 +542,34 @@ BACKEND_PROFILES: dict[str, BackendProfile] = {
         byte_exact_map=True, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,
         map_subset=False, driver="daemon"),
 }
+
+
+def is_retryable_failure(result: dict) -> bool:
+    """True if a FAILED self-test verdict is a TRANSIENT link failure worth retrying (vs a real bug).
+
+    The central self-test is hardware-in-the-loop over BLE, and some hosts' LE-central stacks connect
+    flakily (e.g. the BlueZ auto-connect stall on this dev box: a connect can abort, or the link can
+    drop right after StartNotify so the injected report reaches the board with no central to notify).
+    Those are environmental and should be retried. What must NEVER be retried is a genuine mismatch --
+    the firmware served the wrong report map, or a notification arrived with the WRONG bytes -- because
+    retrying would just mask a real regression.
+
+    Retryable  = failed at connect / bond / discovery, OR reached inject but the expected notification
+                 never ARRIVED (received empty) -- i.e. the link died before delivery.
+    NOT retryable = the report map compare failed, or a notification arrived but its bytes differ from
+                    what was injected (received non-empty and != expected).
+    """
+    if result.get("status") != "fail":
+        return False
+    rm = result.get("report_map")
+    if rm is not None and not rm.get("ok", False):
+        return False                      # wrong report map = real firmware/host drift
+    notif = result.get("notifications")
+    if notif:
+        expected = notif.get("expected", {})
+        received = notif.get("received", {})
+        for rid, want in expected.items():
+            got = received.get(rid, "")
+            if got and got != want:
+                return False              # a notification arrived with WRONG bytes = real bug
+    return True                           # connect/link/delivery failure = transient, retry

@@ -16,6 +16,16 @@ Gated + parametrized (PREPARE / RUN / VERIFY / CLEANUP):
 
 Run:  BT_HID_CENTRAL=1 sudo -E /usr/bin/python3 -m pytest tests/bt_hid/test_bt_hid_central_selftest.py
   (or a single backend:  ... -k pico)
+
+The `net` backend proves the SAME thing for the NETWORK path (no iPad, no USB): the host radio is the
+central, and the injected frame is driven to the board OVER TCP. It needs the board reachable +
+provisioned (BT_HID_NET_HOST / net.token; see `hidbridge net-provision`), e.g.:
+  BT_HID_CENTRAL=1 BT_HID_NET_HOST=hidbridge-esp32.local \
+    sudo -E python -m pytest tests/test_bt_hid_central_selftest.py -k net
+On a host whose built-in adapter has the LE-central stall (below), pin a USB BLE dongle as the central
+and use the ConnectDevice escape: BT_HID_CENTRAL_ADAPTER=hci1 BT_HID_CONNECT_METHOD=connectdevice.
+Transient LE-central flakiness is retried automatically (BT_HID_CENTRAL_ATTEMPTS, default 8); a real
+report-map or notification-byte mismatch is NEVER retried.
 The CLEANUP (StopNotify, Disconnect, drop the transient bond, restore hci0) is done by central.py in
 its own teardown; this test additionally asserts no verdict was left in an indeterminate state.
 
@@ -63,7 +73,7 @@ def _builtin_present() -> bool:
     return any(a["kind"] == "builtin" for a in A.list_adapters())
 
 
-def _run_central(backend: str) -> dict:
+def _run_central_once(backend: str) -> dict:
     # Steering (all optional, for the stall workaround): BT_HID_CENTRAL_ADAPTER pins the central
     # adapter (e.g. a USB dongle hciN instead of the built-in); BT_HID_CONNECT_METHOD picks the LE
     # connect method (auto|scan|connectdevice) -- central.py reads the latter from the env directly.
@@ -80,6 +90,45 @@ def _run_central(backend: str) -> dict:
     except ValueError:
         pytest.fail(f"central.py produced no JSON verdict for {backend}: "
                     f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+
+
+def _free_board(backend: str) -> None:
+    """Between retries: drop any orphaned central our failed attempt left on the board + re-advertise.
+
+    Best-effort and backend-agnostic -- builds the same driver central.py uses and calls its
+    _free_board. A no-op for the daemon backend (no board to free)."""
+    try:
+        from hidbridge import central as C
+        from hidbridge import central_core as CC
+        tp, _skip = C.make_transport(CC.BACKEND_PROFILES[backend])
+        if tp is None:
+            return
+        try:
+            C._free_board(tp)
+        finally:
+            if hasattr(tp, "close"):
+                tp.close()
+    except Exception:  # noqa: BLE001 -- freeing is best-effort; the next attempt still self-checks
+        pass
+
+
+def _run_central(backend: str) -> dict:
+    """Run the self-test, RETRYING only TRANSIENT link failures (flaky LE-central connect / a link
+    that drops before delivery -- see central_core.is_retryable_failure). A real report-map or
+    notification-byte mismatch is returned immediately (never retried). BT_HID_CENTRAL_ATTEMPTS caps
+    the tries (default 8); the board is freed between attempts. Hardware-in-the-loop over BLE is
+    inherently a little flaky, and some hosts' LE-central stacks (see docs/bt-hid-central-selftest-
+    status.md) are worse -- the retry keeps the suite reliable without masking real regressions."""
+    attempts = max(1, int(os.environ.get("BT_HID_CENTRAL_ATTEMPTS", "8")))
+    result: dict = {}
+    for attempt in range(1, attempts + 1):
+        result = _run_central_once(backend)
+        result.setdefault("attempt", attempt)
+        if result.get("status") != "fail" or not result.get("retryable", False):
+            return result
+        if attempt < attempts:
+            _free_board(backend)
+    return result
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

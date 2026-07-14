@@ -372,3 +372,37 @@ def test_backend_full_verdict_pipeline_offline(backend):
     bad = dict(received)
     bad[mouse_id] = R.mouse_report(dx=99).data + (bytes([0]) if profile.mouse_pad_zero else b"")
     assert not C.notification_verdict(bad, expected, allow_trailing_zero=pad)["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# is_retryable_failure: retry TRANSIENT link flakiness, never a real mismatch
+# --------------------------------------------------------------------------- #
+def test_retryable_only_for_failed_status():
+    # a pass or skip is never "retryable" -- there is nothing to retry.
+    assert not C.is_retryable_failure({"status": "pass"})
+    assert not C.is_retryable_failure({"status": "skip", "reason": "no board"})
+
+
+def test_retryable_connect_and_delivery_failures():
+    # failed at connect (no report_map / notifications yet) = transient
+    assert C.is_retryable_failure(
+        {"status": "fail", "error": "connect failed: org.bluez.Error.InProgress"})
+    # reached inject but the notification never ARRIVED (received empty) = the link died = transient
+    assert C.is_retryable_failure({
+        "status": "fail",
+        "report_map": {"ok": True},
+        "notifications": {"expected": {"1": "0000040000000000"}, "received": {"1": ""}},
+    })
+
+
+def test_not_retryable_real_mismatches():
+    # a wrong report map = real firmware/host drift, must NOT be retried
+    assert not C.is_retryable_failure(
+        {"status": "fail", "report_map": {"ok": False}})
+    # a notification that ARRIVED with the WRONG bytes = real bug, must NOT be retried
+    assert not C.is_retryable_failure({
+        "status": "fail",
+        "report_map": {"ok": True},
+        "notifications": {"expected": {"1": "0000040000000000"},
+                          "received": {"1": "0000ff0000000000"}},
+    })
