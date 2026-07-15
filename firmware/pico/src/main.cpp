@@ -49,6 +49,8 @@
  */
 
 #include <Arduino.h>
+#include <ArduinoJson.h>       // Mode 1 wire protocol: JSON-RPC 2.0 over newline-delimited JSON
+#include "hidbridge_mode1.h"   // shared native HID builders + JSON-RPC dispatch (firmware/shared/)
 #include <KeyboardBLE.h>
 #include <MouseBLE.h>
 #include <HID_Bluetooth.h>
@@ -244,10 +246,29 @@ static void send_report(uint8_t report_id, const uint8_t *body, int body_len) {
     Serial.println(ok ? "OK" : "ERR notconnected");
 }
 
+// ---- Mode 1 (JSON-RPC): builders + dispatch live in ../../shared/hidbridge_mode1.h; the Pico
+// provides only the BLE-notify sink + its capabilities. Serial-only, so always authenticated. ----
+static bool picoNotify(uint8_t rid, const uint8_t *body, size_t len) {
+    uint8_t report[1 + 8];
+    report[0] = rid;
+    memcpy(report + 1, body, len);
+    return PicoBluetoothBLEHID.send(report, 1 + len);
+}
+static void picoFillHello(JsonObject r) {
+    r["device"] = BASE_NAME;
+    r["name"] = slot_name[(adv_slot >= 0 && adv_slot < NUM_SLOTS) ? adv_slot : 0];
+    JsonArray caps = r["caps"].to<JsonArray>();
+    caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer"); caps.add("slots");
+}
+
 static void handle_line(char *line) {
     while (*line == ' ' || *line == '\t') line++;
     if (line[0] == 0) return;
 
+    if (line[0] == '{') {                       // Mode 1: JSON-RPC (serial is trusted -> authed=true)
+        hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello);
+        return;
+    }
     char kind = line[0];
     if (kind == 'P' || kind == 'p') {
         Serial.print("PONG name=HIDBRIDGE-pico conn=");
