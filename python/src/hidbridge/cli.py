@@ -64,6 +64,7 @@ CONTROL_SOCK = N.control_sock("default", env_override=os.environ.get("BT_HID_SOC
 # (e.g. "esp32" = an ESP32 BLE-HID board over USB serial). Non-dongle backends route the report
 # commands through a HidController transport instead of the daemon socket. Set once in main().
 _ALT_TRANSPORT = None      # a controller transport when --backend is non-dongle, else None
+_RPC_CLIENT = None         # a mode1.Mode1Client when --rpc (Mode 1), else None
 _BACKEND = "dongle"
 
 BLUEZ = "org.bluez"
@@ -102,7 +103,44 @@ def _alt_send(cmd: dict) -> dict:
     return {"ok": False, "error": f"cmd {t!r} unsupported on backend {_BACKEND!r}"}
 
 
+def _rpc_send(cmd: dict) -> dict:
+    """Route a daemon-style command dict to the Mode 1 (JSON-RPC) client -- the board builds the
+    reports. Mirrors _alt_send, but tells the board WHAT to do instead of sending it frames."""
+    from hidbridge.mode1 import Mode1Error
+    c = _RPC_CLIENT
+    t = cmd.get("cmd")
+    try:
+        if t == "ping":
+            return {"ok": True, "backend": "rpc", "resp": c.hello()}
+        res = None
+        if t == "type":
+            res = c.type_text(cmd["text"])
+        elif t == "key":
+            res = c.key(cmd["name"], int(cmd.get("modifiers", 0)))
+        elif t == "move":
+            res = c.move(int(cmd["dx"]), int(cmd["dy"]))
+        elif t == "click":
+            res = c.click(cmd.get("button", "left"))
+        elif t == "move_abs":
+            res = c.move_abs(float(cmd["x"]), float(cmd["y"]))
+        elif t == "tap_abs":
+            res = c.tap(float(cmd["x"]), float(cmd["y"]), cmd.get("button", "left"))
+        elif t == "touch":
+            res = c.touch(float(cmd["x"]), float(cmd["y"]))
+        elif t == "reports":
+            return {"ok": False, "error": "raw frames are a Mode 2 concept; --rpc sends intent. "
+                    "For a passcode: `--rpc type <pin>` then `--rpc key enter`."}
+        else:
+            return {"ok": False, "error": f"cmd {t!r} unsupported in --rpc (Mode 1) mode"}
+        # a report method returns {sent, conn}; conn False == accepted but no central (like OK noconn)
+        return {"ok": True, "backend": "rpc", "sent": res.get("sent"), "conn": res.get("conn")}
+    except Mode1Error as e:
+        return {"ok": False, "error": f"rpc: {e}"}
+
+
 def _send(cmd: dict, timeout=5.0) -> dict:
+    if _RPC_CLIENT is not None:
+        return _rpc_send(cmd)
     if _ALT_TRANSPORT is not None:
         try:
             return _alt_send(cmd)
@@ -450,6 +488,15 @@ def cmd_net_status(args):
 
 
 def cmd_status(args):
+    if _RPC_CLIENT is not None:
+        resp = _send({"cmd": "ping"})
+        if resp.get("ok"):
+            h = resp.get("resp", {})
+            print(f"Mode 1 (rpc) board {h.get('device')!r}: proto={h.get('proto')} "
+                  f"modes={h.get('modes')} caps={h.get('caps')}")
+        else:
+            print(f"rpc: {resp.get('error')}")
+        return
     if _ALT_TRANSPORT is not None:
         resp = _send({"cmd": "ping"})
         if resp.get("ok"):
@@ -569,6 +616,10 @@ def build_parser():
     p.add_argument("--host", default=os.environ.get("BT_HID_NET_HOST"),
                    help="network backend host (mDNS name or IP), e.g. --backend net "
                         "--host hidbridge-esp32.local")
+    p.add_argument("--rpc", action="store_true", default=bool(os.environ.get("BT_HID_RPC")),
+                   help="Mode 1: tell the BOARD what to do (JSON-RPC); it builds the HID reports "
+                        "itself, instead of the host building frames. Needs an MCU backend "
+                        "(--backend esp32/pico/net + --port/--host).")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("adapters", help="show detected adapters + which dongle is used")
@@ -679,8 +730,26 @@ def _init_backend(args):
     The serial device comes from --port (generic) or --pico-port (pico alias); if neither is
     given, each transport falls back to its own env var + hardware autodetect.
     """
-    global _ALT_TRANSPORT, _BACKEND
+    global _ALT_TRANSPORT, _BACKEND, _RPC_CLIENT
     _BACKEND = (getattr(args, "backend", None) or "dongle").lower()
+
+    # Mode 1 (--rpc): drive the board over JSON-RPC; it builds the reports. Needs an MCU/net target.
+    if getattr(args, "rpc", False):
+        from hidbridge import mode1
+        if _BACKEND == "net":
+            host = getattr(args, "host", None) or os.environ.get("BT_HID_NET_HOST")
+            target = "net:" + host if host else "net:"
+        else:
+            fam = _BACKEND if _BACKEND in ("esp32", "pico") else "esp32"
+            port = getattr(args, "port", None) or getattr(args, "pico_port", None)
+            target = f"{fam}:{port}" if port else fam
+        try:
+            _RPC_CLIENT = mode1.open_client(target)
+        except Exception as e:  # noqa: BLE001
+            print(f"error: --rpc (Mode 1) client unavailable: {e}", file=sys.stderr)
+            sys.exit(2)
+        return
+
     if _BACKEND in ("dongle", "daemon", "ble", "socket"):
         _ALT_TRANSPORT = None
         return
