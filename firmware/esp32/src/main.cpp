@@ -92,6 +92,7 @@
 // the obvious next step if that is not enough -- see docs/bt-hid-network-backend.md.)
 
 #include <Arduino.h>
+#include <strings.h>   // strcasecmp (Mode 1 command parsing)
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <NimBLEServer.h>
@@ -576,16 +577,31 @@ static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
   snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", v[5], v[4], v[3], v[2], v[1], v[0]);
 }
 
-static void sendReportToTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len,
-                               Print& out) {
+// Notify ONE report to the target slot's central. Returns true if it actually notified (a central is
+// connected on the target slot), false if there was none. Shared by Mode 2 (raw frame relay) and
+// Mode 1 (the native report builders below).
+static bool notifyTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len) {
+  if (chr == nullptr) return false;
   chr->setValue((uint8_t*)body, len);
   uint16_t h = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotConn[tgtSlot] : BLE_HS_CONN_HANDLE_NONE;
-  if (h != BLE_HS_CONN_HANDLE_NONE) {
-    chr->notify(h);                            // drive ONLY the target slot's central
-    out.println("OK");
-  } else {
-    out.println("OK noconn");
+  if (h == BLE_HS_CONN_HANDLE_NONE) return false;
+  chr->notify(h);                              // drive ONLY the target slot's central
+  return true;
+}
+
+static NimBLECharacteristic* charForReportId(uint8_t rid) {
+  switch (rid) {
+    case KBD_REPORT_ID:       return inputKbd;
+    case MOUSE_REPORT_ID:     return inputMouse;
+    case ABS_MOUSE_REPORT_ID: return inputAbsMouse;
+    case DIGITIZER_REPORT_ID: return inputDigitizer;
   }
+  return nullptr;
+}
+
+static void sendReportToTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len,
+                               Print& out) {
+  out.println(notifyTarget(chr, body, len) ? "OK" : "OK noconn");
 }
 
 static bool anyConnected() {
@@ -656,10 +672,248 @@ static bool commandAllowed(NetSession* sess, char cmd, Print& out) {
 }
 #endif
 
+// ============================================================================ //
+// MODE 1 -- native HID report builders ("tell the board WHAT; it knows HOW").
+//
+// A deliberate C++ DUPLICATE of python/src/hidbridge/reports.py (keymap + report builders). The board
+// owns the "how", so no host code / no codegen lives here -- the firmware is self-contained. The
+// duplication is guarded against drift by a host test (python/tests/test_bt_hid_firmware_mode1.py)
+// that dry-runs each command over serial (`?<command>`) and asserts the emitted bytes equal
+// reports.py's for the same input. Mode 2 (raw K/M/A/D frames) stays exactly as before.
+// ============================================================================ //
+static const uint8_t MOD_LSHIFT_BIT = 0x02;
+
+// Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE.
+static int baseUsage(char c) {
+  if (c >= 'a' && c <= 'z') return 0x04 + (c - 'a');
+  if (c >= '1' && c <= '9') return 0x1E + (c - '1');
+  if (c == '0') return 0x27;
+  switch (c) {
+    case '\n': return 0x28; case '\t': return 0x2B; case ' ': return 0x2C;
+    case '-': return 0x2D; case '=': return 0x2E; case '[': return 0x2F; case ']': return 0x30;
+    case '\\': return 0x31; case ';': return 0x33; case '\'': return 0x34; case '`': return 0x35;
+    case ',': return 0x36; case '.': return 0x37; case '/': return 0x38;
+  }
+  return -1;
+}
+
+// char -> (usage, shift). Mirrors reports.char_to_usage. Returns false if unmapped.
+static bool charToUsage(char c, uint8_t* usage, bool* shift) {
+  int u = baseUsage(c);
+  if (u >= 0) { *usage = (uint8_t)u; *shift = false; return true; }
+  if (c >= 'A' && c <= 'Z') { *usage = 0x04 + (c - 'A'); *shift = true; return true; }
+  static const char shf[] = "!@#$%^&*()_+{}|:\"~<>?";     // reports._SHIFTED_SYMBOLS keys
+  static const char bas[] = "1234567890-=[]\\;'`,./";      //   -> their unshifted base char
+  for (int i = 0; shf[i]; i++) {
+    if (c == shf[i]) { *usage = (uint8_t)baseUsage(bas[i]); *shift = true; return true; }
+  }
+  return false;
+}
+
+// Named key -> usage (page 0x07), or -1. Mirrors reports.KEY_NAME_TO_USAGE.
+static int keyNameToUsage(const char* name) {
+  static const struct { const char* n; uint8_t u; } tbl[] = {
+    {"enter",0x28},{"return",0x28},{"esc",0x29},{"escape",0x29},{"backspace",0x2A},{"delete",0x2A},
+    {"tab",0x2B},{"space",0x2C},{"right",0x4F},{"left",0x50},{"down",0x51},{"up",0x52},
+    {"home",0x4A},{"end",0x4D},{"pageup",0x4B},{"pagedown",0x4E},
+    {"f1",0x3A},{"f2",0x3B},{"f3",0x3C},{"f4",0x3D},{"f5",0x3E},{"f6",0x3F},
+    {"f7",0x40},{"f8",0x41},{"f9",0x42},{"f10",0x43},{"f11",0x44},{"f12",0x45},
+  };
+  for (auto& e : tbl) if (strcasecmp(name, e.n) == 0) return e.u;
+  return -1;
+}
+
+// Mouse button name (or 1..5) -> bit. Mirrors reports._BUTTON_NAME.
+static int buttonNameToBit(const char* name) {
+  if (!strcasecmp(name,"left")   || !strcmp(name,"1")) return 0x01;
+  if (!strcasecmp(name,"right")  || !strcmp(name,"2")) return 0x02;
+  if (!strcasecmp(name,"middle") || !strcmp(name,"3")) return 0x04;
+  if (!strcasecmp(name,"back")   || !strcmp(name,"4")) return 0x08;
+  if (!strcasecmp(name,"forward")|| !strcmp(name,"5")) return 0x10;
+  return -1;
+}
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Screen fraction (0..1) -> u16 absolute axis [0..32767]. Mirrors reports.frac_to_abs, INCLUDING
+// Python round()'s round-half-to-EVEN, so the emitted bytes match exactly.
+static uint16_t fracToAbs(double frac) {
+  double x = frac * 32767.0;
+  double fl = floor(x); double diff = x - fl; long r;
+  if (diff < 0.5)      r = (long)fl;
+  else if (diff > 0.5) r = (long)fl + 1;
+  else { long f = (long)fl; r = (f % 2 == 0) ? f : f + 1; }   // exactly .5 -> nearest even
+  return (uint16_t)clampi((int)r, 0, 32767);
+}
+
+// A destination for built reports: notify the BLE target, or (dry run) collect rid+body hex frames.
+struct ReportSink { bool dry; String frames; int built; int notified; };
+
+static void emitReport(ReportSink& s, uint8_t rid, const uint8_t* body, size_t len) {
+  s.built++;
+  if (s.dry) {
+    if (s.built > 1) s.frames += ',';
+    char hx[3];
+    snprintf(hx, sizeof(hx), "%02x", rid); s.frames += hx;
+    for (size_t i = 0; i < len; i++) { snprintf(hx, sizeof(hx), "%02x", body[i]); s.frames += hx; }
+  } else if (notifyTarget(charForReportId(rid), body, len)) {
+    s.notified++;
+  }
+}
+
+// ---- builders: each mirrors the same-named reports.py function, byte-for-byte ----
+static void emitKeyUsage(ReportSink& s, uint8_t mod, uint8_t usage) {
+  uint8_t down[8] = { mod, 0, usage, 0, 0, 0, 0, 0 };
+  emitReport(s, KBD_REPORT_ID, down, 8);
+  uint8_t up[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  emitReport(s, KBD_REPORT_ID, up, 8);
+}
+
+static bool emitType(ReportSink& s, const char* text) {          // reports.type_text
+  for (const char* p = text; *p; ++p) {
+    uint8_t usage; bool shift;
+    if (!charToUsage(*p, &usage, &shift)) return false;
+    emitKeyUsage(s, shift ? MOD_LSHIFT_BIT : 0, usage);
+  }
+  return true;
+}
+
+static void emitMouse(ReportSink& s, uint8_t buttons, int dx, int dy, int wheel) {
+  uint8_t b[4] = { buttons, (uint8_t)(clampi(dx,-128,127) & 0xFF),
+                   (uint8_t)(clampi(dy,-128,127) & 0xFF), (uint8_t)(clampi(wheel,-128,127) & 0xFF) };
+  emitReport(s, MOUSE_REPORT_ID, b, 4);
+}
+
+static void emitMove(ReportSink& s, int dx, int dy) {            // reports.mouse_move_reports
+  int xs[80], ys[80], nx = 0, ny = 0, r;
+  for (r = dx; r != 0 && nx < 80; ) { int st = clampi(r,-127,127); xs[nx++] = st; r -= st; }
+  for (r = dy; r != 0 && ny < 80; ) { int st = clampi(r,-127,127); ys[ny++] = st; r -= st; }
+  int n = nx > ny ? nx : ny; if (n < 1) n = 1;
+  for (int i = 0; i < n; i++) emitMouse(s, 0, i < nx ? xs[i] : 0, i < ny ? ys[i] : 0, 0);
+}
+
+static void emitScroll(ReportSink& s, int clicks) {             // reports.mouse_scroll_reports
+  bool any = false;
+  for (int r = clicks; r != 0; ) { int st = clampi(r,-127,127); emitMouse(s,0,0,0,st); r -= st; any = true; }
+  if (!any) emitMouse(s, 0, 0, 0, 0);
+}
+
+static void emitClick(ReportSink& s, uint8_t button) {          // reports.mouse_click_reports
+  emitMouse(s, button, 0, 0, 0);
+  emitMouse(s, 0, 0, 0, 0);
+}
+
+static void emitAbs(ReportSink& s, uint8_t buttons, uint16_t x, uint16_t y) {
+  uint8_t b[5] = { buttons, (uint8_t)(x & 0xFF), (uint8_t)(x >> 8),
+                   (uint8_t)(y & 0xFF), (uint8_t)(y >> 8) };
+  emitReport(s, ABS_MOUSE_REPORT_ID, b, 5);
+}
+
+static void emitMoveAbs(ReportSink& s, double xf, double yf) {  // reports.abs_move_reports
+  emitAbs(s, 0, fracToAbs(xf), fracToAbs(yf));
+}
+
+static void emitTap(ReportSink& s, double xf, double yf, uint8_t button) {   // reports.abs_click_reports
+  uint16_t x = fracToAbs(xf), y = fracToAbs(yf);
+  emitAbs(s, 0, x, y); emitAbs(s, button, x, y); emitAbs(s, 0, x, y);
+}
+
+static void emitTouch(ReportSink& s, double xf, double yf) {    // reports.digitizer_tap_reports
+  uint16_t x = fracToAbs(xf), y = fracToAbs(yf);
+  uint8_t down[6] = { 0x03, 0, (uint8_t)(x&0xFF),(uint8_t)(x>>8),(uint8_t)(y&0xFF),(uint8_t)(y>>8) };
+  emitReport(s, DIGITIZER_REPORT_ID, down, 6);   // tip + in_range
+  uint8_t lift[6] = { 0, 0, 0, 0, 0, 0 };
+  emitReport(s, DIGITIZER_REPORT_ID, lift, 6);
+}
+
+// Split `arg` into up to maxToks whitespace-separated tokens. Returns the count.
+static int splitTokens(const String& arg, String* toks, int maxToks) {
+  int n = 0, i = 0, len = arg.length();
+  while (i < len && n < maxToks) {
+    while (i < len && arg[i] == ' ') i++;
+    if (i >= len) break;
+    int j = i; while (j < len && arg[j] != ' ') j++;
+    toks[n++] = arg.substring(i, j);
+    i = j;
+  }
+  return n;
+}
+
+static bool isHighLevelCmd(const String& c) {
+  return c=="type"||c=="key"||c=="wake"||c=="move"||c=="click"||c=="scroll"||
+         c=="moveabs"||c=="tap"||c=="touch";
+}
+
+// Try to handle `line` as a Mode-1 high-level command. Returns true if it WAS one (handled + reply
+// printed); false if not (caller falls through to the Mode-2 single-char frame handler). A leading
+// '?' makes it a DRY RUN: build the report bytes and return them as hex, notify nothing -- the host
+// verification path (no BLE needed).
+static bool handleHighLevel(String line, Print& out, NetSession* sess) {
+  bool dry = false;
+  if (line.length() && line[0] == '?') { dry = true; line = line.substring(1); line.trim(); }
+  int sp = line.indexOf(' ');
+  String cmd = (sp < 0) ? line : line.substring(0, sp);
+  String arg = (sp < 0) ? String("") : line.substring(sp + 1);
+  cmd.toLowerCase();
+  if (!isHighLevelCmd(cmd)) return false;        // not a Mode-1 verb -> let Mode 2 handle it
+
+#ifdef HIDBRIDGE_NET
+  if (sess != nullptr && !sess->authed) { out.println("ERR auth"); return true; }
+#else
+  (void)sess;
+#endif
+
+  ReportSink s; s.dry = dry; s.built = 0; s.notified = 0;
+  String t[3];
+
+  if (cmd == "type") {
+    if (arg.length() == 0) { out.println("ERR noarg"); return true; }
+    if (!emitType(s, arg.c_str())) { out.println("ERR badchar"); return true; }
+  } else if (cmd == "wake") {
+    emitKeyUsage(s, 0, 0x2C);                     // space -- a benign wake keystroke
+  } else if (cmd == "key") {
+    int n = splitTokens(arg, t, 2);
+    if (n < 1) { out.println("ERR noarg"); return true; }
+    int usage = keyNameToUsage(t[0].c_str());
+    if (usage < 0) { out.println("ERR badkey"); return true; }
+    uint8_t mod = (n >= 2) ? (uint8_t)strtol(t[1].c_str(), nullptr, 0) : 0;
+    emitKeyUsage(s, mod, (uint8_t)usage);
+  } else if (cmd == "move") {
+    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
+    emitMove(s, t[0].toInt(), t[1].toInt());
+  } else if (cmd == "click") {
+    String b = arg; b.trim(); if (b.length() == 0) b = "left";
+    int bit = buttonNameToBit(b.c_str()); if (bit < 0) { out.println("ERR badbtn"); return true; }
+    emitClick(s, (uint8_t)bit);
+  } else if (cmd == "scroll") {
+    if (splitTokens(arg, t, 1) < 1) { out.println("ERR args"); return true; }
+    emitScroll(s, t[0].toInt());
+  } else if (cmd == "moveabs") {
+    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
+    emitMoveAbs(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr));
+  } else if (cmd == "tap") {
+    int n = splitTokens(arg, t, 3);
+    if (n < 2) { out.println("ERR args"); return true; }
+    int bit = (n >= 3) ? buttonNameToBit(t[2].c_str()) : 0x01;
+    if (bit < 0) { out.println("ERR badbtn"); return true; }
+    emitTap(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr), (uint8_t)bit);
+  } else if (cmd == "touch") {
+    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
+    emitTouch(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr));
+  }
+
+  if (dry)                              { out.print("OK dry n="); out.print(s.built);
+                                          out.print(" f="); out.println(s.frames); }
+  else if (s.built > 0 && s.notified == 0) out.println("OK noconn");
+  else                                  { out.print("OK sent="); out.println(s.notified); }
+  return true;
+}
+
 // `sess` is the originating TCP session, or nullptr when the line came from USB serial.
 static void handleLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
+  if (handleHighLevel(line, out, sess)) return;   // Mode 1 (word commands); else fall through
   char cmd = line[0];
   String arg = line.substring(1);
 
