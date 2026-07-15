@@ -92,7 +92,8 @@
 // the obvious next step if that is not enough -- see docs/bt-hid-network-backend.md.)
 
 #include <Arduino.h>
-#include <strings.h>   // strcasecmp (Mode 1 command parsing)
+#include <strings.h>     // strcasecmp (Mode 1 command parsing)
+#include <ArduinoJson.h> // Mode 1 wire protocol: JSON-RPC 2.0 over newline-delimited JSON
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <NimBLEServer.h>
@@ -826,95 +827,114 @@ static void emitTouch(ReportSink& s, double xf, double yf) {    // reports.digit
   emitReport(s, DIGITIZER_REPORT_ID, lift, 6);
 }
 
-// Split `arg` into up to maxToks whitespace-separated tokens. Returns the count.
-static int splitTokens(const String& arg, String* toks, int maxToks) {
-  int n = 0, i = 0, len = arg.length();
-  while (i < len && n < maxToks) {
-    while (i < len && arg[i] == ' ') i++;
-    if (i >= len) break;
-    int j = i; while (j < len && arg[j] != ' ') j++;
-    toks[n++] = arg.substring(i, j);
-    i = j;
+// Append the built dry-run frames (ReportSink.frames = comma-separated rid+body hex) to a JSON array.
+static void framesToJson(ReportSink& s, JsonArray arr) {
+  int start = 0, len = s.frames.length();
+  while (start < len) {
+    int comma = s.frames.indexOf(',', start);
+    if (comma < 0) comma = len;
+    arr.add(s.frames.substring(start, comma));
+    start = comma + 1;
   }
-  return n;
 }
 
-static bool isHighLevelCmd(const String& c) {
-  return c=="type"||c=="key"||c=="wake"||c=="move"||c=="click"||c=="scroll"||
-         c=="moveabs"||c=="tap"||c=="touch";
-}
+// ---- Mode 1 wire protocol: JSON-RPC 2.0 over one JSON object per line ----------------------------
+// Request : {"jsonrpc":"2.0","id":<n>,"method":"<m>","params":{...}}
+// Response: {"jsonrpc":"2.0","id":<n>,"result":{...}} or {...,"error":{"code":..,"message":..}}
+// A `"dry":true` param builds the report bytes and returns them (result.frames) WITHOUT notifying --
+// the host verification path (no BLE needed). `hello` is allowed unauthenticated; every input method
+// requires auth over TCP (serial is trusted). Async link events are JSON notifications (see evt()).
+#define HB_PROTO_VERSION 1
 
-// Try to handle `line` as a Mode-1 high-level command. Returns true if it WAS one (handled + reply
-// printed); false if not (caller falls through to the Mode-2 single-char frame handler). A leading
-// '?' makes it a DRY RUN: build the report bytes and return them as hex, notify nothing -- the host
-// verification path (no BLE needed).
-static bool handleHighLevel(String line, Print& out, NetSession* sess) {
-  bool dry = false;
-  if (line.length() && line[0] == '?') { dry = true; line = line.substring(1); line.trim(); }
-  int sp = line.indexOf(' ');
-  String cmd = (sp < 0) ? line : line.substring(0, sp);
-  String arg = (sp < 0) ? String("") : line.substring(sp + 1);
-  cmd.toLowerCase();
-  if (!isHighLevelCmd(cmd)) return false;        // not a Mode-1 verb -> let Mode 2 handle it
+static void handleJsonRpc(const String& line, Print& out, NetSession* sess) {
+  JsonDocument doc;
+  DeserializationError perr = deserializeJson(doc, line);
+  JsonDocument resp;
+  resp["jsonrpc"] = "2.0";
+  if (perr) {
+    resp["id"] = nullptr;
+    resp["error"]["code"] = -32700; resp["error"]["message"] = "parse error";
+    serializeJson(resp, out); out.println(); return;
+  }
+  const char* method = doc["method"] | "";
+  if (doc["id"].isNull()) resp["id"] = nullptr; else resp["id"] = doc["id"];
+  JsonObjectConst params = doc["params"].as<JsonObjectConst>();
+  bool dry = params["dry"] | false;
 
+  // hello -- capabilities handshake. Allowed WITHOUT auth so a client can discover the board first.
+  if (!strcmp(method, "hello")) {
+    JsonObject r = resp["result"].to<JsonObject>();
+    r["proto"] = HB_PROTO_VERSION;
+    r["device"] = DEVICE_NAME;
+    r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
+    JsonArray modes = r["modes"].to<JsonArray>(); modes.add("frames"); modes.add("rpc");
+    JsonArray caps = r["caps"].to<JsonArray>();
+    caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer"); caps.add("slots");
 #ifdef HIDBRIDGE_NET
-  if (sess != nullptr && !sess->authed) { out.println("ERR auth"); return true; }
+    caps.add("net");
+#endif
+    serializeJson(resp, out); out.println(); return;
+  }
+
+  // Every other method injects input / changes state -> require auth over TCP (serial is trusted).
+#ifdef HIDBRIDGE_NET
+  if (sess != nullptr && !sess->authed) {
+    resp["error"]["code"] = -32001; resp["error"]["message"] = "auth required";
+    serializeJson(resp, out); out.println(); return;
+  }
 #else
   (void)sess;
 #endif
 
   ReportSink s; s.dry = dry; s.built = 0; s.notified = 0;
-  String t[3];
+  bool known = true; const char* argErr = nullptr;
 
-  if (cmd == "type") {
-    if (arg.length() == 0) { out.println("ERR noarg"); return true; }
-    if (!emitType(s, arg.c_str())) { out.println("ERR badchar"); return true; }
-  } else if (cmd == "wake") {
+  if (!strcmp(method, "type")) {
+    const char* text = params["text"] | (const char*)nullptr;
+    if (!text) argErr = "missing 'text'";
+    else if (!emitType(s, text)) argErr = "unmappable character in 'text'";
+  } else if (!strcmp(method, "key")) {
+    const char* name = params["name"] | (const char*)nullptr;
+    int usage = name ? keyNameToUsage(name) : -1;
+    if (usage < 0) argErr = "unknown 'name'";
+    else emitKeyUsage(s, (uint8_t)(params["mod"] | 0), (uint8_t)usage);
+  } else if (!strcmp(method, "wake")) {
     emitKeyUsage(s, 0, 0x2C);                     // space -- a benign wake keystroke
-  } else if (cmd == "key") {
-    int n = splitTokens(arg, t, 2);
-    if (n < 1) { out.println("ERR noarg"); return true; }
-    int usage = keyNameToUsage(t[0].c_str());
-    if (usage < 0) { out.println("ERR badkey"); return true; }
-    uint8_t mod = (n >= 2) ? (uint8_t)strtol(t[1].c_str(), nullptr, 0) : 0;
-    emitKeyUsage(s, mod, (uint8_t)usage);
-  } else if (cmd == "move") {
-    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
-    emitMove(s, t[0].toInt(), t[1].toInt());
-  } else if (cmd == "click") {
-    String b = arg; b.trim(); if (b.length() == 0) b = "left";
-    int bit = buttonNameToBit(b.c_str()); if (bit < 0) { out.println("ERR badbtn"); return true; }
-    emitClick(s, (uint8_t)bit);
-  } else if (cmd == "scroll") {
-    if (splitTokens(arg, t, 1) < 1) { out.println("ERR args"); return true; }
-    emitScroll(s, t[0].toInt());
-  } else if (cmd == "moveabs") {
-    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
-    emitMoveAbs(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr));
-  } else if (cmd == "tap") {
-    int n = splitTokens(arg, t, 3);
-    if (n < 2) { out.println("ERR args"); return true; }
-    int bit = (n >= 3) ? buttonNameToBit(t[2].c_str()) : 0x01;
-    if (bit < 0) { out.println("ERR badbtn"); return true; }
-    emitTap(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr), (uint8_t)bit);
-  } else if (cmd == "touch") {
-    if (splitTokens(arg, t, 2) < 2) { out.println("ERR args"); return true; }
-    emitTouch(s, strtod(t[0].c_str(), nullptr), strtod(t[1].c_str(), nullptr));
+  } else if (!strcmp(method, "move")) {
+    emitMove(s, params["dx"] | 0, params["dy"] | 0);
+  } else if (!strcmp(method, "click")) {
+    int bit = buttonNameToBit(params["button"] | "left");
+    if (bit < 0) argErr = "unknown 'button'"; else emitClick(s, (uint8_t)bit);
+  } else if (!strcmp(method, "scroll")) {
+    emitScroll(s, params["clicks"] | 0);
+  } else if (!strcmp(method, "moveabs")) {
+    emitMoveAbs(s, params["x"] | 0.0, params["y"] | 0.0);
+  } else if (!strcmp(method, "tap")) {
+    int bit = buttonNameToBit(params["button"] | "left");
+    if (bit < 0) argErr = "unknown 'button'";
+    else emitTap(s, params["x"] | 0.0, params["y"] | 0.0, (uint8_t)bit);
+  } else if (!strcmp(method, "touch")) {
+    emitTouch(s, params["x"] | 0.0, params["y"] | 0.0);
+  } else {
+    known = false;
   }
 
-  if (dry)                              { out.print("OK dry n="); out.print(s.built);
-                                          out.print(" f="); out.println(s.frames); }
-  else if (s.built > 0 && s.notified == 0) out.println("OK noconn");
-  else                                  { out.print("OK sent="); out.println(s.notified); }
-  return true;
+  if (!known)        { resp["error"]["code"] = -32601; resp["error"]["message"] = "method not found"; }
+  else if (argErr)   { resp["error"]["code"] = -32602; resp["error"]["message"] = argErr; }
+  else {
+    JsonObject r = resp["result"].to<JsonObject>();
+    if (dry) { r["n"] = s.built; framesToJson(s, r["frames"].to<JsonArray>()); }
+    else     { r["sent"] = s.notified; r["conn"] = (s.notified > 0 || s.built == 0); }
+  }
+  serializeJson(resp, out); out.println();
 }
 
 // `sess` is the originating TCP session, or nullptr when the line came from USB serial.
 static void handleLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
-  if (handleHighLevel(line, out, sess)) return;   // Mode 1 (word commands); else fall through
-  char cmd = line[0];
+  if (line[0] == '{') { handleJsonRpc(line, out, sess); return; }   // Mode 1: JSON-RPC
+  char cmd = line[0];                                               // Mode 2: single-char frames
   String arg = line.substring(1);
 
 #ifdef HIDBRIDGE_NET
