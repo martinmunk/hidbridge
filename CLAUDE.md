@@ -85,7 +85,26 @@ families:
 
 Both backends emit identical report bytes, so behaviour is transport-independent.
 
+## Two drive modes for the MCU firmware (see `docs/bt-hid-modes.md`)
+
+The ESP32/Pico firmware can be driven two ways over the same channel; a line is routed by its first
+char (`{` = Mode 1, else Mode 2). Both coexist.
+
+- **Mode 2 ("just a radio", the default + original):** the host builds the exact report bytes
+  (`reports.py` + `controller.py`) and the board relays them -- `K/M/A/D<hex>` frame lines. This is
+  what preserves the multi-backend byte-parity and keeps report logic host-side + offline-testable.
+- **Mode 1 ("tell it WHAT"):** the board owns the report building. The host sends **JSON-RPC 2.0**
+  (`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`); the firmware builds the
+  reports. The report layer is native C++ in `firmware/shared/hidbridge_mode1.h` (shared by both
+  firmwares), a **deliberate duplicate of `reports.py`** -- guarded by `test_bt_hid_mode1.py`, which
+  dry-runs each command (`dry:true` returns built bytes) and asserts equality with `reports.py`. Host
+  side: `mode1.Mode1Client` + `hidbridge --rpc`.
+
 ## Invariants that will bite you
+
+- **Mode 1 firmware `hidbridge_mode1.h` duplicates `reports.py` on purpose (no codegen) -- keep them
+  in sync.** `test_bt_hid_mode1.py::test_firmware_dry_run_matches_reports_py` (gated `BT_HID_MODE1=1`)
+  is the drift guard; run it after touching either the keymap/builders in `reports.py` or the header.
 
 - **Firmware/host report-map parity.** The firmware installs `REPORT_DESCRIPTOR` byte-for-byte;
   `python/tests/test_bt_hid_esp32.py` parses `firmware/esp32/src/main.cpp` and fails on drift. Never
