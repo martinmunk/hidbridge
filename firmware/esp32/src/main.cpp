@@ -107,6 +107,9 @@
 #include <Preferences.h>
 #include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
 #include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
+#ifdef HIDBRIDGE_WIFI
+#include <WiFi.h>            // WiFi station (an alternative to Ethernet for the net path)
+#endif
 #endif
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
@@ -181,6 +184,7 @@ static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
 static WebServer     webServer(80);          // Mode 1 control page + /rpc
+static IPAddress     hbLocalIP();            // local IP of the active interface (ETH/WiFi); def. below
 #else
 // No network on this board: NetSession is never defined, but handleLine still takes a NetSession*
 // (always nullptr here) so there is ONE command handler shared by both builds -- a serial-only board
@@ -685,7 +689,7 @@ static void printNetStatus(Print& out) {
   out.print("OK net eth=");
   out.print(ethUp ? "1" : "0");
   out.print(" ip=");
-  out.print(ethUp ? ETH.localIP().toString() : String("0.0.0.0"));
+  out.print(ethUp ? hbLocalIP().toString() : String("0.0.0.0"));
   out.print(" port=");
   out.print(HB_NET_PORT);
   out.print(" mdns=");
@@ -810,6 +814,19 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     result["disconnected"] = (h != BLE_HS_CONN_HANDLE_NONE);
     return;
   }
+#ifdef HIDBRIDGE_WIFI
+  if (!strcmp(method, "wifi")) {          // provision WiFi credentials (station mode)
+    *handled = true;
+    const char* ssid = params["ssid"] | (const char*)nullptr;
+    const char* pass = params["pass"] | "";
+    if (!ssid || !ssid[0]) { *errCode = -32602; *errMsg = "missing 'ssid'"; return; }
+    Preferences wp; wp.begin("hidbridge", false);
+    wp.putString("wifi_ssid", ssid); wp.putString("wifi_pass", pass); wp.end();
+    WiFi.begin(ssid, pass);               // (re)connect with the new credentials
+    result["ssid"] = ssid; result["connecting"] = true;
+    return;
+  }
+#endif
   // not one of ours -> leave *handled=false (dispatcher returns "method not found")
 }
 
@@ -997,18 +1014,34 @@ static void netPoll() {
   }
 }
 
+// The local IP of whichever interface this build uses (Ethernet or WiFi). `ethUp` = "the network is
+// up" for either (kept the name for compatibility).
+static IPAddress hbLocalIP() {
+#ifdef HIDBRIDGE_WIFI
+  return WiFi.localIP();
+#else
+  return ETH.localIP();
+#endif
+}
+
 static void onNetEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_CONNECTED:
       Serial.println("EVT net link");
       break;
     case ARDUINO_EVENT_ETH_GOT_IP:
+#ifdef HIDBRIDGE_WIFI
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+#endif
       ethUp = true;
       Serial.print("EVT net up ip=");
-      Serial.println(ETH.localIP().toString());
+      Serial.println(hbLocalIP().toString());
       break;
     case ARDUINO_EVENT_ETH_DISCONNECTED:
     case ARDUINO_EVENT_ETH_STOP:
+#ifdef HIDBRIDGE_WIFI
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+#endif
       ethUp = false;
       Serial.println("EVT net down");
       break;
@@ -1072,12 +1105,30 @@ static void netSetup() {
   prefs.end();
 
   Network.onEvent(onNetEvent);
+#ifdef HIDBRIDGE_WIFI
+  // WiFi station: connect with NVS-provisioned credentials (set over serial via the `wifi` method).
+  // Async -- the servers below start now and begin serving once STA gets an IP (see onNetEvent).
+  {
+    Preferences wp; wp.begin("hidbridge", true);
+    String ssid = wp.getString("wifi_ssid", ""), pass = wp.getString("wifi_pass", "");
+    wp.end();
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(HB_MDNS_HOST);
+    if (ssid.length()) {
+      WiFi.begin(ssid.c_str(), pass.c_str());
+      Serial.print("wifi connecting ssid="); Serial.println(ssid);
+    } else {
+      Serial.println("note: WiFi has no credentials (set them with the `wifi` JSON method over serial)");
+    }
+  }
+#else
   if (!ETH.begin(HB_ETH_PHY_TYPE, HB_ETH_PHY_ADDR, HB_ETH_PIN_MDC, HB_ETH_PIN_MDIO,
                  HB_ETH_PIN_POWER, HB_ETH_CLK_MODE)) {
     Serial.println("ERR eth init");            // wrong PHY/pins for this board, or no PHY at all
     return;
   }
   ETH.setHostname(HB_MDNS_HOST);
+#endif
   tcpServer.begin();
   tcpServer.setNoDelay(true);
   static const char* kHdrs[] = { "X-Auth-Token" };
