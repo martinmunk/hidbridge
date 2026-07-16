@@ -105,6 +105,7 @@
 #include <NetworkClient.h>
 #include <NetworkServer.h>
 #include <Preferences.h>
+#include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
 #endif
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
@@ -178,6 +179,7 @@ static NetworkServer tcpServer(HB_NET_PORT);
 static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
+static WebServer     webServer(80);          // Mode 1 control page + /rpc
 #else
 // No network on this board: NetSession is never defined, but handleLine still takes a NetSession*
 // (always nullptr here) so there is ONE command handler shared by both builds -- a serial-only board
@@ -1007,6 +1009,52 @@ static void onNetEvent(arduino_event_id_t event) {
   }
 }
 
+// A Print that captures into a String, so handleJsonRpc's reply can be sent as an HTTP body.
+struct StringPrinter : public Print {
+  String s;
+  size_t write(uint8_t c) override { s += (char)c; return 1; }
+  size_t write(const uint8_t* b, size_t n) override { s.concat((const char*)b, n); return n; }
+};
+
+// A tiny self-contained control page: it POSTs JSON-RPC to /rpc with the token as a header. This is
+// the SAME Mode 1 protocol the serial/TCP clients speak -- the webpage is just another JSON-RPC front.
+static const char CONTROL_PAGE[] PROGMEM = R"HTML(<!doctype html><html><head>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>hidbridge control</title>
+<style>body{font-family:system-ui,sans-serif;max-width:40em;margin:2em auto;padding:0 1em}
+input,button{font-size:1em;padding:.4em;margin:.15em}fieldset{margin:.6em 0;border-radius:6px}
+#out{white-space:pre-wrap;background:#f4f4f4;padding:.6em;border-radius:6px;min-height:2em}</style>
+</head><body><h1>hidbridge control</h1>
+<p>token <input id=tok type=password size=26 placeholder="net.token"> <button onclick=hello()>hello</button></p>
+<fieldset><legend>keyboard</legend>
+<input id=txt size=28 placeholder="text to type"> <button onclick=type_()>type</button>
+<button onclick="key('enter')">enter</button> <button onclick="key('backspace')">bksp</button></fieldset>
+<fieldset><legend>pointer</legend>
+tap <input id=tx type=number step=.01 value=.5 style=width:5em>
+<input id=ty type=number step=.01 value=.5 style=width:5em> <button onclick=tap()>tap</button><br>
+move <input id=dx type=number value=20 style=width:5em>
+<input id=dy type=number value=0 style=width:5em> <button onclick=move_()>move</button>
+<button onclick=click_()>click</button></fieldset><div id=out></div><script>
+let id=0;async function rpc(method,params){try{
+const r=await fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':tok.value},
+body:JSON.stringify({jsonrpc:'2.0',id:++id,method,params:params||{}})});
+const j=await r.json();out.textContent=JSON.stringify(j.result||j.error);return j;}
+catch(e){out.textContent=e}}
+function hello(){rpc('hello')}function type_(){rpc('type',{text:txt.value})}
+function key(name){rpc('key',{name})}function tap(){rpc('tap',{x:+tx.value,y:+ty.value})}
+function move_(){rpc('move',{dx:+dx.value,dy:+dy.value})}function click_(){rpc('click',{button:'left'})}
+</script></body></html>)HTML";
+
+static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
+
+static void handleWebRpc() {
+  // Auth mirrors the TCP path: the X-Auth-Token header must equal the NVS token (fail-closed -- with
+  // no token provisioned, only `hello` works). The report bytes still cross the LAN in the clear.
+  bool authed = webServer.hasHeader("X-Auth-Token") && tokenEquals(webServer.header("X-Auth-Token"));
+  StringPrinter sp;
+  hbmode1::handleJsonRpc(webServer.arg("plain"), sp, authed, esp32Notify, esp32FillHello, esp32Custom);
+  webServer.send(200, "application/json", sp.s);
+}
+
 static void netSetup() {
   // Create the NVS namespace up front. Opening it READ-ONLY (hasToken/tokenEquals) before it has
   // ever been written logs an ESP error to the UART -- "nvs_open failed: NOT_FOUND" -- which
@@ -1024,8 +1072,14 @@ static void netSetup() {
   ETH.setHostname(HB_MDNS_HOST);
   tcpServer.begin();
   tcpServer.setNoDelay(true);
+  static const char* kHdrs[] = { "X-Auth-Token" };
+  webServer.collectHeaders(kHdrs, 1);
+  webServer.on("/", handleWebRoot);
+  webServer.on("/rpc", HTTP_POST, handleWebRpc);
+  webServer.begin();
   if (MDNS.begin(HB_MDNS_HOST)) {
-    MDNS.addService("hidbridge", "tcp", HB_NET_PORT);
+    MDNS.addService("hidbridge", "tcp", HB_NET_PORT);   // the raw JSON-RPC / frame line port
+    MDNS.addService("http", "tcp", 80);                 // the control webpage
   }
   Serial.print("OK net listening port=");
   Serial.print(HB_NET_PORT);
@@ -1050,6 +1104,7 @@ void loop() {
   }
 #ifdef HIDBRIDGE_NET
   netPoll();
+  webServer.handleClient();
 #endif
   delay(2);
 }
