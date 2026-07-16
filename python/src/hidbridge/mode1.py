@@ -20,12 +20,34 @@ Stdlib only (json + the injected channel), so this imports and unit-tests fully 
 from __future__ import annotations
 
 import json
+import warnings
+from dataclasses import dataclass, field
 
 DEFAULT_BAUD = 115200
+
+# The protocol version THIS client knows. The firmware bakes in one version and reports it (+ a
+# capability list) in `hello`; the host is the flexible party. We DON'T branch on the version number
+# (a board may ship a subset of features) -- we feature-detect on `caps`. The version is used only to
+# WARN when a board is newer than we understand, so we never crash on an unknown version -- we just
+# use the capabilities we both share. (Robustness principle: be liberal in what you accept.)
+KNOWN_PROTO = 1
 
 
 class Mode1Error(RuntimeError):
     """A Mode 1 (JSON-RPC) call failed: transport error, or a JSON-RPC error object was returned."""
+
+
+@dataclass
+class ServerInfo:
+    """The board's `hello` handshake, cached: version + capabilities the host adapts to."""
+
+    proto: int
+    caps: frozenset = field(default_factory=frozenset)
+    device: str = ""
+    name: str = ""
+    nick: str = ""
+    modes: tuple = ()
+    raw: dict = field(default_factory=dict)
 
 
 class Mode1Client:
@@ -38,6 +60,7 @@ class Mode1Client:
         self._ch = channel
         self._id = 0
         self._max_reads = max_reads
+        self._info: ServerInfo | None = None
 
     # -- JSON-RPC core --
     def call(self, method: str, params: dict | None = None, *, dry: bool = False) -> dict:
@@ -70,16 +93,43 @@ class Mode1Client:
             return msg.get("result", {}) or {}
         raise Mode1Error(f"no matching JSON-RPC response to {method!r}")
 
-    # -- capabilities handshake --
+    # -- capabilities handshake + version handling --
     def hello(self) -> dict:
-        """Discover the board: {proto, device, name, modes, caps}. Allowed unauthenticated."""
-        return self.call("hello")
+        """Discover the board: {proto, device, name, nick, modes, caps}. Caches it as `.info`.
+
+        If the board's protocol is NEWER than this client knows, warn (don't fail) -- we proceed on
+        the capabilities we both share. Allowed unauthenticated."""
+        r = self.call("hello")
+        self._info = ServerInfo(
+            proto=int(r.get("proto", 0)), caps=frozenset(r.get("caps") or []),
+            device=r.get("device", ""), name=r.get("name", ""), nick=r.get("nick", ""),
+            modes=tuple(r.get("modes") or ()), raw=r)
+        if self._info.proto > KNOWN_PROTO:
+            warnings.warn(
+                f"board speaks protocol {self._info.proto}; this client knows {KNOWN_PROTO} -- using "
+                f"the capabilities both share ({sorted(self._info.caps)})", stacklevel=2)
+        return r
+
+    def info(self) -> ServerInfo:
+        """The cached `hello` handshake (fetched once on first use)."""
+        if self._info is None:
+            self.hello()
+        return self._info
 
     def supports(self, cap: str) -> bool:
         try:
-            return cap in (self.hello().get("caps") or [])
+            return cap in self.info().caps
         except Mode1Error:
             return False
+
+    def require_cap(self, cap: str) -> None:
+        """Raise a clear error if the board lacks capability `cap`, rather than sending a command it
+        would reject cryptically."""
+        info = self.info()
+        if cap not in info.caps:
+            raise Mode1Error(
+                f"board {info.device or '?'} (proto {info.proto}) lacks capability {cap!r}; "
+                f"it advertises {sorted(info.caps)}")
 
     # -- authentication (network only; serial is trusted). Uses the Mode 2 `@<token>` line. --
     def authenticate(self, token: str) -> None:
@@ -126,27 +176,34 @@ class Mode1Client:
     def frames(self, frames, *, dry: bool = False) -> dict:
         """Mode 2 semantics via JSON-RPC: relay PRE-BUILT report frames ('<ridHex><bodyHex>' strings,
         the shape a dry run returns) -- the board just notifies them."""
+        self.require_cap("frames")
         return self.call("frames", {"frames": list(frames)}, dry=dry)
 
-    # -- Mode 1 connection management BY CLIENT NAME (firmware-specific; see caps 'connect') --
+    # -- Mode 1 connection management BY CLIENT NAME (firmware-specific; see caps 'connect'/'nickname').
+    #    Each capability-gates so an older/minimal board gives a clear error instead of a cryptic one. --
     def nickname(self, name: str | None = None) -> dict:
         """Get (no arg) or set the board's nickname. The advertised name is HIDBRIDGE-<nick>."""
+        self.require_cap("nickname")
         return self.call("nickname", {"name": name} if name else {})
 
     def identities(self) -> dict:
         """List the board's identity slots: {slots:[{slot,client,addr,name,conn,sub}], adv, tgt}."""
+        self.require_cap("connect")
         return self.call("identities")
 
     def pair(self, client: str) -> dict:
         """Assign a free identity slot to <client> + advertise it so that iPad can bond."""
+        self.require_cap("connect")
         return self.call("pair", {"client": client})
 
     def connect(self, client: str) -> dict:
         """Bring <client>'s identity up (advertise it so the bonded iPad reconnects) + target it."""
+        self.require_cap("connect")
         return self.call("connect", {"client": client})
 
     def disconnect(self, client: str | None = None) -> dict:
         """Disconnect <client> (or the current target) -- drop the central, keep the bond, park."""
+        self.require_cap("connect")
         return self.call("disconnect", {"client": client} if client else {})
 
     def close(self) -> None:

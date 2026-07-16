@@ -91,10 +91,21 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
     ]
 
 
+_FULL_CAPS = ["keyboard", "mouse", "abs", "digitizer", "slots", "nickname", "connect", "frames"]
+
+
+def _cap_handler(caps, seen=None):
+    """A RpcFake handler that answers hello with `caps` and everything else with {ok:1}."""
+    def h(m, p):
+        if seen is not None:
+            seen.append((m, p))
+        return {"proto": 1, "caps": list(caps)} if m == "hello" else {"ok": 1}
+    return h
+
+
 def test_connection_and_frames_methods():
     seen = []
-    fake = RpcFake(handler=lambda m, p: (seen.append((m, p)), {"ok": 1})[1])
-    c = mode1.Mode1Client(fake)
+    c = mode1.Mode1Client(RpcFake(handler=_cap_handler(_FULL_CAPS, seen)))
     c.nickname("labkit")
     c.nickname()
     c.identities()
@@ -103,7 +114,9 @@ def test_connection_and_frames_methods():
     c.disconnect("mini5")
     c.disconnect()
     c.frames(["0100001e0000000000", "010000000000000000"])
+    # a capability-gated call fetches hello ONCE (cached), then issues the method
     assert seen == [
+        ("hello", {}),
         ("nickname", {"name": "labkit"}),
         ("nickname", {}),
         ("identities", {}),
@@ -113,6 +126,30 @@ def test_connection_and_frames_methods():
         ("disconnect", {}),
         ("frames", {"frames": ["0100001e0000000000", "010000000000000000"]}),
     ]
+
+
+def test_missing_capability_raises_clearly():
+    # a board that does NOT advertise 'connect' -> a clear error, not a cryptic firmware reject
+    c = mode1.Mode1Client(RpcFake(handler=_cap_handler(["keyboard", "mouse"])))
+    with pytest.raises(mode1.Mode1Error) as ei:
+        c.connect("mini5")
+    assert "connect" in str(ei.value) and "lacks capability" in str(ei.value)
+
+
+def test_newer_protocol_warns_not_crashes():
+    fake = RpcFake(handler=lambda m, p: {"proto": 99, "caps": _FULL_CAPS})
+    c = mode1.Mode1Client(fake)
+    with pytest.warns(UserWarning, match="protocol 99"):
+        c.hello()
+    # still usable: a supported cap works despite the newer version
+    assert c.supports("connect")
+
+
+def test_info_is_cached():
+    calls = []
+    c = mode1.Mode1Client(RpcFake(handler=lambda m, p: (calls.append(m), {"proto": 1, "caps": []})[1]))
+    c.info(); c.info(); c.supports("x")
+    assert calls == ["hello"]   # fetched exactly once
 
 
 def test_dry_flag_adds_dry_param():
@@ -130,13 +167,18 @@ def test_frames_relays_known_drive_report_bytes():
     the smart-firmware path building the same notification the Mode 2 transport would."""
     from hidbridge import central_core as C
     seen = []
-    fake = RpcFake(handler=lambda m, p: (seen.append((m, p)), {"sent": 1, "conn": True})[1])
-    c = mode1.Mode1Client(fake)
+
+    def handler(m, p):
+        seen.append((m, p))
+        if m == "hello":
+            return {"proto": 1, "caps": ["frames"]}
+        return {"sent": 1, "conn": True}
+    c = mode1.Mode1Client(RpcFake(handler=handler))
     kbd = C.frames_method_hex(1, R.keyboard_report(0, [0x04]).data)   # 'a' down
     mouse = C.frames_method_hex(2, R.mouse_report(dx=3).data)         # move dx=3
     assert c.frames([kbd]) == {"sent": 1, "conn": True}
     c.frames([mouse])
-    assert seen == [("frames", {"frames": [kbd]}), ("frames", {"frames": [mouse]})]
+    assert seen == [("hello", {}), ("frames", {"frames": [kbd]}), ("frames", {"frames": [mouse]})]
     assert kbd == "010000040000000000" and mouse == "0200030000"
 
 
