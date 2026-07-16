@@ -106,6 +106,7 @@
 #include <NetworkServer.h>
 #include <Preferences.h>
 #include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
+#include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
 #endif
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
@@ -407,6 +408,13 @@ static bool hasToken() {
   bool has = prefs.isKey("token") && prefs.getString("token", "").length() >= HB_MIN_TOKEN_LEN;
   prefs.end();
   return has;
+}
+
+static String getToken() {                     // read the NVS token (for the OTA password only)
+  prefs.begin("hidbridge", true);
+  String t = prefs.getString("token", "");
+  prefs.end();
+  return t;
 }
 
 static bool tokenEquals(const String& given) {
@@ -1081,6 +1089,20 @@ static void netSetup() {
     MDNS.addService("hidbridge", "tcp", HB_NET_PORT);   // the raw JSON-RPC / frame line port
     MDNS.addService("http", "tcp", 80);                 // the control webpage
   }
+  // OTA firmware update over the network. Gated behind the token (reused as the OTA password) so it is
+  // fail-closed like the rest: an unprovisioned board cannot be reflashed over the LAN. The default
+  // partition already has two app slots, so no partition change is needed.
+  {
+    String tok = getToken();
+    if (tok.length() >= HB_MIN_TOKEN_LEN) {
+      ArduinoOTA.setHostname(HB_MDNS_HOST);
+      ArduinoOTA.setPassword(tok.c_str());
+      ArduinoOTA.begin();
+      Serial.println("OK ota enabled");
+    } else {
+      Serial.println("note: OTA disabled (provision a token to enable)");
+    }
+  }
   Serial.print("OK net listening port=");
   Serial.print(HB_NET_PORT);
   Serial.print(" mdns=");
@@ -1105,6 +1127,7 @@ void loop() {
 #ifdef HIDBRIDGE_NET
   netPoll();
   webServer.handleClient();
+  ArduinoOTA.handle();
 #endif
   delay(2);
 }
