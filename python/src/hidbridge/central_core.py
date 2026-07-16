@@ -480,6 +480,24 @@ def notification_verdict(received: dict, expected: dict,
 
 
 # --------------------------------------------------------------------------- #
+# Drive-mode encoding -- one KNOWN report as a Mode 1 `frames` hex string
+# --------------------------------------------------------------------------- #
+def frames_method_hex(report_id: int, body: bytes) -> str:
+    """Encode one report as the Mode 1 `frames` method's hex string: '<reportID hex><body hex>'.
+
+    The central self-test drives each KNOWN report body over the board TWO ways and asserts the SAME
+    GATT notification bytes arrive (see docs/bt-hid-modes.md):
+      * mode=frames -- the Mode 2 frame transport (`transport.send`), the host builds the report;
+      * mode=rpc    -- a Mode 1 JSON-RPC `frames` call over the transport's OWN open channel, which
+                       RELAYS these pre-built report bytes.
+    A `frames` entry is a 2-hex report id followed by the body as hex -- the exact shape a Mode 1
+    dry run returns and `mode1.Mode1Client.frames()` relays. Pure so the offline suite pins the
+    encoding both modes share without a board.
+    """
+    return "%02x" % report_id + bytes(body).hex()
+
+
+# --------------------------------------------------------------------------- #
 # Per-backend profiles -- shared by the live harness AND the offline tests
 # --------------------------------------------------------------------------- #
 @dataclass

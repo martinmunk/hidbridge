@@ -122,6 +122,24 @@ def test_dry_flag_adds_dry_param():
     assert seen[0] == {"text": "x", "dry": True}
 
 
+def test_frames_relays_known_drive_report_bytes():
+    """The EXACT shape central._inject uses for mode=rpc: relay the KNOWN drives as `frames` strings.
+
+    Locks the mode=frames <-> mode=rpc equivalence offline: central_core.frames_method_hex builds the
+    hex, Mode1Client.frames relays it verbatim as a JSON-RPC `frames` call. On a real board this is
+    the smart-firmware path building the same notification the Mode 2 transport would."""
+    from hidbridge import central_core as C
+    seen = []
+    fake = RpcFake(handler=lambda m, p: (seen.append((m, p)), {"sent": 1, "conn": True})[1])
+    c = mode1.Mode1Client(fake)
+    kbd = C.frames_method_hex(1, R.keyboard_report(0, [0x04]).data)   # 'a' down
+    mouse = C.frames_method_hex(2, R.mouse_report(dx=3).data)         # move dx=3
+    assert c.frames([kbd]) == {"sent": 1, "conn": True}
+    c.frames([mouse])
+    assert seen == [("frames", {"frames": [kbd]}), ("frames", {"frames": [mouse]})]
+    assert kbd == "010000040000000000" and mouse == "0200030000"
+
+
 # --------------------------------------------------------------------------- #
 # response + error + notification handling
 # --------------------------------------------------------------------------- #

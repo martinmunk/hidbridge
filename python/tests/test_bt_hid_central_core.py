@@ -259,6 +259,27 @@ def test_notification_verdict_reports_missing_and_mismatch():
 
 
 # --------------------------------------------------------------------------- #
+# Drive-mode encoding: one KNOWN report as the Mode 1 `frames` hex string
+# --------------------------------------------------------------------------- #
+def test_frames_method_hex_encodes_report_id_and_body():
+    # the SAME KNOWN drives the central self-test injects (keyboard 'a' down, mouse dx=3), now shaped
+    # as the Mode 1 `frames` string the mode=rpc inject relays: 2-hex report id + body hex.
+    kbd_body = R.keyboard_report(0, [0x04]).data      # 00 00 04 00 00 00 00 00
+    assert C.frames_method_hex(1, kbd_body) == "01" + kbd_body.hex() == "010000040000000000"
+    mouse_body = R.mouse_report(dx=3).data            # 00 03 00 00
+    assert C.frames_method_hex(2, mouse_body) == "0200030000"
+    # a renumbered mouse id (arduino-pico uses 3) is still a zero-padded 2-hex prefix
+    assert C.frames_method_hex(3, mouse_body) == "0300030000"
+
+
+def test_frames_method_hex_matches_reports_py_hex_shape():
+    # the frames string must equal reports.py's own hex for the same KNOWN drive -- so mode=frames
+    # (host builds bytes) and mode=rpc (board relays these bytes) inject byte-identical reports.
+    for rid, body in ((1, R.keyboard_report(0, [0x04]).data), (2, R.mouse_report(dx=3).data)):
+        assert C.frames_method_hex(rid, body) == "%02x%s" % (rid, body.hex())
+
+
+# --------------------------------------------------------------------------- #
 # LE-connect method resolution (the hci0 auto-connect-stall workaround)
 # --------------------------------------------------------------------------- #
 def test_resolve_connect_method_scan_always_scan():

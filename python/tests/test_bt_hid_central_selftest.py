@@ -63,6 +63,12 @@ pytestmark = pytest.mark.skipif(
 # It self-skips unless the board is reachable + provisioned (BT_HID_NET_HOST / net.token).
 BACKENDS = ["pico", "esp32", "dongle", "net"]
 
+# Drive modes for the inject step (docs/bt-hid-modes.md): "frames" = Mode 2 frame relay (host builds
+# the report bytes); "rpc" = Mode 1 JSON-RPC `frames` over the transport's OWN channel (the board
+# relays the same bytes). Both must land the IDENTICAL GATT notification. mode=rpc needs JSON-RPC
+# firmware, so the dongle backend (a BlueZ daemon) self-skips that combo -- see central.py.
+MODES = ["frames", "rpc"]
+
 # System python that has dbus + gi + AF_BLUETOOTH (uv's CPython does not).
 SYS_PY = os.environ.get("BT_HID_SYS_PY", sys.executable)
 
@@ -73,11 +79,13 @@ def _builtin_present() -> bool:
     return any(a["kind"] == "builtin" for a in A.list_adapters())
 
 
-def _run_central_once(backend: str) -> dict:
+def _run_central_once(backend: str, mode: str) -> dict:
     # Steering (all optional, for the stall workaround): BT_HID_CENTRAL_ADAPTER pins the central
     # adapter (e.g. a USB dongle hciN instead of the built-in); BT_HID_CONNECT_METHOD picks the LE
     # connect method (auto|scan|connectdevice) -- central.py reads the latter from the env directly.
-    cmd = [SYS_PY, "-m", "hidbridge.central", "--backend", backend, "--json"]
+    # `mode` selects the inject drive mode (frames | rpc); passed explicitly so the parametrization
+    # steers it (central.py also honours BT_HID_MODE for a direct run).
+    cmd = [SYS_PY, "-m", "hidbridge.central", "--backend", backend, "--mode", mode, "--json"]
     central_adapter = os.environ.get("BT_HID_CENTRAL_ADAPTER")
     if central_adapter:
         cmd += ["--central", central_adapter]
@@ -112,7 +120,7 @@ def _free_board(backend: str) -> None:
         pass
 
 
-def _run_central(backend: str) -> dict:
+def _run_central(backend: str, mode: str) -> dict:
     """Run the self-test, RETRYING only TRANSIENT link failures (flaky LE-central connect / a link
     that drops before delivery -- see central_core.is_retryable_failure). A real report-map or
     notification-byte mismatch is returned immediately (never retried). BT_HID_CENTRAL_ATTEMPTS caps
@@ -122,7 +130,7 @@ def _run_central(backend: str) -> dict:
     attempts = max(1, int(os.environ.get("BT_HID_CENTRAL_ATTEMPTS", "8")))
     result: dict = {}
     for attempt in range(1, attempts + 1):
-        result = _run_central_once(backend)
+        result = _run_central_once(backend, mode)
         result.setdefault("attempt", attempt)
         if result.get("status") != "fail" or not result.get("retryable", False):
             return result
@@ -132,25 +140,29 @@ def _run_central(backend: str) -> dict:
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_central_hid_selftest(backend):
+@pytest.mark.parametrize("mode", MODES)
+def test_central_hid_selftest(backend, mode):
     # PREPARE ---------------------------------------------------------------
     if not _builtin_present():
         pytest.skip("no built-in adapter present to act as the transient central")
 
     # RUN -------------------------------------------------------------------
-    result = _run_central(backend)
+    result = _run_central(backend, mode)
     status = result.get("status")
 
-    # A present-but-free MCU is required to VERIFY; anything else self-skips with a clear reason.
+    # A present-but-free MCU is required to VERIFY; anything else self-skips with a clear reason
+    # (incl. the dongle+rpc combo, which central.py skips -- rpc needs JSON-RPC firmware).
     if status == "skip":
-        pytest.skip(f"{backend}: {result.get('reason', 'skipped by central.py')}")
+        pytest.skip(f"{backend}/{mode}: {result.get('reason', 'skipped by central.py')}")
     assert status in ("pass", "fail"), f"unexpected verdict: {result}"
 
     # VERIFY ----------------------------------------------------------------
     assert status == "pass", (
-        f"{backend} central self-test FAILED: error={result.get('error')} "
+        f"{backend}/{mode} central self-test FAILED: error={result.get('error')} "
         f"report_map={result.get('report_map')} notifications={result.get('notifications')} "
         f"steps={result.get('steps')}")
+    # the verdict records which drive mode actually carried the inject
+    assert result.get("mode") == mode, f"verdict mode {result.get('mode')!r} != requested {mode!r}"
 
     # explicit load-bearing assertions on the verdict payload
     rmap = result["report_map"]

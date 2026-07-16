@@ -12,6 +12,13 @@ Powered state is recorded + restored, the transient bond is removed on cleanup, 
 never touched. A BLE peripheral serves ONE central at a time, so if the MCU is already connected to
 another central (e.g. an iPad) we SKIP rather than disturb it.
 
+The inject step runs in either DRIVE MODE (--mode, docs/bt-hid-modes.md): "frames" (Mode 2 -- the
+host builds the report bytes and the board relays them, `transport.send`) or "rpc" (Mode 1 -- a
+JSON-RPC `frames` call over the transport's OWN open channel; the board relays the same pre-built
+bytes). Both modes must land the IDENTICAL GATT notification, so this proves BOTH firmware paths carry
+HID over the air. mode=rpc needs JSON-RPC firmware, so it applies to esp32/pico/net only (the dongle
+daemon self-skips).
+
 Runs under the SYSTEM python (needs dbus + gi +, for the serial backends, pyserial). Emits a single
 JSON verdict line with --json. Exit codes: 0 = PASS, 2 = SKIP (with reason), 1 = FAIL.
 
@@ -204,7 +211,8 @@ def transport_connected(transport, profile) -> bool | None:
 # The central self-test flow
 # --------------------------------------------------------------------------- #
 class CentralSelfTest:
-    def __init__(self, backend: str, central_hci: str, transport, connect_method: str = "scan"):
+    def __init__(self, backend: str, central_hci: str, transport, connect_method: str = "scan",
+                 mode: str = "frames"):
         self.profile = CC.BACKEND_PROFILES[backend]
         self.backend = backend
         self.central_path = f"/org/bluez/{central_hci}"
@@ -213,6 +221,11 @@ class CentralSelfTest:
         # "scan" (direct Connect during active scan) or "connectdevice" (Adapter1.ConnectDevice
         # direct create-connection -- the hci0 auto-connect-stall escape). See central_core.
         self.connect_method = connect_method
+        # Drive mode for the INJECT step (docs/bt-hid-modes.md): "frames" = Mode 2 frame relay
+        # (transport.send, host builds the report bytes); "rpc" = Mode 1 JSON-RPC `frames` call over
+        # the transport's OWN open channel (the board relays the same pre-built bytes). Both must land
+        # the IDENTICAL notification; the verify path is unchanged either way.
+        self.mode = mode
         self.dev_address = None       # captured from the advertisement (for ConnectDevice)
         self.dev_addr_type = None
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -221,7 +234,8 @@ class CentralSelfTest:
         self.dev_path = None
         # status starts "init"; a handler moves it to pass/skip/fail. run() enters the mainloop only
         # while it is still "init" (so an immediate skip/fail in _prepare short-circuits the loop).
-        self.result = {"status": "init", "backend": backend, "central": central_hci, "steps": {}}
+        self.result = {"status": "init", "backend": backend, "central": central_hci,
+                       "mode": mode, "steps": {}}
         self.report_chars = {}       # report_id -> {char_path, report_type, ref_path}
         self.received = {}           # report_id -> bytes
         self.notify_started = []     # char paths we StartNotify'd (to StopNotify on cleanup)
@@ -686,20 +700,52 @@ class CentralSelfTest:
         return cb
 
     def _inject(self):
-        self.result["steps"]["inject"] = "sending"
-        # send each drive frame over the MCU serial (or daemon); one report per target.
+        self.result["steps"]["inject"] = f"sending ({self.mode})"
+        # Inject the SAME KNOWN report bodies either as Mode 2 frames (transport.send) or, for
+        # mode=rpc, as a Mode 1 JSON-RPC `frames` call over the transport's OWN already-open channel.
+        # One report per target so the per-report ack ("notified" vs "noconn") stays visible.
         try:
-            for _fw_id, kind, body in self._drive_targets:
-                res = self.transport.send([(kind, body)])
-                # record the board's ack so a "notified" vs "noconn" (board saw no central on the
-                # target slot) is visible in the verdict when a notification fails to arrive.
-                self.result["steps"].setdefault("inject_resp", {})[str(_fw_id)] = res.get("resp")
-                if not res.get("ok", True):
-                    return self._fail(f"transport send failed: {res}")
+            client = self._rpc_client() if self.mode == "rpc" else None
+            for fw_id, kind, body in self._drive_targets:
+                if client is not None:
+                    # Mode 1: relay the pre-built report bytes; a real send returns {sent, conn}
+                    # (conn:false = accepted but no central on the target slot -- the Mode 2 "noconn").
+                    res = client.frames([CC.frames_method_hex(fw_id, body)])
+                    self.result["steps"].setdefault("inject_resp", {})[str(fw_id)] = res
+                    if res.get("sent", 1) == 0:
+                        return self._fail(f"mode=rpc frames send reported nothing sent: {res}")
+                else:
+                    res = self.transport.send([(kind, body)])
+                    # record the board's ack so a "notified" vs "noconn" (board saw no central on the
+                    # target slot) is visible in the verdict when a notification fails to arrive.
+                    self.result["steps"].setdefault("inject_resp", {})[str(fw_id)] = res.get("resp")
+                    if not res.get("ok", True):
+                        return self._fail(f"transport send failed: {res}")
         except Exception as e:  # noqa: BLE001
             return self._fail(f"transport send raised: {e}")
         # give notifications a moment; verdict is evaluated on arrival or at timeout
         GLib.timeout_add_seconds(4, self._settle)
+
+    def _rpc_client(self):
+        """A Mode1Client bound to the transport's OWN open channel (transport._ser).
+
+        Reusing the ALREADY-open serial/TCP channel is deliberate: opening a second connection to the
+        same board would fight the first (a serial port is single-open; the board resets on a fresh
+        USB open). By inject time the frame transports have opened `_ser` (ping/select_slot ran on the
+        connect path); nudge it open defensively otherwise. The daemon (dongle) backend has no such
+        channel -- it never reaches here (main() skips mode=rpc for it)."""
+        ser = getattr(self.transport, "_ser", None)
+        if ser is None:
+            for opener in ("_open", "_get"):   # esp32/net expose _open; pico exposes _get
+                fn = getattr(self.transport, opener, None)
+                if fn is not None:
+                    fn()
+                    ser = getattr(self.transport, "_ser", None)
+                    break
+        if ser is None:
+            raise RuntimeError("mode=rpc: transport exposes no open JSON-RPC channel (_ser)")
+        from hidbridge.mode1 import Mode1Client
+        return Mode1Client(ser)
 
     def _settle(self):
         self._verdict()
@@ -815,15 +861,31 @@ def main(argv=None):
                    help="LE connect method: scan (direct Connect during scan), connectdevice "
                         "(Adapter1.ConnectDevice, needs bluetoothd Experimental -- the hci0 "
                         "auto-connect-stall escape), or auto (connectdevice if available, else scan)")
+    p.add_argument("--mode", default=os.environ.get("BT_HID_MODE", "frames"),
+                   choices=("frames", "rpc"),
+                   help="inject mode: frames (Mode 2 frame relay -- the host builds the report bytes) "
+                        "or rpc (Mode 1 JSON-RPC `frames` over the transport's OWN channel -- the "
+                        "board relays the same bytes). Both must deliver identical GATT notifications")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
     profile = CC.BACKEND_PROFILES[args.backend]
     central = resolve_central(args.central)
     if central is None:
-        out = {"status": "skip", "backend": args.backend,
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode,
                "reason": "no built-in adapter present to use as the transient central"}
         print(json.dumps(out) if args.json else f"SKIP: {out['reason']}")
+        return 2
+
+    # mode=rpc drives the board via Mode 1 JSON-RPC, which only the MCU firmwares (esp32/pico/net)
+    # speak. The dongle backend is a local BlueZ daemon with no JSON-RPC channel -- skip clearly
+    # rather than fail (mode=frames still covers it).
+    if args.mode == "rpc" and profile.driver == "daemon":
+        reason = ("mode=rpc needs JSON-RPC firmware; the dongle backend is a BlueZ daemon (no "
+                  "JSON-RPC) -- only mode=frames applies")
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "reason": reason}
+        print(json.dumps(out) if args.json else f"SKIP: {reason}")
         return 2
 
     # Resolve the effective LE-connect method against the live daemon's Experimental capability.
@@ -833,13 +895,15 @@ def main(argv=None):
     try:
         connect_method = CC.resolve_connect_method(args.connect_method, experimental)
     except CC.ConnectMethodError as e:
-        out = {"status": "skip", "backend": args.backend, "central": central, "reason": str(e)}
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "reason": str(e)}
         print(json.dumps(out) if args.json else f"SKIP: {e}")
         return 2
 
     transport, skip = make_transport(profile)
     if skip:
-        out = {"status": "skip", "backend": args.backend, "central": central, "reason": skip}
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "reason": skip}
         print(json.dumps(out) if args.json else f"SKIP: {skip}")
         return 2
 
@@ -854,11 +918,13 @@ def main(argv=None):
             transport.close()
         except Exception:  # noqa: BLE001
             pass
-        out = {"status": "skip", "backend": args.backend, "central": central, "reason": reason}
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "reason": reason}
         print(json.dumps(out) if args.json else f"SKIP: {reason}")
         return 2
 
-    test = CentralSelfTest(args.backend, central, transport, connect_method=connect_method)
+    test = CentralSelfTest(args.backend, central, transport, connect_method=connect_method,
+                           mode=args.mode)
     result = test.run()
     result["connect_method"] = connect_method
     result["retryable"] = CC.is_retryable_failure(result)
@@ -868,7 +934,7 @@ def main(argv=None):
     else:
         status = result["status"].upper()
         print(f"central self-test {status}: backend={args.backend} central={central} "
-              f"connect_method={connect_method}")
+              f"mode={args.mode} connect_method={connect_method}")
         if result.get("report_map"):
             print(f"  report map: {result['report_map']}")
         if result.get("report_refs"):
