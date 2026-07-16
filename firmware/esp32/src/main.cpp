@@ -97,6 +97,7 @@
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <NimBLEServer.h>
+#include <Preferences.h>      // NVS: the device nickname (Mode 1) + the network token
 
 #ifdef HIDBRIDGE_NET
 #include <ETH.h>
@@ -327,10 +328,18 @@ static NimBLEServer*       server = nullptr;
 static NimBLEAddress       slotAddr[NUM_SLOTS];
 static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
-static char                slotName[NUM_SLOTS][24];
+static char                slotName[NUM_SLOTS][40];   // advertised LocalName = HIDBRIDGE-<nick>[-<client>]
+static char                slotClient[NUM_SLOTS][24]; // per-slot CLIENT label (empty = unassigned)
 static int                 advSlot = 0;
 static int                 tgtSlot = 0;
 static bool                parked = false;   // true = intentionally NOT advertising (host parked it)
+
+// The device NICKNAME (Mode 1). Advertised BLE base name = "HIDBRIDGE-<nick>"; per-slot with a client
+// = "HIDBRIDGE-<nick>-<client>". Persisted in NVS; defaults to a unique "esp32-<mac-suffix>" so two
+// boards coexist out of the box. DEVICE_NAME above stays the fixed FIRMWARE tag (banners/ping/host
+// reset-detection) -- only the advertised name follows the nickname.
+static char                g_nick[24] = "";
+static char                g_advName[40] = "HIDBRIDGE-esp32";
 
 // Forward declarations: the server callbacks (below) resume/point advertising; defined after setup().
 static void selectSlotAdvertise(int n, const char* name);
@@ -346,11 +355,29 @@ static int slotOfHandle(uint16_t h) {
   return -1;
 }
 
-static void defaultSlotName(int n, char* out, size_t cap) {
-  // Fallback name until the host sets a target-scoped one via I<n>:name. HIDBRIDGE-esp32 for slot 0
-  // (matches the legacy DEVICE_NAME so an old bond still sees a familiar name), HIDBRIDGE-esp32-sN else.
-  if (n == 0) snprintf(out, cap, "%s", DEVICE_NAME);
-  else        snprintf(out, cap, "%s-s%d", DEVICE_NAME, n);
+// Build slot n's advertised LocalName from the nickname + its client label: a client-assigned slot is
+// "HIDBRIDGE-<nick>-<client>"; slot 0 with no client is the bare "HIDBRIDGE-<nick>"; slot k>=1 with no
+// client is "HIDBRIDGE-<nick>-sk".
+static void buildSlotName(int n) {
+  if (slotClient[n][0]) snprintf(slotName[n], sizeof(slotName[n]), "%s-%s", g_advName, slotClient[n]);
+  else if (n == 0)      snprintf(slotName[n], sizeof(slotName[n]), "%s", g_advName);
+  else                  snprintf(slotName[n], sizeof(slotName[n]), "%s-s%d", g_advName, n);
+}
+
+// Load the nickname from NVS, or derive a unique default from the public MAC's last 2 bytes. Must run
+// AFTER NimBLEDevice::init() (the address is available then). Rebuilds g_advName.
+static void loadNickname() {
+  Preferences pr;
+  pr.begin("hidbridge", true);
+  String n = pr.getString("nick", "");
+  pr.end();
+  if (n.length()) {
+    snprintf(g_nick, sizeof(g_nick), "%s", n.c_str());
+  } else {
+    const uint8_t* v = NimBLEDevice::getAddress().getBase()->val;   // little-endian: v[0]=LSB
+    snprintf(g_nick, sizeof(g_nick), "esp32-%02x%02x", v[1], v[0]);
+  }
+  snprintf(g_advName, sizeof(g_advName), "HIDBRIDGE-%s", g_nick);
 }
 
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
@@ -515,7 +542,7 @@ void setup() {
   for (int i = 0; i < NUM_SLOTS; i++) {
     slotConn[i] = BLE_HS_CONN_HANDLE_NONE;
     slotSub[i] = false;
-    defaultSlotName(i, slotName[i], sizeof(slotName[i]));
+    slotClient[i][0] = 0;
   }
 
   NimBLEDevice::init(DEVICE_NAME);
@@ -541,6 +568,8 @@ void setup() {
 
   server->start();                             // starts the HID + battery + devinfo services
   deriveSlotAddresses();                       // needs init() done (public address available)
+  loadNickname();                              // NVS nick, or a unique esp32-<mac> default
+  for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
   selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
   Serial.println("OK HIDBRIDGE-esp32 ready");
 
@@ -680,12 +709,98 @@ static bool esp32Notify(uint8_t rid, const uint8_t* body, size_t len) {
 }
 static void esp32FillHello(JsonObject r) {
   r["device"] = DEVICE_NAME;
+  r["nick"] = g_nick;
   r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
   JsonArray caps = r["caps"].to<JsonArray>();
-  caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer"); caps.add("slots");
+  caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer");
+  caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
 #ifdef HIDBRIDGE_NET
   caps.add("net");
 #endif
+}
+
+// ---- Mode 1 firmware-specific methods: nickname + connection management BY CLIENT NAME. These touch
+// NVS / the slot+identity system, so they live here (not in the shared header) and are passed to
+// handleJsonRpc as the `custom` handler. ----
+static int findSlotForClient(const char* client) {
+  for (int i = 0; i < NUM_SLOTS; i++) if (!strcasecmp(slotClient[i], client)) return i;
+  return -1;
+}
+static int allocSlotForClient(const char* client) {
+  int s = findSlotForClient(client); if (s >= 0) return s;
+  for (int i = 0; i < NUM_SLOTS; i++) if (!slotClient[i][0]) return i;
+  return -1;
+}
+static void fillIdentity(JsonObject o, int i) {
+  o["slot"] = i;
+  o["client"] = slotClient[i];
+  char ah[16]; addrHex(slotAddr[i], ah, sizeof(ah)); o["addr"] = ah;
+  o["name"] = slotName[i];
+  o["conn"] = slotConn[i] != BLE_HS_CONN_HANDLE_NONE;
+  o["sub"]  = (bool)slotSub[i];
+}
+
+static void esp32Custom(const char* method, JsonObjectConst params, JsonObject result,
+                        bool* handled, int* errCode, const char** errMsg) {
+  if (!strcmp(method, "nickname")) {
+    *handled = true;
+    const char* name = params["name"] | (const char*)nullptr;
+    if (name && name[0]) {
+      for (const char* p = name; *p; p++)
+        if (*p == ' ' || *p == ':' || *p == '\n' || *p == '\r') {
+          *errCode = -32602; *errMsg = "nickname must not contain space/colon/newline"; return;
+        }
+      if (strlen(name) > 20) { *errCode = -32602; *errMsg = "nickname too long (max 20)"; return; }
+      Preferences pr; pr.begin("hidbridge", false); pr.putString("nick", name); pr.end();
+      snprintf(g_nick, sizeof(g_nick), "%s", name);
+      snprintf(g_advName, sizeof(g_advName), "HIDBRIDGE-%s", g_nick);
+      for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);
+      selectSlotAdvertise((advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0, nullptr);  // re-advertise
+    }
+    result["nick"] = g_nick;
+    result["name"] = g_advName;
+    return;
+  }
+  if (!strcmp(method, "identities")) {
+    *handled = true;
+    JsonArray arr = result["slots"].to<JsonArray>();
+    for (int i = 0; i < NUM_SLOTS; i++) fillIdentity(arr.add<JsonObject>(), i);
+    result["adv"] = advSlot; result["tgt"] = tgtSlot;
+    return;
+  }
+  if (!strcmp(method, "pair") || !strcmp(method, "connect")) {
+    *handled = true;
+    const char* client = params["client"] | (const char*)nullptr;
+    if (!client || !client[0]) { *errCode = -32602; *errMsg = "missing 'client'"; return; }
+    int slot;
+    if (!strcmp(method, "pair")) {
+      slot = allocSlotForClient(client);
+      if (slot < 0) { *errCode = -32000; *errMsg = "no free identity slot"; return; }
+      snprintf(slotClient[slot], sizeof(slotClient[slot]), "%s", client);
+      buildSlotName(slot);
+    } else {
+      slot = findSlotForClient(client);
+      if (slot < 0) { *errCode = -32000; *errMsg = "unknown client (pair it first)"; return; }
+    }
+    selectSlotAdvertise(slot, nullptr);     // bring this identity up + advertise (the iPad (re)connects)
+    tgtSlot = slot;                          // route reports to it
+    fillIdentity(result, slot);
+    return;
+  }
+  if (!strcmp(method, "disconnect")) {
+    *handled = true;
+    const char* client = params["client"] | (const char*)nullptr;
+    int slot = (client && client[0]) ? findSlotForClient(client) : tgtSlot;
+    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client"; return; }
+    uint16_t h = slotConn[slot];
+    parked = true;                           // onDisconnect must NOT auto-re-advertise
+    if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
+    NimBLEDevice::stopAdvertising();
+    result["slot"] = slot;
+    result["disconnected"] = (h != BLE_HS_CONN_HANDLE_NONE);
+    return;
+  }
+  // not one of ours -> leave *handled=false (dispatcher returns "method not found")
 }
 
 
@@ -700,7 +815,7 @@ static void handleLine(String line, Print& out, NetSession* sess) {
 #else
     (void)sess;
 #endif
-    hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello);
+    hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
   char cmd = line[0];                                               // Mode 2: single-char frames
@@ -866,7 +981,7 @@ static void netPoll() {
         handleLine(line, s.client, &s);
       } else if (c != '\r') {
         s.buf += c;
-        if (s.buf.length() > 128) s.buf = "";  // same runaway-input guard as the serial reader
+        if (s.buf.length() > 1024) s.buf = "";  // runaway-input guard (>=JSON-RPC line size)
       }
     }
   }
@@ -930,7 +1045,7 @@ void loop() {
       buf = "";
     } else if (c != '\r') {
       buf += c;
-      if (buf.length() > 128) buf = "";  // guard against runaway input
+      if (buf.length() > 1024) buf = "";  // runaway-input guard (>=JSON-RPC line size)
     }
   }
 #ifdef HIDBRIDGE_NET

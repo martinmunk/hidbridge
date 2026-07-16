@@ -210,7 +210,7 @@ static void addr_hex(const bd_addr_t a, char *out, size_t cap) {
     snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-#define LINE_MAX 64
+#define LINE_MAX 1024   // >= a JSON-RPC line (Mode 1); Mode 2 frames are tiny
 static char line_buf[LINE_MAX];
 static int  line_len = 0;
 

@@ -128,8 +128,10 @@ def _rpc_send(cmd: dict) -> dict:
         elif t == "touch":
             res = c.touch(float(cmd["x"]), float(cmd["y"]))
         elif t == "reports":
-            return {"ok": False, "error": "raw frames are a Mode 2 concept; --rpc sends intent. "
-                    "For a passcode: `--rpc type <pin>` then `--rpc key enter`."}
+            # Mode 2 semantics through JSON-RPC's `frames` method: relay pre-built report bytes.
+            _rid = {"keyboard": 1, "mouse": 2, "abs_mouse": 3, "digitizer": 4}
+            hexframes = ["%02x" % _rid[f["kind"]] + f["hex"] for f in cmd["frames"]]
+            res = c.frames(hexframes)
         else:
             return {"ok": False, "error": f"cmd {t!r} unsupported in --rpc (Mode 1) mode"}
         # a report method returns {sent, conn}; conn False == accepted but no central (like OK noconn)

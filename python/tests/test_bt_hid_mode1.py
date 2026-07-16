@@ -91,6 +91,30 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
     ]
 
 
+def test_connection_and_frames_methods():
+    seen = []
+    fake = RpcFake(handler=lambda m, p: (seen.append((m, p)), {"ok": 1})[1])
+    c = mode1.Mode1Client(fake)
+    c.nickname("labkit")
+    c.nickname()
+    c.identities()
+    c.pair("mini5")
+    c.connect("mini5")
+    c.disconnect("mini5")
+    c.disconnect()
+    c.frames(["0100001e0000000000", "010000000000000000"])
+    assert seen == [
+        ("nickname", {"name": "labkit"}),
+        ("nickname", {}),
+        ("identities", {}),
+        ("pair", {"client": "mini5"}),
+        ("connect", {"client": "mini5"}),
+        ("disconnect", {"client": "mini5"}),
+        ("disconnect", {}),
+        ("frames", {"frames": ["0100001e0000000000", "010000000000000000"]}),
+    ]
+
+
 def test_dry_flag_adds_dry_param():
     seen = []
     fake = RpcFake(handler=lambda m, p: (seen.append(p), {"n": 0, "frames": []})[1])

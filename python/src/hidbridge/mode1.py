@@ -123,6 +123,32 @@ class Mode1Client:
     def touch(self, x: float, y: float, *, dry: bool = False) -> dict:
         return self.call("touch", {"x": float(x), "y": float(y)}, dry=dry)
 
+    def frames(self, frames, *, dry: bool = False) -> dict:
+        """Mode 2 semantics via JSON-RPC: relay PRE-BUILT report frames ('<ridHex><bodyHex>' strings,
+        the shape a dry run returns) -- the board just notifies them."""
+        return self.call("frames", {"frames": list(frames)}, dry=dry)
+
+    # -- Mode 1 connection management BY CLIENT NAME (firmware-specific; see caps 'connect') --
+    def nickname(self, name: str | None = None) -> dict:
+        """Get (no arg) or set the board's nickname. The advertised name is HIDBRIDGE-<nick>."""
+        return self.call("nickname", {"name": name} if name else {})
+
+    def identities(self) -> dict:
+        """List the board's identity slots: {slots:[{slot,client,addr,name,conn,sub}], adv, tgt}."""
+        return self.call("identities")
+
+    def pair(self, client: str) -> dict:
+        """Assign a free identity slot to <client> + advertise it so that iPad can bond."""
+        return self.call("pair", {"client": client})
+
+    def connect(self, client: str) -> dict:
+        """Bring <client>'s identity up (advertise it so the bonded iPad reconnects) + target it."""
+        return self.call("connect", {"client": client})
+
+    def disconnect(self, client: str | None = None) -> dict:
+        """Disconnect <client> (or the current target) -- drop the central, keep the bond, park."""
+        return self.call("disconnect", {"client": client} if client else {})
+
     def close(self) -> None:
         if hasattr(self._ch, "close"):
             self._ch.close()

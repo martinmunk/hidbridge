@@ -163,6 +163,29 @@ inline void emitTouch(ReportSink& s, double xf, double yf) {
   emitReport(s, RID_DIGITIZER, lift, 6);
 }
 
+inline int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Parse "<ridHex><bodyHex>" (a dry-run frame) into rid + body. Returns body length, or -1 on bad hex.
+inline int parseFrame(const char* hx, uint8_t* rid, uint8_t* body, size_t cap) {
+  size_t n = strlen(hx);
+  if (n < 2 || (n % 2)) return -1;
+  int hi = hexNibble(hx[0]), lo = hexNibble(hx[1]);
+  if (hi < 0 || lo < 0) return -1;
+  *rid = (uint8_t)((hi << 4) | lo);
+  size_t nb = 0;
+  for (size_t i = 2; i + 1 < n && nb < cap; i += 2) {
+    int a = hexNibble(hx[i]), b = hexNibble(hx[i + 1]);
+    if (a < 0 || b < 0) return -1;
+    body[nb++] = (uint8_t)((a << 4) | b);
+  }
+  return (int)nb;
+}
+
 inline void framesToJson(ReportSink& s, JsonArray arr) {
   int start = 0, len = s.frames.length();
   while (start < len) {
@@ -173,12 +196,19 @@ inline void framesToJson(ReportSink& s, JsonArray arr) {
   }
 }
 
+// A firmware-specific method handler (nickname, pair, connect, ...). Set *handled=true if `method`
+// is yours; then either fill `result` (success) or set *errCode (a JSON-RPC error code) + *errMsg.
+typedef void (*CustomFn)(const char* method, JsonObjectConst params, JsonObject result,
+                         bool* handled, int* errCode, const char** errMsg);
+
 // The JSON-RPC dispatcher. `authed` gates every method except hello (serial is trusted => true; an
 // unauthenticated TCP session => false). `notify` is the firmware's report sink. `fillHello` lets the
-// firmware add its device name + capabilities to the hello result.
+// firmware add its device name + capabilities to the hello result. `custom` (optional) handles
+// firmware-specific methods (slots/nickname/connection) not built in here.
 inline void handleJsonRpc(const String& line, Print& out, bool authed,
                           bool (*notify)(uint8_t, const uint8_t*, size_t),
-                          void (*fillHello)(JsonObject)) {
+                          void (*fillHello)(JsonObject),
+                          CustomFn custom = nullptr) {
   JsonDocument doc;
   DeserializationError perr = deserializeJson(doc, line);
   JsonDocument resp;
@@ -234,8 +264,31 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
     else emitTap(s, params["x"] | 0.0, params["y"] | 0.0, (uint8_t)bit);
   } else if (!strcmp(method, "touch")) {
     emitTouch(s, params["x"] | 0.0, params["y"] | 0.0);
+  } else if (!strcmp(method, "frames")) {
+    // Mode 2 semantics inside JSON-RPC: the host sends PRE-BUILT report frames ("<ridHex><bodyHex>",
+    // the same shape a dry run returns) and the board just relays them. Unifies "one protocol".
+    JsonArrayConst arr = params["frames"].as<JsonArrayConst>();
+    if (arr.isNull()) argErr = "missing 'frames'";
+    else for (JsonVariantConst f : arr) {
+      const char* hx = f.as<const char*>();
+      uint8_t rid, body[8];
+      int n = hx ? parseFrame(hx, &rid, body, sizeof(body)) : -1;
+      if (n < 0) { argErr = "bad frame hex"; break; }
+      emitReport(s, rid, body, (size_t)n);
+    }
   } else {
     known = false;
+  }
+
+  if (!known && custom) {                       // firmware-specific method (nickname/pair/connect/...)
+    bool handled = false; int ec = 0; const char* em = nullptr;
+    JsonDocument cr;
+    custom(method, params, cr.to<JsonObject>(), &handled, &ec, &em);
+    if (handled) {
+      if (ec) { resp["error"]["code"] = ec; resp["error"]["message"] = em; }
+      else    { resp["result"] = cr; }
+      serializeJson(resp, out); out.println(); return;
+    }
   }
 
   if (!known)      { resp["error"]["code"] = -32601; resp["error"]["message"] = "method not found"; }
