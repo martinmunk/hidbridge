@@ -18,6 +18,33 @@ code + git history keep the door open to revisit an absolute path later.
 (`BT_HID_*`), config paths (`~/.config/bt_hid/`), and docstrings still say `bt_hid`. That mismatch is
 expected -- don't "fix" it piecemeal.
 
+## Working practices (read this first)
+
+- **DELEGATE long or self-contained work to SUBAGENTS -- do NOT grind it all inline.** The main agent
+  is an ORCHESTRATOR: its reasoning degrades over a long inline session, so hand off anything
+  self-contained or parallelizable to a subagent (the Agent/Task tool), keep the CONCLUSION (not the
+  file dumps), and stay responsive to the user. Things that belong in a subagent: a board flash +
+  verify, a `pio run` across both boards, a live-hardware HID test cycle, a broad read-only
+  search/audit, a remote-host probe over SSH, a long install-then-verify. Give it a crisp goal +
+  definition-of-done + guardrails; it has its own context. Don't run two subagents editing the SAME
+  files. **Reach for a subagent BEFORE doing a big task yourself -- this is the main habit to build.**
+- **Run long / live-monitoring commands in the BACKGROUND, not the foreground.** A blocking foreground
+  Bash call (a multi-second serial probe, a `pio device monitor` tail, a sampling loop, an `apt`
+  install, a live-HID test) makes you UNABLE to read the user's messages until it returns -- their
+  input lands late and you act on stale state. Keep foreground Bash SHORT (a few seconds); run
+  anything longer with `run_in_background: true` (you get a completion notification) and keep working
+  meanwhile. A PreToolUse hook (`.claude/hooks/block-unbounded-bash.sh`) ENFORCES this: it blocks long
+  foreground commands, blocks `ssh`/`scp` from the MAIN agent (delegate remote work to a subagent),
+  and blocks unbounded `until`/`while true` wait-loops. If it blocks you, that IS the nudge -- background
+  it or delegate it, don't fight it.
+- **Do parallel code work in a git WORKTREE, not the primary checkout** (`.claude/worktrees/`), so a
+  subagent's edits don't collide with the primary or each other. Integrate branches back with a real
+  MERGE commit, never a rebase.
+- **Never a destructive git op in a tree with uncommitted work.** `git reset --hard`, `git checkout --`,
+  `git clean`, stash-drop can silently destroy work (yours or the user's WIP). Use explicit
+  `git add <paths>` (never `git add -A` -- it stages stray files). Commit + push as you go (see
+  Conventions).
+
 ## Commands
 
 Python (from `python/`). A venv already exists at `python/.venv`, built with
