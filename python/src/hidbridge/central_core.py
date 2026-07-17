@@ -490,6 +490,74 @@ def notification_verdict(received: dict, expected: dict,
     }
 
 
+def sequence_verdict(received: list, expected: list,
+                     allow_trailing_zero: bool = False) -> dict:
+    """Compare an ORDERED sequence of received notification bodies to an expected sequence.
+
+    Unlike notification_verdict (one report kind keyed by id), this checks a SEQUENCE of
+    notifications captured on ONE report characteristic IN ARRIVAL ORDER -- e.g. the keyboard
+    down/up pair that types a character, or the mouse press/move/release trio of a click-and-drag.
+    Each position must match reports.py's builder output (with the same trailing-zero tolerance as
+    notification_matches, for a firmware that pads the mouse body). Returns
+    {"ok", "checked", "mismatches", "expected_len", "received_len"}.
+    """
+    exp = [bytes(b) for b in expected]
+    got = [bytes(b) for b in received]
+    mismatches: list[str] = []
+    if len(got) != len(exp):
+        mismatches.append(f"length: got {len(got)} notifications, want {len(exp)}")
+    for i, want in enumerate(exp):
+        if i >= len(got):
+            mismatches.append(f"index {i}: missing (want {want.hex()})")
+            continue
+        if not notification_matches(got[i], want, allow_trailing_zero=allow_trailing_zero):
+            mismatches.append(f"index {i}: got {got[i].hex()} want {want.hex()}")
+    return {
+        "ok": not mismatches,
+        "checked": min(len(got), len(exp)),
+        "mismatches": mismatches,
+        "expected_len": len(exp),
+        "received_len": len(got),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Live layout + click-and-drag scenario expectations (PURE -- offline-testable)
+# --------------------------------------------------------------------------- #
+# The two hardware-in-the-loop live tests (tests/test_bt_hid_layout_drag_live.py) drive the board over
+# its OWN channel (Mode 1 JSON-RPC) while a transient BLE central captures the HID input-report
+# notifications. Each test asserts the captured GATT notification SEQUENCE equals the reports.py builder
+# output. The expected byte sequences are pinned here as PURE data so they are unit-testable offline
+# (no board), and the live tests additionally cross-check them against reports.py directly so a drift
+# in either place fails loudly.
+DANISH_AE_USAGE = 0x33   # the Danish 'ae' (U+00E6) key -- it sits at the US ';' position (reports.py
+#                          _DA_SYMBOLS). The live test hard-asserts THIS usage with modifier 0 so a
+#                          US-layout regression (a different scancode / a shift bit) fails loudly.
+
+
+def danish_ae_expected() -> list[bytes]:
+    """Expected keyboard (report id 1) input-report body SEQUENCE for typing Danish 'ae' on a 'da' slot.
+
+    Two notifications: the key DOWN (modifier 0, usage 0x33 in the first key slot) then the all-keys-up
+    RELEASE. Byte-identical to reports.type_text('\\u00e6', layout='da') report bodies.
+    """
+    down = bytes([0x00, 0x00, DANISH_AE_USAGE, 0x00, 0x00, 0x00, 0x00, 0x00])
+    up = bytes(8)
+    return [down, up]
+
+
+def hold_drag_expected() -> list[bytes]:
+    """Expected mouse (report id 2) input-report body sequence for a left-button click-and-drag.
+
+    press-left -> [0x01,0,0,0] (button down), move(20,10) -> [0x01,20,10,0] (button STILL HELD during
+    the motion -- the load-bearing drag assertion), release-left -> [0x00,0,0,0]. Byte-identical to the
+    reports.mouse_report(...) bodies.
+    """
+    return [bytes([0x01, 0x00, 0x00, 0x00]),
+            bytes([0x01, 20, 10, 0x00]),
+            bytes([0x00, 0x00, 0x00, 0x00])]
+
+
 # --------------------------------------------------------------------------- #
 # Drive-mode encoding -- one KNOWN report as a Mode 1 `frames` hex string
 # --------------------------------------------------------------------------- #
@@ -594,8 +662,29 @@ def is_retryable_failure(result: dict) -> bool:
     if notif:
         expected = notif.get("expected", {})
         received = notif.get("received", {})
-        for rid, want in expected.items():
-            got = received.get(rid, "")
-            if got and got != want:
+        # Two notification shapes: the self-test keys expected/received by report id (dict); the live
+        # layout/drag scenarios record an ORDERED sequence (list). Both mean the same thing here -- a
+        # frame that ARRIVED with wrong bytes is a real bug (never retry); a frame that never arrived
+        # (empty / short) is a transient delivery failure (retry).
+        if isinstance(expected, dict):
+            pairs = [(received.get(rid, ""), want) for rid, want in expected.items()]
+        else:  # list (sequence-shaped)
+            rec = received or []
+            pairs = [(rec[i] if i < len(rec) else "", want) for i, want in enumerate(expected)]
+        for got, want in pairs:
+            if got and not _notif_hex_matches(got, want):
                 return False              # a notification arrived with WRONG bytes = real bug
     return True                           # connect/link/delivery failure = transient, retry
+
+
+def _notif_hex_matches(got_hex: str, want_hex: str) -> bool:
+    """True if a received notification hex equals (or trailing-zero-pads) the expected hex.
+
+    Tolerant of the mouse-body padding a firmware may add (see notification_matches) so a PADDED but
+    CORRECT frame is not miscounted as a real byte mismatch when deciding retryability.
+    """
+    try:
+        return notification_matches(bytes.fromhex(got_hex), bytes.fromhex(want_hex),
+                                    allow_trailing_zero=True)
+    except ValueError:
+        return got_hex == want_hex

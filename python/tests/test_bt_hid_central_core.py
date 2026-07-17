@@ -425,3 +425,87 @@ def test_advert_name_matches_real_profiles():
     pico = C.BACKEND_PROFILES["pico"].advert_name
     assert C.advert_name_matches(esp + "-9216", esp)
     assert not C.advert_name_matches(esp + "-9216", pico)
+
+
+# --------------------------------------------------------------------------- #
+# Live layout + click-and-drag scenario expectations (pure -- back the hardware tests
+# in tests/test_bt_hid_layout_drag_live.py), tied here to reports.py so drift fails offline.
+# --------------------------------------------------------------------------- #
+def test_danish_ae_expected_is_usage_0x33_and_matches_reports_py():
+    seq = C.danish_ae_expected()
+    down, up = seq
+    # the load-bearing scancode: Danish 'ae' = usage 0x33, modifier 0 (a US-layout regression differs)
+    assert down == bytes([0x00, 0x00, 0x33, 0, 0, 0, 0, 0])
+    assert down[2] == 0x33 and down[0] == 0x00
+    assert up == bytes(8)
+    # byte-identical to reports.py typing the real 'ae' char (U+00E6) on the Danish layout
+    assert seq == [rpt.data for rpt in R.type_text("æ", layout="da")]
+
+
+def test_hold_drag_expected_move_keeps_button_held_and_matches_reports_py():
+    seq = C.hold_drag_expected()
+    press, drag, release = seq
+    # the load-bearing frame: during the move the button is STILL down (buttons byte 0x01)
+    assert drag == bytes([0x01, 20, 10, 0])
+    assert drag[0] == R.BTN_LEFT
+    assert press == bytes([0x01, 0, 0, 0]) and release == bytes([0x00, 0, 0, 0])
+    # byte-identical to the reports.py mouse builders
+    assert seq == [R.mouse_report(buttons=R.BTN_LEFT).data,
+                   R.mouse_report(buttons=R.BTN_LEFT, dx=20, dy=10).data,
+                   R.mouse_report(buttons=0).data]
+
+
+# --------------------------------------------------------------------------- #
+# sequence_verdict: ORDERED notification comparison (the live scenario verify)
+# --------------------------------------------------------------------------- #
+def test_sequence_verdict_matches_in_order():
+    exp = C.hold_drag_expected()
+    v = C.sequence_verdict(list(exp), exp)
+    assert v["ok"] and v["checked"] == 3 and not v["mismatches"]
+    assert v["expected_len"] == 3 and v["received_len"] == 3
+
+
+def test_sequence_verdict_wrong_bytes_fail():
+    exp = C.hold_drag_expected()
+    # a regression that CLEARS the buttons on the move frame (drag lost) must fail
+    got = [exp[0], bytes([0x00, 20, 10, 0]), exp[2]]
+    v = C.sequence_verdict(got, exp)
+    assert not v["ok"]
+    assert any("index 1" in m for m in v["mismatches"])
+
+
+def test_sequence_verdict_length_mismatch_fails():
+    exp = C.danish_ae_expected()
+    v = C.sequence_verdict([exp[0]], exp)   # missing the key-up
+    assert not v["ok"]
+    assert v["received_len"] == 1 and v["expected_len"] == 2
+
+
+def test_sequence_verdict_trailing_zero_padding_tolerated():
+    exp = C.hold_drag_expected()
+    padded = [b + b"\x00" for b in exp]     # a firmware that pads the mouse body with a pan byte
+    assert C.sequence_verdict(padded, exp, allow_trailing_zero=True)["ok"]
+    assert not C.sequence_verdict(padded, exp, allow_trailing_zero=False)["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# is_retryable_failure on the SEQUENCE-shaped notifications (list, not dict)
+# --------------------------------------------------------------------------- #
+def test_retryable_sequence_missing_delivery():
+    # reached inject but a frame never arrived (short sequence) = transient delivery failure = retry
+    assert C.is_retryable_failure({
+        "status": "fail",
+        "report_map": {"ok": True},
+        "notifications": {"expected": ["0100000000", "0114000a00", "0000000000"],
+                          "received": ["0100000000"]},
+    })
+
+
+def test_not_retryable_sequence_wrong_bytes():
+    # a frame ARRIVED with the wrong bytes (button cleared on the move) = real bug = never retry
+    assert not C.is_retryable_failure({
+        "status": "fail",
+        "report_map": {"ok": True},
+        "notifications": {"expected": ["01000000", "0114000a", "00000000"],
+                          "received": ["01000000", "0014000a", "00000000"]},
+    })
