@@ -1263,38 +1263,127 @@ struct StringPrinter : public Print {
   size_t write(const uint8_t* b, size_t n) override { s.concat((const char*)b, n); return n; }
 };
 
-// A tiny self-contained control page: it POSTs JSON-RPC to /rpc with the token as a header. This is
-// the SAME Mode 1 protocol the serial/TCP clients speak -- the webpage is just another JSON-RPC front.
+// Self-contained control page (one PROGMEM string, no external assets). It POSTs the SAME Mode 1
+// JSON-RPC to /rpc that the serial/TCP clients speak, with the token as an X-Auth-Token header. Flow:
+// (1) unlock -- enter the token, verified by an authed call; (2) Devices -- pair/connect/disconnect
+// identities by name; the HID controls stay disabled UNTIL a device is connected; (3) live control --
+// pointer-lock the pad so the real mouse + keyboard drive the target. Mouse/scroll deltas are
+// CONFLATED: at most one request is in flight and deltas accumulate meanwhile, so total motion is
+// preserved at any latency (discrete keys/clicks go through an in-order queue instead).
 static const char CONTROL_PAGE[] PROGMEM = R"HTML(<!doctype html><html><head>
 <meta name=viewport content="width=device-width,initial-scale=1"><title>hidbridge control</title>
-<style>body{font-family:system-ui,sans-serif;max-width:40em;margin:2em auto;padding:0 1em}
-input,button{font-size:1em;padding:.4em;margin:.15em}fieldset{margin:.6em 0;border-radius:6px}
-#out{white-space:pre-wrap;background:#f4f4f4;padding:.6em;border-radius:6px;min-height:2em}</style>
+<style>:root{color-scheme:light dark}
+body{font-family:system-ui,sans-serif;max-width:44em;margin:1.4em auto;padding:0 1em}
+button,input{font-size:1em;padding:.4em .6em;margin:.15em}button{cursor:pointer}
+fieldset{margin:.6em 0;border:1px solid #8886;border-radius:8px}fieldset[disabled]{opacity:.45}
+.hide{display:none}.row{display:flex;flex-wrap:wrap;align-items:center;gap:.35em}
+#out{white-space:pre-wrap;background:#8881;padding:.5em;border-radius:6px;min-height:1.3em;font:.85em ui-monospace,monospace}
+table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.25em .4em;border-bottom:1px solid #8883}
+.dot{display:inline-block;width:.7em;height:.7em;border-radius:50%;background:#999}.on{background:#2ecc71}.warn{background:#f1c40f}
+#pad{height:9em;margin:.4em 0;border:2px dashed #8888;border-radius:8px;display:flex;flex-direction:column;
+align-items:center;justify-content:center;text-align:center;user-select:none;cursor:pointer}
+#pad.live{border-color:#2ecc71;background:#2ecc7122}small{opacity:.7}</style>
 </head><body><h1>hidbridge control</h1>
-<p>token <input id=tok type=password size=26 placeholder="net.token"> <button onclick=hello()>hello</button></p>
-<fieldset><legend>keyboard</legend>
-<input id=txt size=28 placeholder="text to type"> <button onclick=type_()>type</button>
-<button onclick="key('enter')">enter</button> <button onclick="key('backspace')">bksp</button></fieldset>
-<fieldset><legend>pointer</legend>
-<label>tap at x <input id=tx type=number step=.01 min=0 max=1 value=.5 style=width:4.5em
- title="0=left edge .. 1=right edge"> y <input id=ty type=number step=.01 min=0 max=1 value=.5
- style=width:4.5em title="0=top edge .. 1=bottom edge"></label> <button onclick=tap()>tap</button>
-<small>x,y are a FRACTION of the screen: 0 = left/top .. 1 = right/bottom (0.5, 0.5 = centre).</small>
-<hr style=border:none;border-top:1px solid #ddd>
-<label>move by dx <input id=dx type=number value=20 style=width:4.5em title="+ right, - left">
- dy <input id=dy type=number value=0 style=width:4.5em title="+ down, - up"></label>
-<button onclick=move_()>move</button> <button onclick=click_()>click</button>
-<small>relative move in HID units (~pixels): dx + right / - left, dy + down / - up. Note: iOS acts
-only on RELATIVE moves (AssistiveTouch); absolute tap works on Android/desktop hosts.</small>
-</fieldset><div id=out></div><script>
-let id=0;async function rpc(method,params){try{
-const r=await fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':tok.value},
-body:JSON.stringify({jsonrpc:'2.0',id:++id,method,params:params||{}})});
-const j=await r.json();out.textContent=JSON.stringify(j.result||j.error);return j;}
-catch(e){out.textContent=e}}
-function hello(){rpc('hello')}function type_(){rpc('type',{text:txt.value})}
-function key(name){rpc('key',{name})}function tap(){rpc('tap',{x:+tx.value,y:+ty.value})}
-function move_(){rpc('move',{dx:+dx.value,dy:+dy.value})}function click_(){rpc('click',{button:'left'})}
+
+<section id=login>
+<p>Enter the board token to unlock control.</p>
+<div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off>
+<button onclick=unlock()>Unlock</button></div>
+<p><small>This page is plain HTTP on your LAN -- keystrokes here are NOT encrypted (unlike the TLS
+client path). Use it only on a network you trust.</small></p></section>
+
+<section id=app class=hide>
+<div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
+<button onclick=lock()>Lock</button></div>
+
+<fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table>
+<div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off>
+<button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
+<small>Pair advertises a free slot so an iPad can bond (accept on the iPad). Connect brings a paired
+identity back up and targets it. A filled star marks the current target.</small></fieldset>
+
+<div id=notready><em>Connect a device to enable the controls below.</em></div>
+
+<fieldset id=controls disabled><legend>Keyboard &amp; pointer</legend>
+<div class=row><input id=txt size=20 placeholder="text to type"><button onclick=type_()>type</button>
+<button onclick="key('enter')">enter</button><button onclick="key('backspace')">bksp</button></div>
+<div class=row>tap x<input id=tx type=number step=.01 min=0 max=1 value=.5 style=width:4.2em>
+y<input id=ty type=number step=.01 min=0 max=1 value=.5 style=width:4.2em><button onclick=tap()>tap</button>
+<small>0..1 fraction of the screen (.5,.5 = centre)</small></div>
+<div id=pad><span id=padlbl>Click to take live control</span>
+<small>your real mouse + keyboard drive the device -- Esc releases</small></div>
+<small>Live control sends RELATIVE moves (what iOS acts on via AssistiveTouch). Movement is conflated:
+one request in flight, deltas summed meanwhile, so the total motion is the same at any latency. Ctrl/
+Alt/Cmd + a key sends a shortcut (e.g. Cmd+C); a bare key types. Click = tap (no drag).</small>
+</fieldset></section>
+
+<div id=out></div><script>
+let TOK=null,id=0,ready=false,live=false;
+const $=s=>document.getElementById(s),show=(el,on)=>el.classList.toggle('hide',!on);
+async function rpc(m,p){const r=await fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':TOK||''},
+body:JSON.stringify({jsonrpc:'2.0',id:++id,method:m,params:p||{}})});
+const j=await r.json();if(j&&j.error)throw new Error(j.error.message||'error');return j.result||{}}
+const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
+
+async function unlock(){TOK=$('tok').value;try{
+const info=await rpc('hello');await rpc('identities');
+$('board').textContent=info.name||info.device||'hidbridge';
+show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
+catch(e){TOK=null;log('unlock failed: '+e.message)}}
+function lock(){TOK=null;stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
+
+let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
+async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
+function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false;
+(r.slots||[]).forEach(s=>{const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
+const st=s.conn?(s.sub?'ready':'connecting'):'idle',cls=s.conn?(s.sub?'on':'warn'):'';
+if(isTgt&&s.conn)tgtConn=true;
+tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client:'<i>(empty)</i>')+
+(isTgt?' &#9733;':'')+'</td><td><small>'+st+'</small></td><td class=row></td>';
+const acts=tr.lastElementChild;if(s.client){
+const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',s.client);
+const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',s.client);
+acts.append(c,d)}tb.append(tr)});
+setReady(tgtConn)}
+function setReady(on){ready=on;$('controls').disabled=!on;show($('notready'),!on);if(!on&&live)release()}
+async function act(m,client){try{await rpc(m,{client});refresh()}catch(e){log(e.message)}}
+async function pairNew(){const n=$('newclient').value.trim();if(!n)return;
+try{await rpc('pair',{client:n});$('newclient').value='';refresh()}catch(e){log(e.message)}}
+
+const type_=()=>rpc('type',{text:$('txt').value}).then(log,e=>log(e.message));
+const key=(name,mod)=>rpc('key',{name,mod:mod||0}).then(log,e=>log(e.message));
+const tap=()=>rpc('tap',{x:+$('tx').value,y:+$('ty').value}).then(log,e=>log(e.message));
+
+// conflation sender: at most one request in flight; discrete events queued in order, motion summed.
+let busy=false,pdx=0,pdy=0,psc=0,q=[];
+function pump(){if(busy||!ready)return;let job=null;
+if(q.length)job=q.shift();
+else if(pdx||pdy){job={m:'move',p:{dx:pdx,dy:pdy}};pdx=pdy=0}
+else if(psc){job={m:'scroll',p:{clicks:psc}};psc=0}
+if(!job)return;busy=true;rpc(job.m,job.p).catch(()=>{}).finally(()=>{busy=false;pump()})}
+const NAMED={Enter:'enter',Backspace:'backspace',Tab:'tab',Escape:'esc',Delete:'delete',' ':'space',
+ArrowRight:'right',ArrowLeft:'left',ArrowUp:'up',ArrowDown:'down',Home:'home',End:'end',PageUp:'pageup',PageDown:'pagedown'};
+function onKey(e){if(!live)return;if(e.key==='Escape'){release();return}e.preventDefault();
+const mod=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0);
+const nm=NAMED[e.key];
+if(nm)q.push({m:'key',p:{name:nm,mod}});
+else if(e.key.length===1){if(mod&13)q.push({m:'key',p:{name:e.key.toLowerCase(),mod}});
+else q.push({m:'type',p:{text:e.key}})}else return;pump()}
+function onMove(e){if(!live)return;pdx+=e.movementX;pdy+=e.movementY;pump()}
+function onBtn(e){if(!live)return;e.preventDefault();q.push({m:'click',p:{button:['left','middle','right'][e.button]||'left'}});pump()}
+function onWheel(e){if(!live)return;e.preventDefault();psc+=e.deltaY>0?-1:1;pump()}
+const pad=$('pad');
+function engage(){if(!ready)return;live=true;pad.classList.add('live');$('padlbl').textContent='LIVE -- Esc to release';
+try{pad.requestPointerLock&&pad.requestPointerLock()}catch(e){}
+document.addEventListener('keydown',onKey);pad.addEventListener('mousemove',onMove);
+pad.addEventListener('mousedown',onBtn);pad.addEventListener('wheel',onWheel,{passive:false})}
+function release(){live=false;pad.classList.remove('live');$('padlbl').textContent='Click to take live control';
+if(document.pointerLockElement===pad)document.exitPointerLock();
+document.removeEventListener('keydown',onKey);pad.removeEventListener('mousemove',onMove);
+pad.removeEventListener('mousedown',onBtn);pad.removeEventListener('wheel',onWheel)}
+pad.addEventListener('click',()=>{if(!live)engage()});
+document.addEventListener('pointerlockchange',()=>{if(live&&document.pointerLockElement!==pad&&document.pointerLockElement)release()});
+document.addEventListener('pointerlockerror',()=>log('pointer lock blocked; hover the box to move (bounded by its edges)'));
 </script></body></html>)HTML";
 
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }

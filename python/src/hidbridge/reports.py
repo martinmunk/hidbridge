@@ -310,11 +310,19 @@ def type_text(text: str) -> list[HidReport]:
 
 
 def key_reports(name: str, modifiers: int = 0) -> list[HidReport]:
-    """Press + release a single named key (optionally with modifiers held)."""
+    """Press + release a single key (optionally with modifiers held).
+
+    `name` is a named key ("enter", "tab", "f5", ...) OR a single printable char ("c", "/") so that
+    modifier shortcuts work -- key_reports("c", MOD_LGUI) is Cmd+C. For the single-char form the
+    passed `modifiers` are authoritative and the char's own shift is ignored (mirrors the firmware
+    hidbridge_mode1.h `key` handler)."""
     key = name.lower()
-    if key not in KEY_NAME_TO_USAGE:
+    if key in KEY_NAME_TO_USAGE:
+        usage = KEY_NAME_TO_USAGE[key]
+    elif len(name) == 1:
+        usage, _shift = char_to_usage(name)
+    else:
         raise ValueError(f"unknown key name {name!r}")
-    usage = KEY_NAME_TO_USAGE[key]
     return [keyboard_report(modifiers, [usage]), keyboard_release()]
 
 

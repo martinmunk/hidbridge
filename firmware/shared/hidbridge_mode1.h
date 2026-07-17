@@ -245,6 +245,13 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
   } else if (!strcmp(method, "key")) {
     const char* name = params["name"] | (const char*)nullptr;
     int usage = name ? keyNameToUsage(name) : -1;
+    // Fall back to a single printable char ("c", "/", ...) so modifier shortcuts work: name:"c"
+    // mod:0x08 -> LGUI+c (Cmd+C). The explicit `mod` is authoritative; the char's own shift is
+    // ignored (the caller sets modifiers). This is what the browser passthrough uses for Cmd/Ctrl+key.
+    if (usage < 0 && name && name[0] && name[1] == '\0') {
+      uint8_t u; bool sh;
+      if (charToUsage(name[0], &u, &sh)) usage = u;
+    }
     if (usage < 0) argErr = "unknown 'name'";
     else emitKeyUsage(s, (uint8_t)(params["mod"] | 0), (uint8_t)usage);
   } else if (!strcmp(method, "wake")) {

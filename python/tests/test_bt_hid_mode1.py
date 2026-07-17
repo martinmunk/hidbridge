@@ -273,6 +273,7 @@ def test_firmware_dry_run_matches_reports_py():
             (c.type_text("aA1!@ [];'/", dry=True), R.type_text("aA1!@ [];'/")),
             (c.key("enter", dry=True), R.key_reports("enter")),
             (c.key("tab", 8, dry=True), R.key_reports("tab", 8)),
+            (c.key("c", 8, dry=True), R.key_reports("c", 8)),   # Cmd+C: single-char key + modifier
             (c.wake(dry=True), R.key_reports("space")),
             (c.move(300, 5, dry=True), R.mouse_move_reports(300, 5)),
             (c.click("back", dry=True), R.mouse_click_reports("back")),

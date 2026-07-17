@@ -11,6 +11,8 @@ SECURITY: these tests use the placeholder passcode "0000" ONLY. Never put a real
 
 import pathlib
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 from hidbridge import reports as R  # noqa: E402
@@ -105,6 +107,21 @@ def test_key_report_by_name_with_modifier():
     seq = R.key_reports("space", modifiers=R.MOD_LGUI)
     assert seq[0].data == bytes([R.MOD_LGUI, 0x00, 0x2C, 0, 0, 0, 0, 0])
     assert seq[1].data == bytes(8)
+
+
+def test_key_report_single_char_with_modifier():
+    # Cmd+C -- a single printable char as the key name, with an explicit modifier (browser passthrough
+    # uses this shape). 'c' is usage 0x06; the char's own shift is ignored, only MOD_LGUI is applied.
+    seq = R.key_reports("c", modifiers=R.MOD_LGUI)
+    assert seq[0].data == bytes([R.MOD_LGUI, 0x00, 0x06, 0, 0, 0, 0, 0])
+    assert seq[1].data == bytes(8)
+    # an uppercase name resolves to the SAME base usage (no auto-shift added)
+    assert R.key_reports("C", modifiers=R.MOD_LGUI)[0].data == seq[0].data
+
+
+def test_key_report_unknown_multichar_name_raises():
+    with pytest.raises(ValueError, match="unknown key name"):
+        R.key_reports("notakey")
 
 
 # --------------------------------------------------------------------------- #
