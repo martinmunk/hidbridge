@@ -626,6 +626,12 @@ static void startAdvertisingSlot() {
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
   adv->stop();
   adv->clearData();
+  // Sync the GAP Device Name characteristic (0x2A00) to this slot's name. WITHOUT this the peer sees
+  // TWO different names: the per-slot Complete Local Name while SCANNING (from the advert), then the
+  // fixed init() name "HIDBRIDGE-esp32" once it CONNECTS and reads 0x2A00 -- so a paired device showed
+  // up as bare "HIDBRIDGE-esp32", dropping the -<nick>-<client> suffix. iOS caches the GAP name at
+  // pair time, so setting it here (before the peer bonds) is what makes "...-16pro" stick.
+  NimBLEDevice::setDeviceName(slotName[advSlot]);
   NimBLEAdvertisementData d;
   d.setFlags(0x06);                           // LE General Discoverable, BR/EDR not supported
   d.setName(slotName[advSlot]);               // the ACTIVE slot's target-scoped name (main packet)

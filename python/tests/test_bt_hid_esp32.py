@@ -209,3 +209,35 @@ def test_firmware_report_map_matches_reports_descriptor():
     fw = _parse_firmware_report_map()
     assert fw == bytes(R.REPORT_DESCRIPTOR), (
         "firmware REPORT_MAP drifted from reports.REPORT_DESCRIPTOR -- they MUST match")
+
+
+def _firmware_function_body(name: str) -> str:
+    """Return the brace-balanced body of C function `name` from main.cpp (its definition, not a call)."""
+    import re
+    src = (ROOT / "firmware/esp32/src/main.cpp").read_text()
+    m = re.search(r"\bvoid\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", src)
+    assert m, f"no definition of {name}() found in main.cpp"
+    b = src.index("{", m.start())
+    depth = 0
+    for j in range(b, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[b:j + 1]
+    raise AssertionError(f"unterminated body for {name}()")
+
+
+def test_firmware_gap_name_and_advertised_name_share_one_source():
+    """The GAP Device Name characteristic (0x2A00, read after connecting) and the advertised Complete
+    Local Name (seen while scanning) must come from the SAME per-slot source. If they diverge, a peer
+    sees two different names -- the per-slot advert while scanning, then a stale fixed name once
+    connected (the bug where a paired device showed as bare 'HIDBRIDGE-esp32' with no -<nick>-<client>
+    suffix). Guard: startAdvertisingSlot sets BOTH from slotName[advSlot]."""
+    body = _firmware_function_body("startAdvertisingSlot").replace(" ", "")
+    assert "setDeviceName(slotName[advSlot])" in body, (
+        "startAdvertisingSlot must sync the GAP Device Name to slotName[advSlot] (else a connected "
+        "peer reads a different name than it saw while scanning)")
+    assert "setName(slotName[advSlot])" in body, (
+        "startAdvertisingSlot must advertise slotName[advSlot] as the Complete Local Name")
