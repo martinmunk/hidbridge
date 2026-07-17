@@ -9,8 +9,8 @@ BACKENDS (`--backend`):
   pico              a Raspberry Pi Pico 2 W running the BTstack HOG firmware (firmware/pico/),
                     reached over USB serial. Report commands (wake/unlock/type/key/move/click/
                     tap-trust/status) route through the shared HidController + `reports` layer so
-                    the exact same report BYTES are emitted; pairing is done on the iPad Bluetooth
-                    settings (see `pair-mode`). Minimal contributor hardware: a ~USD 6 Pico instead
+                    the exact same report BYTES are emitted; pairing is done in the paired device's
+                    Bluetooth settings (see `pair-mode`). Minimal contributor hardware: a ~USD 6 Pico instead
                     of a BT dongle. `pico` needs no dbus/daemon.
   esp32             an ESP32 (NimBLE HOG firmware) over USB serial -- same report layer as pico.
   net               an Ethernet-equipped ESP32 running the same firmware, reached over TCP (no USB
@@ -23,7 +23,7 @@ Subcommands:
   pair-mode             bring the dongle up discoverable + advertising as a keyboard (runs daemon)
   net-provision         set the network auth token on an Ethernet board (over USB serial)
   net-status            show the board's Ethernet/TCP state (link, IP, mDNS, token, clients)
-  devices               list bonded iPads/iPhones on the dongle
+  devices               list bonded devices on the dongle
   connect <name|mac>    make the dongle available to a target so it (re)connects; wait for link
   disconnect [name|mac] drop the active BLE link (target stays bonded)
   wake                  nudge the connected device awake (a keystroke)
@@ -32,10 +32,7 @@ Subcommands:
   key <name> [--mod M]  press a named key (enter/esc/space/arrows/f1..)
   move <dx> <dy>        move the pointer (relative)
   click [left|right|middle|back|forward]   click a mouse button (back=btn4, forward=btn5)
-  move-abs <x> <y>      move the ABSOLUTE pointer to a screen fraction (0..1)   [reportID 3]
-  tap <x> <y> [btn]     absolute-position click at a screen fraction            [reportID 3]
-  touch <x> <y>         digitizer touch tap at a screen fraction (touchscreen)  [reportID 4]
-  tap-trust             helper: move to a Trust dialog button + click (approx; see README)
+  tap-trust             helper: nudge the relative pointer toward a dialog button + click
   status                show daemon + link status
 
 SECURITY: `unlock` expands the passcode to HID frames LOCALLY and sends only frames to the daemon;
@@ -121,15 +118,9 @@ def _rpc_send(cmd: dict) -> dict:
             res = c.move(int(cmd["dx"]), int(cmd["dy"]))
         elif t == "click":
             res = c.click(cmd.get("button", "left"))
-        elif t == "move_abs":
-            res = c.move_abs(float(cmd["x"]), float(cmd["y"]))
-        elif t == "tap_abs":
-            res = c.tap(float(cmd["x"]), float(cmd["y"]), cmd.get("button", "left"))
-        elif t == "touch":
-            res = c.touch(float(cmd["x"]), float(cmd["y"]))
         elif t == "reports":
             # Mode 2 semantics through JSON-RPC's `frames` method: relay pre-built report bytes.
-            _rid = {"keyboard": 1, "mouse": 2, "abs_mouse": 3, "digitizer": 4}
+            _rid = {"keyboard": 1, "mouse": 2}
             hexframes = ["%02x" % _rid[f["kind"]] + f["hex"] for f in cmd["frames"]]
             res = c.frames(hexframes)
         else:
@@ -269,7 +260,7 @@ def cmd_pair_mode(args):
             resp = _ALT_TRANSPORT.advertise()
             print(f"advertising: {resp.get('resp') or resp}")
         print(f"\n{_BACKEND} backend is advertising as {name!r}.\n"
-              f"One-time pairing (physical): on the iPad/iPhone open Settings > Bluetooth, tap "
+              f"One-time pairing (physical): on the paired device open its Bluetooth settings, tap "
               f"{name!r}\nunder Other Devices, and tap Pair. After that it reconnects on its own.\n"
               f"Then drive it with: bt_hid --backend {_BACKEND} type/key/move/click/...")
         return
@@ -286,7 +277,7 @@ def cmd_devices(args):
     info, apath = _dongle_path(args.adapter)
     devs = _devices_on(apath)
     if not devs:
-        print(f"No bonded devices on {info['hci']}. Run pair-mode + pair from the iPad.")
+        print(f"No bonded devices on {info['hci']}. Run pair-mode + pair from the device.")
         return
     print(f"Bonded/known devices on {info['hci']} ({info.get('product_name')}):")
     for path, props in devs:
@@ -316,7 +307,7 @@ def cmd_connect(args):
     path, props = _find_device(apath, args.target)
     if path is None:
         print(f"target {args.target!r} is not bonded on {info['hci']}; pair it first "
-              f"(pair-mode + tap it on the iPad).", file=sys.stderr)
+              f"(pair-mode + tap it on the device).", file=sys.stderr)
         sys.exit(1)
     # As a BLE peripheral we cannot page the central; ensure advertising is up (daemon) and the
     # target reconnects to us. Try a Connect() too (harmless if it is the central that reconnects).
@@ -382,25 +373,10 @@ def cmd_click(args):
     print(f"clicked {args.button}.")
 
 
-def cmd_move_abs(args):
-    _require_ok(_send({"cmd": "move_abs", "x": args.x, "y": args.y}))
-    print(f"moved absolute to ({args.x},{args.y}) of screen.")
-
-
-def cmd_tap(args):
-    _require_ok(_send({"cmd": "tap_abs", "x": args.x, "y": args.y, "button": args.button}))
-    print(f"absolute-clicked at ({args.x},{args.y}) of screen.")
-
-
-def cmd_touch(args):
-    _require_ok(_send({"cmd": "touch", "x": args.x, "y": args.y}))
-    print(f"digitizer-tapped at ({args.x},{args.y}) of screen.")
-
-
 def cmd_tap_trust(args):
-    # Heuristic helper: iOS "Trust" dialog's Trust button is upper-right of centre. With a relative
-    # mouse we cannot land absolutely, so we nudge right+up then click. Prefer driving it with an
-    # ABSOLUTE pointer / on-screen verification for reliability (see README caveat).
+    # Heuristic helper: a Trust dialog's confirm button is upper-right of centre. With a relative
+    # pointer we cannot land absolutely, so we nudge right+up then click. Prefer on-screen
+    # verification for reliability (see README caveat).
     _require_ok(_send({"cmd": "move", "dx": 120, "dy": -40}))
     _require_ok(_send({"cmd": "click", "button": "left"}))
     print("tap-trust: nudged toward the Trust button + clicked (verify on screen).")
@@ -572,7 +548,7 @@ def _apply_device(args):
     So `bt_hid --device mini6 click back` needs no --adapter/--backend: the registry says which
     backend + bond drive mini6. The routing-ambiguity WARNING (shared-MAC dongle) is printed once.
     Explicit --adapter/--backend/--port still win over the registry (do not override an operator's
-    pin). Sets args._bond so connect/disconnect can (dis)connect the right iOS device.
+    pin). Sets args._bond so connect/disconnect can (dis)connect the right device.
     """
     name = getattr(args, "device", None)
     if not name:
@@ -686,22 +662,6 @@ def build_parser():
                     choices=["left", "right", "middle", "back", "forward", "4", "5"])
     sp.set_defaults(func=cmd_click)
 
-    sp = sub.add_parser("move-abs", help="move the ABSOLUTE pointer to a screen fraction (0..1)")
-    sp.add_argument("x", type=float, help="0.0=left edge .. 1.0=right edge")
-    sp.add_argument("y", type=float, help="0.0=top edge .. 1.0=bottom edge")
-    sp.set_defaults(func=cmd_move_abs)
-
-    sp = sub.add_parser("tap", help="absolute-position click at a screen fraction (abs mouse)")
-    sp.add_argument("x", type=float, help="0.0=left edge .. 1.0=right edge")
-    sp.add_argument("y", type=float, help="0.0=top edge .. 1.0=bottom edge")
-    sp.add_argument("button", nargs="?", default="left", choices=["left", "right", "middle"])
-    sp.set_defaults(func=cmd_tap)
-
-    sp = sub.add_parser("touch", help="digitizer touch tap at a screen fraction (touchscreen)")
-    sp.add_argument("x", type=float, help="0.0=left edge .. 1.0=right edge")
-    sp.add_argument("y", type=float, help="0.0=top edge .. 1.0=bottom edge")
-    sp.set_defaults(func=cmd_touch)
-
     sp = sub.add_parser("tap-trust", help="helper: nudge to Trust button + click (approx)")
     sp.set_defaults(func=cmd_tap_trust)
 
@@ -716,7 +676,7 @@ def build_parser():
     ta = tsub.add_parser("add", help="add/overwrite a device mapping")
     ta.add_argument("name", help="friendly name, e.g. mini6")
     ta.add_argument("target", help="HidSession target: hciN / MAC / 'pico:/dev/ttyACM0' / ...")
-    ta.add_argument("bond", help="iOS-device identity: MAC / BLE-name substring / path suffix")
+    ta.add_argument("bond", help="target-device identity: MAC / BLE-name substring / path suffix")
     ta.add_argument("--note", default="", help="optional human note")
     ta.set_defaults(func=cmd_targets_add)
     tr = tsub.add_parser("remove", help="remove a device mapping")

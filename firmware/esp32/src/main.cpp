@@ -9,8 +9,7 @@
 // SINGLE SOURCE OF TRUTH: the host (wsb) builds the exact HID report BYTES in
 // python/src/hidbridge/reports.py and streams them here over USB serial; this firmware only relays them as
 // BLE HID input notifications. The REPORT_MAP below is a byte-for-byte copy of
-// reports.py REPORT_DESCRIPTOR (keyboard reportID 1, 8-byte body; mouse reportID 2, 4-byte body;
-// absolute-mouse reportID 3, 5-byte body; digitizer/touchscreen reportID 4, 6-byte body).
+// reports.py REPORT_DESCRIPTOR (keyboard reportID 1, 8-byte body; mouse reportID 2, 4-byte body).
 // python/tests/test_bt_hid_esp32.py asserts the two stay identical -- do NOT edit one
 // without the other.
 //
@@ -27,16 +26,14 @@
 // SERIAL PROTOCOL (115200 baud, newline-terminated ASCII lines; host -> ESP32):
 //   K<hex>   keyboard report body, 8 bytes = 16 hex chars  -> notify keyboard input report
 //   M<hex>   mouse report body, 4 bytes = 8 hex chars       -> notify mouse input report
-//   A<hex>   abs-mouse report body, 5 bytes = 10 hex chars  -> notify abs-mouse input report
-//   D<hex>   digitizer report body, 6 bytes = 12 hex chars  -> notify digitizer input report
 //   P        ping                        -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
-//   A        (re)start advertising (bare 'A', no hex body)  -> "OK adv"
+//   A        (re)start advertising                          -> "OK adv"
 //   V        version/status                                 -> "OK HIDBRIDGE-esp32 <state>"
 //   X        disconnect the target slot's central (keep bond) + PARK -> "OK disc" / "OK noconn"
 //   O        park: stop advertising, keep connections + bonds -> "OK parked"
 //   I<n>[:name]  select host SLOT n as the advertising identity (+ optional per-slot name) + advertise
 //                -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
-//   T<n>     set the SEND-target slot (K/M/A/D notify ONLY that slot's connection) -> "OK tgt=<n>"
+//   T<n>     set the SEND-target slot (K/M notify ONLY that slot's connection) -> "OK tgt=<n>"
 //   S        slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=1 c0=<0|1> c1=.. s0=<0|1> s1=.."
 //   N        network status -> "OK net eth=<0|1> ip=<a.b.c.d> port=<n> mdns=<host> token=<0|1>
 //                              clients=<n>"   (eth=0 / ip=0.0.0.0 on a build without -DHIDBRIDGE_NET)
@@ -44,8 +41,6 @@
 //            secret can only be provisioned over the physically-attached cable. -> "OK token set"
 //            (the token itself is NEVER echoed, logged, or readable back off the board).
 //   @<token> AUTHENTICATE this TCP session -> "OK auth" / "ERR auth". See "NETWORK" below.
-// NOTE: 'A' is overloaded -- a bare "A\n" (re)starts advertising; "A"+10 hex is an abs-mouse report.
-// They never collide because an abs-mouse frame always carries its 5-byte (10-hex) body.
 // ESP32 -> host replies are single lines: "OK ...", "OK noconn" (accepted but no central), or
 // "ERR ...". Asynchronous link events are emitted as "EVT connected" / "EVT disconnected", and HID
 // report SUBSCRIPTION as "EVT ready" / "EVT unsubscribed" (iOS wrote/cleared the report CCCDs).
@@ -292,89 +287,23 @@ static const uint8_t REPORT_MAP[] = {
   0x81, 0x06,        //     Input (Data,Var,Rel)  -- X, Y, Wheel
   0xC0,              //   End Collection
   0xC0,              // End Collection
-  // ---- Absolute Mouse, Report ID 3 ----
-  0x05, 0x01,        // Usage Page (Generic Desktop)
-  0x09, 0x02,        // Usage (Mouse)
-  0xA1, 0x01,        // Collection (Application)
-  0x85, 0x03,        //   Report ID (3)
-  0x09, 0x01,        //   Usage (Pointer)
-  0xA1, 0x00,        //   Collection (Physical)
-  0x05, 0x09,        //     Usage Page (Buttons)
-  0x19, 0x01,        //     Usage Minimum (1)
-  0x29, 0x03,        //     Usage Maximum (3)
-  0x15, 0x00,        //     Logical Minimum (0)
-  0x25, 0x01,        //     Logical Maximum (1)
-  0x95, 0x03,        //     Report Count (3)
-  0x75, 0x01,        //     Report Size (1)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- 3 buttons
-  0x95, 0x01,        //     Report Count (1)
-  0x75, 0x05,        //     Report Size (5)
-  0x81, 0x03,        //     Input (Const)          -- 5-bit padding
-  0x05, 0x01,        //     Usage Page (Generic Desktop)
-  0x09, 0x30,        //     Usage (X)
-  0x09, 0x31,        //     Usage (Y)
-  0x15, 0x00,        //     Logical Minimum (0)
-  0x26, 0xFF, 0x7F,  //     Logical Maximum (32767)
-  0x75, 0x10,        //     Report Size (16)
-  0x95, 0x02,        //     Report Count (2)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- X, Y ABSOLUTE (no Rel bit)
-  0xC0,              //   End Collection
-  0xC0,              // End Collection
-  // ---- Digitizer / Touch Screen, Report ID 4 ----
-  0x05, 0x0D,        // Usage Page (Digitizers)
-  0x09, 0x04,        // Usage (Touch Screen)
-  0xA1, 0x01,        // Collection (Application)
-  0x85, 0x04,        //   Report ID (4)
-  0x09, 0x22,        //   Usage (Finger)
-  0xA1, 0x02,        //   Collection (Logical)
-  0x09, 0x42,        //     Usage (Tip Switch)
-  0x15, 0x00,        //     Logical Minimum (0)
-  0x25, 0x01,        //     Logical Maximum (1)
-  0x75, 0x01,        //     Report Size (1)
-  0x95, 0x01,        //     Report Count (1)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- Tip Switch (bit 0)
-  0x09, 0x32,        //     Usage (In Range)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- In Range (bit 1)
-  0x95, 0x06,        //     Report Count (6)
-  0x81, 0x03,        //     Input (Const)          -- 6-bit padding to fill byte 0
-  0x75, 0x08,        //     Report Size (8)
-  0x95, 0x01,        //     Report Count (1)
-  0x09, 0x51,        //     Usage (Contact Identifier)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- Contact ID (byte 1)
-  0x05, 0x01,        //     Usage Page (Generic Desktop)
-  0x15, 0x00,        //     Logical Minimum (0)
-  0x26, 0xFF, 0x7F,  //     Logical Maximum (32767)
-  0x75, 0x10,        //     Report Size (16)
-  0x95, 0x01,        //     Report Count (1)
-  0x09, 0x30,        //     Usage (X)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- X ABSOLUTE
-  0x09, 0x31,        //     Usage (Y)
-  0x81, 0x02,        //     Input (Data,Var,Abs)   -- Y ABSOLUTE
-  0xC0,              //   End Collection
-  0xC0,              // End Collection
 };
 
 static const uint8_t KBD_REPORT_ID = 1;
 static const uint8_t MOUSE_REPORT_ID = 2;
-static const uint8_t ABS_MOUSE_REPORT_ID = 3;
-static const uint8_t DIGITIZER_REPORT_ID = 4;
 static const size_t  KBD_BODY_LEN = 8;
 static const size_t  MOUSE_BODY_LEN = 4;
-static const size_t  ABS_MOUSE_BODY_LEN = 5;
-static const size_t  DIGITIZER_BODY_LEN = 6;
 
 static NimBLEHIDDevice*    hid = nullptr;
 static NimBLECharacteristic* inputKbd = nullptr;
 static NimBLECharacteristic* inputMouse = nullptr;
-static NimBLECharacteristic* inputAbsMouse = nullptr;
-static NimBLECharacteristic* inputDigitizer = nullptr;
 static NimBLEServer*       server = nullptr;
 
 // ---- per-slot identity + connection state (host slots) ----
 // slotAddr[0] = native public address (captured at setup); slotAddr[k>=1] = derived static-random.
 // slotConn[k] = the conn handle of the central connected on slot k (or NONE). slotSub[k] = iOS has
 // enabled the keyboard report CCCD on slot k (readiness). advSlot = the slot currently ADVERTISING;
-// tgtSlot = the slot K/M/A/D reports are notified to. slotName[k] = that slot's advertised name.
+// tgtSlot = the slot K/M reports are notified to. slotName[k] = that slot's advertised name.
 static NimBLEAddress       slotAddr[NUM_SLOTS];
 static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
@@ -715,8 +644,6 @@ void setup() {
   inputKbd = hid->getInputReport(KBD_REPORT_ID);
   inputKbd->setCallbacks(&kbdSubCB);           // track iOS enabling the keyboard report (readiness)
   inputMouse = hid->getInputReport(MOUSE_REPORT_ID);
-  inputAbsMouse = hid->getInputReport(ABS_MOUSE_REPORT_ID);
-  inputDigitizer = hid->getInputReport(DIGITIZER_REPORT_ID);
 
   hid->setManufacturer("hidbridge");
   hid->setPnp(0x02, 0x05AC, 0x820A, 0x0001);   // Apple vendor id, keyboard-ish product
@@ -783,8 +710,6 @@ static NimBLECharacteristic* charForReportId(uint8_t rid) {
   switch (rid) {
     case KBD_REPORT_ID:       return inputKbd;
     case MOUSE_REPORT_ID:     return inputMouse;
-    case ABS_MOUSE_REPORT_ID: return inputAbsMouse;
-    case DIGITIZER_REPORT_ID: return inputDigitizer;
   }
   return nullptr;
 }
@@ -872,7 +797,7 @@ static void esp32FillHello(JsonObject r) {
   r["nick"] = g_nick;
   r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
   JsonArray caps = r["caps"].to<JsonArray>();
-  caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer");
+  caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
 #ifdef HIDBRIDGE_NET
   caps.add("net");
@@ -1058,10 +983,6 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     uint8_t body[MOUSE_BODY_LEN];
     if (!parseHexBody(arg, body, MOUSE_BODY_LEN)) { out.println("ERR badmouse"); return; }
     sendReportToTarget(inputMouse, body, MOUSE_BODY_LEN, out);
-  } else if (cmd == 'D') {
-    uint8_t body[DIGITIZER_BODY_LEN];
-    if (!parseHexBody(arg, body, DIGITIZER_BODY_LEN)) { out.println("ERR baddigi"); return; }
-    sendReportToTarget(inputDigitizer, body, DIGITIZER_BODY_LEN, out);
   } else if (cmd == 'P') {
     // Report the TARGET slot's state (default slot 0 = legacy single-central behaviour).
     // subscribed= BEFORE conn= so a legacy host's endswith("conn=1") parse still works.
@@ -1073,15 +994,9 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     out.print(" conn=");
     out.println(con ? "1" : "0");
   } else if (cmd == 'A') {
-    // 'A' is overloaded: bare "A" -> (re)start advertising the current slot; "A"+10 hex -> abs-mouse.
-    if (arg.length() == 0) {
-      NimBLEDevice::startAdvertising();
-      out.println("OK adv");
-    } else {
-      uint8_t body[ABS_MOUSE_BODY_LEN];
-      if (!parseHexBody(arg, body, ABS_MOUSE_BODY_LEN)) { out.println("ERR badabs"); return; }
-      sendReportToTarget(inputAbsMouse, body, ABS_MOUSE_BODY_LEN, out);
-    }
+    // 'A' -> (re)start advertising the current slot.
+    NimBLEDevice::startAdvertising();
+    out.println("OK adv");
   } else if (cmd == 'I') {
     // I<n>[:name] -- select host slot n as the advertising identity (+ optional per-slot name) +
     // advertise it. Adds a distinct identity so a second/other iPad can bond+connect on ITS address
@@ -1103,7 +1018,7 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     out.print(" conn=");
     out.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
   } else if (cmd == 'T') {
-    // T<n> -- route subsequent K/M/A/D reports to slot n's connection.
+    // T<n> -- route subsequent K/M reports to slot n's connection.
     int n = arg.toInt();
     if (arg.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
     tgtSlot = n;
@@ -1395,8 +1310,8 @@ onkeydown="if(event.key=='Enter')setNick()">
 <div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off
 onkeydown="if(event.key=='Enter')pairNew()">
 <button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
-<small>Pair advertises a free slot so an iPad can bond (accept on the iPad). Connect brings a paired
-identity back up and targets it. A filled star marks the current target.</small></fieldset>
+<small>Pair advertises a free slot so a device can bond (accept the pairing on that device). Connect
+brings a paired identity back up and targets it. A filled star marks the current target.</small></fieldset>
 
 <div id=notready><em>Connect a device to enable the controls below.</em></div>
 
@@ -1404,12 +1319,9 @@ identity back up and targets it. A filled star marks the current target.</small>
 <div class=row><input id=txt size=20 placeholder="text to type"><button onclick=type_()>type</button>
 <button onclick="key('enter')">enter</button><button onclick="key('backspace')">bksp</button>
 <button onclick="key('tab')">tab</button><button onclick="key('esc')">esc</button></div>
-<div class=row>tap x<input id=tx type=number step=.01 min=0 max=1 value=.5 style=width:4.2em>
-y<input id=ty type=number step=.01 min=0 max=1 value=.5 style=width:4.2em><button onclick=tap()>tap</button>
-<small>0..1 fraction of the screen (.5,.5 = centre)</small></div>
 <div id=pad><span id=padlbl>Click to take live control</span>
 <small>your real mouse + keyboard drive the device -- Esc releases</small></div>
-<small>Live control sends RELATIVE moves (what iOS acts on via AssistiveTouch). Movement is conflated:
+<small>Live control sends RELATIVE moves (what the paired device acts on). Movement is conflated:
 one request in flight, deltas summed meanwhile, so the total motion is the same at any latency. Ctrl/
 Alt/Cmd + a key sends a shortcut (e.g. Cmd+C); a bare key types. Click = tap (no drag).</small>
 </fieldset></section>
@@ -1457,7 +1369,6 @@ try{await rpc('pair',{client:n});$('newclient').value='';refresh()}catch(e){log(
 
 const type_=()=>rpc('type',{text:$('txt').value}).then(log,e=>log(e.message));
 const key=(name,mod)=>rpc('key',{name,mod:mod||0}).then(log,e=>log(e.message));
-const tap=()=>rpc('tap',{x:+$('tx').value,y:+$('ty').value}).then(log,e=>log(e.message));
 
 // conflation sender: at most one request in flight; discrete events queued in order, motion summed.
 let busy=false,pdx=0,pdy=0,psc=0,q=[];
@@ -1495,7 +1406,7 @@ document.removeEventListener('wheel',onWheel);document.removeEventListener('keyd
 pad.addEventListener('click',()=>{if(!live&&ready){const p=pad.requestPointerLock();if(p&&p.catch)p.catch(()=>{})}});
 document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;
 if(lk&&!live)goLive();else if(!lk&&live)release()});
-document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + tap/click buttons still work.'));
+document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + click buttons still work.'));
 {const t=localStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}}   // auto-unlock if remembered
 </script></body></html>)HTML";
 

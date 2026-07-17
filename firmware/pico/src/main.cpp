@@ -1,6 +1,5 @@
 /*
- * HIDBRIDGE-pico -- BLE HID for a Raspberry Pi Pico 2 W: keyboard(1) + relative mouse(2)
- *                 + absolute mouse(3) + digitizer/touchscreen(4).
+ * HIDBRIDGE-pico -- BLE HID for a Raspberry Pi Pico 2 W: keyboard(1) + relative mouse(2).
  *
  * Part of the hidbridge toolbox: the PICO BACKEND. A ~USD 6 alternative to a USB Bluetooth
  * dongle for controlling an iPad/iPhone/Mac from Linux. Built on the earlephilhower arduino-pico
@@ -14,8 +13,6 @@
  *
  *     K <16 hex>\n   keyboard report    (8-byte boot body: mod,resv,k1..k6)         -> report ID 1
  *     M <8 hex>\n    relative mouse      (4-byte body: buttons,dx,dy,wheel)          -> report ID 2
- *     A <10 hex>\n   absolute mouse      (5-byte body: buttons,Xlo,Xhi,Ylo,Yhi)      -> report ID 3
- *     D <12 hex>\n   digitizer/touch     (6-byte body: flags,contactID,Xlo,Xhi,Ylo,Yhi) -> ID 4
  *     P\n            ping  -> replies "PONG name=HIDBRIDGE-pico conn=<0|1>"
  *     I<n>[:name]\n  select host SLOT n as the advertising identity (+ optional name) + advertise
  *                    -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
@@ -37,15 +34,15 @@
  * The ESP32 (NimBLE) backend DOES hold both at once (multi=1).
  *
  * IMPORTANT -- CUSTOM REPORT MAP. We do NOT use KeyboardBLE.begin()/MouseBLE.begin(), which build
- * arduino-pico's auto-generated report map (that map assigns the mouse report ID 3 and has no
- * absolute-pointer or digitizer report). Instead we install OUR OWN HID report map -- the exact
- * bytes of python/src/hidbridge/reports.py REPORT_DESCRIPTOR (keyboard ID 1, relative mouse ID 2, absolute
- * mouse ID 3, digitizer ID 4) -- directly via PicoBluetoothBLEHID.startHID(). We still force-link
- * KeyboardBLE + MouseBLE so the core's __BLEInstallKeyboard/__BLEInstallMouse weak symbols become
- * strong: startHID() sizes its report storage from those (1 feature + 2 keyboard + 1 mouse = 4),
- * which exactly covers our 4 Input reports (IDs 1..4), and the fixed BTstack ATT DB already exposes
- * Input Report-Reference characteristics for report IDs 1,2,3,4. We never call the KeyboardBLE /
- * MouseBLE report builders; every report is sent as raw [reportID | body] bytes.
+ * arduino-pico's auto-generated report map (that map assigns the mouse report ID 3). Instead we
+ * install OUR OWN HID report map -- the exact bytes of python/src/hidbridge/reports.py
+ * REPORT_DESCRIPTOR (keyboard ID 1, relative mouse ID 2) -- directly via
+ * PicoBluetoothBLEHID.startHID(). We still force-link KeyboardBLE + MouseBLE so the core's
+ * __BLEInstallKeyboard/__BLEInstallMouse weak symbols become strong: startHID() sizes its report
+ * storage from those (1 feature + 2 keyboard + 1 mouse = 4), which comfortably covers our 2 Input
+ * reports (IDs 1..2), and the fixed BTstack ATT DB already exposes Input Report-Reference
+ * characteristics for those report IDs. We never call the KeyboardBLE / MouseBLE report builders;
+ * every report is sent as raw [reportID | body] bytes.
  */
 
 #include <Arduino.h>
@@ -81,33 +78,16 @@ static const uint8_t HID_REPORT_MAP[] = {
     0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x03, 0x81, 0x03, 0x05, 0x01,
     0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08,
     0x95, 0x03, 0x81, 0x06, 0xC0, 0xC0,
-    // ---- Absolute Mouse, Report ID 3 ----
-    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
-    0x85, 0x03, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
-    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
-    0x75, 0x05, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00,
-    0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0xC0, 0xC0,
-    // ---- Digitizer / Touch Screen, Report ID 4 ----
-    0x05,
-    0x0D, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x04, 0x09, 0x22, 0xA1, 0x02, 0x09,
-    0x42, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0x09,
-    0x32, 0x81, 0x02, 0x95, 0x06, 0x81, 0x03, 0x75, 0x08, 0x95, 0x01, 0x09,
-    0x51, 0x81, 0x02, 0x05, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x7F, 0x75, 0x10,
-    0x95, 0x01, 0x09, 0x30, 0x81, 0x02, 0x09, 0x31, 0x81, 0x02, 0xC0, 0xC0,
     // WSB-HID-REPORT-MAP-END
 };
 
 // reports.py report body lengths (bytes AFTER the report ID) for each kind.
 static const int KBD_BODY = 8;        // mod,resv,k1..k6                        -> report ID 1
 static const int MOUSE_BODY = 4;      // buttons,dx,dy,wheel                    -> report ID 2
-static const int ABS_MOUSE_BODY = 5;  // buttons,Xlo,Xhi,Ylo,Yhi               -> report ID 3
-static const int DIGITIZER_BODY = 6;  // flags,contactID,Xlo,Xhi,Ylo,Yhi       -> report ID 4
 
 // reportIDs -- MUST match the report map above / reports.py.
 static const uint8_t RID_KEYBOARD = 1;
 static const uint8_t RID_MOUSE = 2;
-static const uint8_t RID_ABS_MOUSE = 3;
-static const uint8_t RID_DIGITIZER = 4;
 
 // ---- Per-bond IDENTITY (host slots) ----------------------------------------------------------- //
 // Number of BLE host slots (distinct identities). Slot 0 = native public address; slots >=1 =
@@ -239,7 +219,7 @@ static int parse_hex(const char *s, uint8_t *out, int max) {
 
 // Emit one HID input report: [reportID | body] as a BLE HID notification, ack OK/ERR.
 static void send_report(uint8_t report_id, const uint8_t *body, int body_len) {
-    uint8_t report[1 + 8];   // 8 = max body (keyboard); abs(5)/digitizer(6)/mouse(4) all fit
+    uint8_t report[1 + 8];   // 8 = max body (keyboard); mouse(4) fits
     report[0] = report_id;
     memcpy(report + 1, body, body_len);
     bool ok = PicoBluetoothBLEHID.send(report, 1 + body_len);
@@ -258,7 +238,7 @@ static void picoFillHello(JsonObject r) {
     r["device"] = BASE_NAME;
     r["name"] = slot_name[(adv_slot >= 0 && adv_slot < NUM_SLOTS) ? adv_slot : 0];
     JsonArray caps = r["caps"].to<JsonArray>();
-    caps.add("keyboard"); caps.add("mouse"); caps.add("abs"); caps.add("digitizer"); caps.add("slots");
+    caps.add("keyboard"); caps.add("mouse"); caps.add("slots");
 }
 
 static void handle_line(char *line) {
@@ -359,12 +339,6 @@ static void handle_line(char *line) {
     } else if (kind == 'M' || kind == 'm') {
         if (n != MOUSE_BODY) { Serial.println("ERR badframe"); return; }
         send_report(RID_MOUSE, body, MOUSE_BODY);
-    } else if (kind == 'A' || kind == 'a') {
-        if (n != ABS_MOUSE_BODY) { Serial.println("ERR badframe"); return; }
-        send_report(RID_ABS_MOUSE, body, ABS_MOUSE_BODY);
-    } else if (kind == 'D' || kind == 'd') {
-        if (n != DIGITIZER_BODY) { Serial.println("ERR badframe"); return; }
-        send_report(RID_DIGITIZER, body, DIGITIZER_BODY);
     } else {
         Serial.println("ERR unknowncmd");
     }
@@ -390,8 +364,8 @@ void setup() {
         pico_con_handle = HCI_CON_HANDLE_INVALID;
     });
 
-    // Install OUR report map (keyboard 1 + rel mouse 2 + abs mouse 3 + digitizer 4) directly, so
-    // the report IDs + layouts are byte-identical to reports.py. Advertise as slot 0 = "HIDBRIDGE-pico".
+    // Install OUR report map (keyboard 1 + rel mouse 2) directly, so the report IDs + layouts are
+    // byte-identical to reports.py. Advertise as slot 0 = "HIDBRIDGE-pico".
     // __BLEGetAppearance() == 0x03C0 (generic HID) with both keyboard + mouse force-linked.
     PicoBluetoothBLEHID.startHID(slot_name[0], BASE_NAME, __BLEGetAppearance(),
                                  HID_REPORT_MAP, sizeof(HID_REPORT_MAP));

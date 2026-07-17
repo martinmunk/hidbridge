@@ -54,21 +54,9 @@ def test_encode_mouse_frame():
     assert TE.encode_frame("mouse", body) == b"M0005fd00\n"
 
 
-def test_encode_abs_mouse_frame():
-    # abs-mouse body = buttons, X(u16 LE), Y(u16 LE); 5 bytes -> 10 hex, "A" prefix
-    body = bytes([R.BTN_LEFT, 0xFF, 0x7F, 0x00, 0x40])   # left button, X=32767, Y=16384
-    assert TE.encode_frame("abs_mouse", body) == b"A01ff7f0040\n"
-
-
-def test_encode_digitizer_frame():
-    # digitizer body = flags, contactID, X(u16 LE), Y(u16 LE); 6 bytes -> 12 hex, "D" prefix
-    body = bytes([R.TIP_SWITCH | R.IN_RANGE, 0x00, 0x00, 0x00, 0xFF, 0x7F])  # tip+inrange, X=0, Y=32767
-    assert TE.encode_frame("digitizer", body) == b"D03000000ff7f\n"
-
-
 def test_encode_rejects_unknown_kind():
     with pytest.raises(TE.Esp32Error):
-        TE.encode_frame("touch", b"\x00")
+        TE.encode_frame("abs_mouse", b"\x00")
 
 
 def test_encode_rejects_wrong_length():
@@ -76,10 +64,6 @@ def test_encode_rejects_wrong_length():
         TE.encode_frame("keyboard", bytes(4))
     with pytest.raises(TE.Esp32Error):
         TE.encode_frame("mouse", bytes(8))
-    with pytest.raises(TE.Esp32Error):
-        TE.encode_frame("abs_mouse", bytes(4))    # must be exactly 5
-    with pytest.raises(TE.Esp32Error):
-        TE.encode_frame("digitizer", bytes(5))    # must be exactly 6
 
 
 # --------------------------------------------------------------------------- #
@@ -100,45 +84,6 @@ def test_transport_send_mouse_and_keyboard_mixed():
     tp = TE.Esp32Transport(port=fake)
     tp.send([("mouse", bytes([R.BTN_LEFT, 0, 0, 0])), ("keyboard", bytes(8))])
     assert fake.written == [b"M01000000\n", b"K0000000000000000\n"]
-
-
-def test_transport_send_abs_mouse_matches_reports_bytes():
-    # An absolute click at screen-center: move -> button-down -> button-up, all at (16383,16383).
-    fake = FakeSerial()
-    tp = TE.Esp32Transport(port=fake)
-    reps = R.abs_click_reports(0.5, 0.5)
-    resp = tp.send([(r.kind, r.data) for r in reps])
-    assert resp["ok"] and resp["sent"] == len(reps)
-    # Each frame is "A" + the exact reports.py body hex + newline (byte-match the single source).
-    for r, line in zip(reps, fake.written, strict=True):
-        assert r.kind == "abs_mouse"
-        assert line == b"A" + r.data.hex().encode("ascii") + b"\n"
-        assert len(r.data) == R.ABS_MOUSE_BODY_LEN
-
-
-def test_transport_send_digitizer_matches_reports_bytes():
-    # A single-finger tap at (0.25, 0.75): finger-down at (x,y) then finger-up (all zero).
-    fake = FakeSerial()
-    tp = TE.Esp32Transport(port=fake)
-    reps = R.digitizer_tap_reports(0.25, 0.75)
-    resp = tp.send([(r.kind, r.data) for r in reps])
-    assert resp["ok"] and resp["sent"] == len(reps)
-    for r, line in zip(reps, fake.written, strict=True):
-        assert r.kind == "digitizer"
-        assert line == b"D" + r.data.hex().encode("ascii") + b"\n"
-        assert len(r.data) == R.DIGITIZER_BODY_LEN
-
-
-def test_controller_abs_and_touch_route_through_esp32():
-    fake = FakeSerial()
-    ctl = HidController(TE.Esp32Transport(port=fake))
-    ctl.move_abs(0.0, 1.0)       # top-left X, bottom Y -> X=0, Y=32767
-    ctl.touch_tap(1.0, 0.0)      # right edge X, top Y
-    # move_abs -> 1 abs frame; touch_tap -> 2 digitizer frames (down, up)
-    kinds = [line[:1] for line in fake.written]
-    assert kinds == [b"A", b"D", b"D"]
-    # first abs frame: buttons=0, X=0 (0000 LE), Y=32767 (ff7f LE)
-    assert fake.written[0] == b"A00" + b"0000" + b"ff7f" + b"\n"
 
 
 def test_transport_reports_error_when_esp32_rejects():

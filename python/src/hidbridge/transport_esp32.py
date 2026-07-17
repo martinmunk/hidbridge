@@ -14,8 +14,6 @@ lowers the contributor hardware bar: an ESP32 is a common, cheap board.
 Serial wire protocol (must match the firmware; newline-terminated ASCII lines, host -> ESP32):
     K<hex>   keyboard report body, 8 bytes (16 hex chars)     -> BLE keyboard input notification
     M<hex>   mouse report body, 4 bytes (8 hex chars)          -> BLE mouse input notification
-    A<hex>   abs-mouse report body, 5 bytes (10 hex chars)      -> BLE abs-mouse input notification
-    D<hex>   digitizer report body, 6 bytes (12 hex chars)      -> BLE digitizer input notification
     P        ping   -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
     A        (re)start advertising -> "OK adv"  (bare 'A' with NO hex body; disambiguated by length)
 The ESP32 answers each line with a single "OK..."/"ERR..." line. Asynchronous link state is emitted
@@ -34,14 +32,9 @@ import glob
 import os
 
 # report kind -> serial command prefix + expected body length (matches reports.py bodies).
-# abs_mouse ("A", 5 bytes) + digitizer ("D", 6 bytes) are the absolute-pointer reports (IDs 3+4);
-# a bare "A\n" (no hex body) still means "(re)start advertising" -- the firmware disambiguates by
-# argument length, so an abs_mouse frame ALWAYS carries its 10-hex body and never collides.
 _KIND_PREFIX = {
     "keyboard": (b"K", 8),
     "mouse": (b"M", 4),
-    "abs_mouse": (b"A", 5),
-    "digitizer": (b"D", 6),
 }
 
 DEFAULT_BAUD = 115200

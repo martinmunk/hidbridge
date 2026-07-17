@@ -86,34 +86,13 @@ def test_encode_rejects_bad_kind_and_length():
         encode_frame("mouse", bytes(5))       # mouse must be 4
 
 
-def test_encode_abs_mouse_frame_bytes():
-    # buttons=left, X=0x1234, Y=0x0056 (little-endian on the wire) -> 5-byte body
-    body = bytes([R.BTN_LEFT, 0x34, 0x12, 0x56, 0x00])
-    assert encode_frame("abs_mouse", body) == b"A 0134125600\n"
-
-
-def test_encode_digitizer_frame_bytes():
-    # tip+in_range, contactID=0, X=0x00FF, Y=0x7FFF -> 6-byte body
-    body = bytes([R.TIP_SWITCH | R.IN_RANGE, 0x00, 0xFF, 0x00, 0xFF, 0x7F])
-    assert encode_frame("digitizer", body) == b"D 0300ff00ff7f\n"
-
-
 def test_decode_is_inverse_of_encode():
     cases = [
         ("keyboard", bytes(range(8))),
         ("mouse", bytes([2, 1, 255, 7])),
-        ("abs_mouse", bytes([1, 0x34, 0x12, 0x56, 0x00])),
-        ("digitizer", bytes([3, 0, 0xFF, 0x00, 0xFF, 0x7F])),
     ]
     for kind, body in cases:
         assert decode_frame(encode_frame(kind, body)) == (kind, body)
-
-
-def test_encode_rejects_wrong_abs_and_digitizer_length():
-    with pytest.raises(ValueError):
-        encode_frame("abs_mouse", bytes(4))     # abs_mouse must be 5
-    with pytest.raises(ValueError):
-        encode_frame("digitizer", bytes(5))     # digitizer must be 6
 
 
 def test_encode_ping_and_ack_parsing():
@@ -213,44 +192,6 @@ def test_controller_mouse_click_over_pico_uses_reports_bytes():
     down = encode_frame("mouse", bytes([R.BTN_RIGHT, 0, 0, 0]))
     up = encode_frame("mouse", bytes([0, 0, 0, 0]))
     assert fake.written == down + up
-
-
-# --------------------------------------------------------------------------- #
-# Absolute pointer + digitizer: reports.py stays the single source of truth. The framed body a real
-# timeline sends over serial MUST byte-match the report body reports.py builds -- so the Pico, which
-# only prepends the reportID, emits exactly the bytes reports.py defines.
-# --------------------------------------------------------------------------- #
-def test_abs_mouse_frame_byte_matches_reports_body():
-    rep = R.abs_mouse_report(buttons=R.BTN_LEFT, x=0x1234, y=0x0056)
-    assert rep.kind == "abs_mouse"
-    assert encode_frame(rep.kind, rep.data) == b"A " + rep.data.hex().encode() + b"\n"
-    # the wire body is exactly reports.py's ABS_MOUSE_BODY_LEN bytes (buttons, X-LE, Y-LE)
-    assert len(rep.data) == R.ABS_MOUSE_BODY_LEN
-    assert rep.data == bytes([R.BTN_LEFT, 0x34, 0x12, 0x56, 0x00])
-
-
-def test_digitizer_frame_byte_matches_reports_body():
-    rep = R.digitizer_report(tip=True, contact_id=0, x=0x00FF, y=0x7FFF)
-    assert rep.kind == "digitizer"
-    assert encode_frame(rep.kind, rep.data) == b"D " + rep.data.hex().encode() + b"\n"
-    assert len(rep.data) == R.DIGITIZER_BODY_LEN
-    assert rep.data == bytes([R.TIP_SWITCH | R.IN_RANGE, 0x00, 0xFF, 0x00, 0xFF, 0x7F])
-
-
-def test_controller_tap_abs_over_pico_uses_reports_bytes():
-    t, fake = _transport()
-    ctl = HidController(t)
-    ctl.tap_abs(0.5, 0.25, "left")
-    expect = b"".join(encode_frame(r.kind, r.data) for r in R.abs_click_reports(0.5, 0.25, "left"))
-    assert fake.written == expect
-
-
-def test_controller_touch_tap_over_pico_uses_reports_bytes():
-    t, fake = _transport()
-    ctl = HidController(t)
-    ctl.touch_tap(0.5, 0.25)
-    expect = b"".join(encode_frame(r.kind, r.data) for r in R.digitizer_tap_reports(0.5, 0.25))
-    assert fake.written == expect
 
 
 # --------------------------------------------------------------------------- #

@@ -643,7 +643,6 @@ class CentralSelfTest:
             if v["report_type"] != CC.REPORT_TYPE_INPUT:
                 return self._fail(f"{label} report {rid} is not an INPUT report "
                                   f"(type={v['report_type']})")
-        # optional abs (3) / digitizer (4) refs are recorded if present (harness may assert them)
         # 4. build the drive/verify targets: every present report we can drive over the transport
         self._plan_drives()
         if not self._drive_targets:
@@ -657,7 +656,7 @@ class CentralSelfTest:
             canon = inverse.get(fw_id, fw_id)
             drive = KNOWN_DRIVES.get(canon)
             if drive is None:
-                continue   # abs/digitizer: verified at map+ref level; transport can't drive it yet
+                continue   # a report with no KNOWN_DRIVES entry: verified at map+ref level only
             kind, build = drive
             try:
                 body = build()

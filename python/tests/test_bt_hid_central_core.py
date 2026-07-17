@@ -2,9 +2,9 @@
 
 These cover EVERY piece of the central self-test that does not need hardware:
   * the USB-HID report-descriptor parser, against reports.py's REPORT_DESCRIPTOR (the single source
-    of truth) -- it must recover reports 1/2/3/4 with their load-bearing fields;
+    of truth) -- it must recover reports 1/2 with their load-bearing fields;
   * the report-map comparator: byte-exact, subset (arduino-pico-style renumbered/extended mouse),
-    and a partial firmware map (ESP32 without the abs reports);
+    and a partial firmware map (a keyboard-only subset);
   * the GATT-tree helper find_report_characteristics, with a fake ObjectManager tree + a fake
     descriptor reader (no dbus);
   * the notification verdict, including the Pico's trailing-zero (pan) mouse padding.
@@ -36,15 +36,13 @@ def test_uuid16_expands_to_full_128bit():
 # --------------------------------------------------------------------------- #
 # Parser vs the SINGLE SOURCE OF TRUTH
 # --------------------------------------------------------------------------- #
-def test_parser_recovers_all_four_reports_from_reports_descriptor():
+def test_parser_recovers_keyboard_and_mouse_from_reports_descriptor():
     reps = C.parse_report_descriptor(R.REPORT_DESCRIPTOR)
     by_id = {r.report_id: r for r in reps}
-    assert sorted(by_id) == [1, 2, 3, 4]
+    assert sorted(by_id) == [1, 2]
     # application usages
     assert (by_id[1].app_usage_page, by_id[1].app_usage) == (0x01, 0x06)   # Keyboard
     assert (by_id[2].app_usage_page, by_id[2].app_usage) == (0x01, 0x02)   # Mouse
-    assert (by_id[3].app_usage_page, by_id[3].app_usage) == (0x01, 0x02)   # Abs Mouse
-    assert (by_id[4].app_usage_page, by_id[4].app_usage) == (0x0D, 0x04)   # Touch Screen
 
 
 def test_parser_keyboard_fields_load_bearing():
@@ -66,22 +64,6 @@ def test_parser_mouse_relative_xy_signed_range():
     assert (f.logical_min, f.logical_max) == (-127, 127)   # signed range parsed correctly
 
 
-def test_parser_abs_mouse_is_absolute_16bit():
-    absm = {r.report_id: r for r in C.parse_report_descriptor(R.REPORT_DESCRIPTOR)}[3]
-    xy = [f for f in absm.data_fields()
-          if f.usage_page == 0x01 and f.is_variable and not f.is_relative]
-    assert xy, "abs mouse must have absolute X/Y"
-    assert (xy[0].logical_min, xy[0].logical_max) == (0, 32767)
-
-
-def test_parser_digitizer_tip_and_abs_xy():
-    digi = {r.report_id: r for r in C.parse_report_descriptor(R.REPORT_DESCRIPTOR)}[4]
-    assert (digi.app_usage_page, digi.app_usage) == (0x0D, 0x04)
-    # X/Y absolute 0..32767 on the Generic Desktop page
-    xy = [f for f in digi.data_fields() if f.usage_page == 0x01]
-    assert xy and (xy[0].logical_min, xy[0].logical_max) == (0, 32767)
-
-
 # --------------------------------------------------------------------------- #
 # Comparator
 # --------------------------------------------------------------------------- #
@@ -90,36 +72,29 @@ def test_compare_byte_exact_self():
     assert diff.byte_exact and diff.ok and not diff.mismatches
 
 
-def _prefix_two_reports() -> bytes:
-    """reports.py descriptor truncated to just the keyboard(1)+mouse(2) blocks (the ESP32 map)."""
-    # find the start of the Abs-Mouse block (Report ID 3 = 0x85,0x03 after a Mouse collection).
-    # Easiest: rebuild from the known esp32 firmware prefix -> the first two reports.
+def _keyboard_only_map() -> bytes:
+    """reports.py descriptor truncated to JUST the keyboard(1) collection -- a firmware that serves a
+    strict SUBSET of reports.py (only report 1), to exercise the subset-compare path."""
     reps = C.parse_report_descriptor(R.REPORT_DESCRIPTOR)
-    assert [r.report_id for r in reps] == [1, 2, 3, 4]
-    # Reconstruct by slicing the raw bytes at the marker for Report ID 3.
-    marker = bytes([0x85, 0x03])   # Report ID (3)
-    idx = R.REPORT_DESCRIPTOR.find(marker)
-    # back up to the Usage Page (Generic Desktop) + Usage (Mouse) + Collection that precede it
-    head = R.REPORT_DESCRIPTOR[:idx]
-    coll = head.rfind(bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01]))
-    return R.REPORT_DESCRIPTOR[:coll]
+    assert [r.report_id for r in reps] == [1, 2]
+    # slice off at the start of the Mouse application collection -> keyboard-only bytes.
+    return R.REPORT_DESCRIPTOR[:R.REPORT_DESCRIPTOR.find(
+        bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01]))]
 
 
 def test_compare_partial_firmware_map_matches_present_reports():
-    # An ESP32 without abs firmware serves only reports 1 + 2. That is a valid map: the two present
-    # reports must match reports.py, and 3/4 simply aren't there (harness asserts the min set).
-    partial = _prefix_two_reports()
+    # A firmware serving only report 1 (keyboard) is a valid SUBSET map: the present report must
+    # match reports.py, and report 2 simply isn't there (the harness asserts the min set separately).
+    partial = _keyboard_only_map()
     diff = C.compare_report_maps(R.REPORT_DESCRIPTOR, partial)
     assert not diff.byte_exact
     assert diff.load_bearing_ok and diff.ok
-    assert sorted(diff.matched_reports) == [1, 2]
+    assert sorted(diff.matched_reports) == [1]
 
 
 def _pico_like_map() -> bytes:
     """A hand-built arduino-pico-style map: keyboard id 1 (same block) + mouse id 3 with an EXTRA
     pan axis (so it renumbers AND extends -- the two ways the Pico legitimately differs)."""
-    kbd_end = R.REPORT_DESCRIPTOR.find(bytes([0x85, 0x03]))
-    coll = R.REPORT_DESCRIPTOR.rfind(bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01]), 0, kbd_end)
     keyboard_block = R.REPORT_DESCRIPTOR[:R.REPORT_DESCRIPTOR.find(
         bytes([0x05, 0x01, 0x09, 0x02, 0xA1, 0x01]))]   # up to end of keyboard collection
     # mouse with report id 3, buttons + X/Y/Wheel/Pan (count 4) relative
@@ -332,13 +307,11 @@ def _keyboard_block() -> bytes:
 def _synthetic_map_for(profile) -> bytes:
     """Build a Report Map representative of `profile`'s real firmware.
 
-    dongle: reports.py descriptor BYTE-FOR-BYTE. esp32: keyboard(1)+mouse(2) prefix (base firmware,
-    no abs). pico: arduino-pico-style keyboard(1)+mouse(3)+pan (renumbered + extended)."""
-    if profile.name == "dongle":
-        return R.REPORT_DESCRIPTOR
-    if profile.name in ("esp32", "net"):
+    dongle/esp32/net: reports.py descriptor BYTE-FOR-BYTE (keyboard(1)+mouse(2)). pico:
+    arduino-pico-style keyboard(1)+mouse(3)+pan (renumbered + extended)."""
+    if profile.name in ("dongle", "esp32", "net"):
         # net drives the SAME ESP32 firmware over TCP -> same keyboard(1)+mouse(2) report map.
-        return _prefix_two_reports()
+        return R.REPORT_DESCRIPTOR
     if profile.name == "pico":
         return _pico_like_map()
     raise AssertionError(f"no synthetic map for backend {profile.name}")

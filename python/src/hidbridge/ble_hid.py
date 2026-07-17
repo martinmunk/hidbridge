@@ -371,18 +371,6 @@ def build_application(bus, app_path=APP_PATH):
                               [R.REPORT_ID_MOUSE, 0x01]))  # reportID 2, Input
     hid.add_chrc(mouse)
 
-    # Absolute Mouse input report (reportID 3) -- absolute X/Y pointer
-    abs_mouse = Characteristic(bus, hid, 6, REPORT_UUID, rd_notify, [0] * R.ABS_MOUSE_BODY_LEN)
-    abs_mouse.add_desc(Descriptor(bus, abs_mouse, 0, REPORT_REF_UUID, rd,
-                                  [R.REPORT_ID_ABS_MOUSE, 0x01]))  # reportID 3, Input
-    hid.add_chrc(abs_mouse)
-
-    # Digitizer / Touch Screen input report (reportID 4) -- single-finger touch
-    digitizer = Characteristic(bus, hid, 7, REPORT_UUID, rd_notify, [0] * R.DIGITIZER_BODY_LEN)
-    digitizer.add_desc(Descriptor(bus, digitizer, 0, REPORT_REF_UUID, rd,
-                                  [R.REPORT_ID_DIGITIZER, 0x01]))  # reportID 4, Input
-    hid.add_chrc(digitizer)
-
     # --- Battery service (0x180F) ---
     batt = Service(bus, app_path, 1, BATTERY_SVC)
     app.add_service(batt)
@@ -395,7 +383,7 @@ def build_application(bus, app_path=APP_PATH):
     devinfo.add_chrc(Characteristic(bus, devinfo, 0, PNP_ID_UUID, ["read"],
                                     [0x02, 0x6B, 0x1D, 0x04, 0x01, 0x00, 0x01]))
 
-    return app, kbd, mouse, abs_mouse, digitizer
+    return app, kbd, mouse
 
 
 # --------------------------------------------------------------------------- #
@@ -471,14 +459,11 @@ class BleHidDaemon:
             _log(f"WARN agent register: {e}")
         self._agent_mgr = agent_mgr
 
-        self.app, self.kbd, self.mouse, self.abs_mouse, self.digitizer = build_application(
-            self.bus, self.app_path)
+        self.app, self.kbd, self.mouse = build_application(self.bus, self.app_path)
         # route a frame's `kind` to the characteristic whose Report Reference matches its reportID
         self._report_char = {
             "keyboard": self.kbd,
             "mouse": self.mouse,
-            "abs_mouse": self.abs_mouse,
-            "digitizer": self.digitizer,
         }
         self.adv = Advertisement(self.bus, self.app_path, 0, self.name)
 
@@ -614,18 +599,6 @@ class BleHidDaemon:
             if c == "click":
                 self._emit(self._mouse_frames(R.mouse_click_reports(cmd.get("button", "left"))))
                 return {"ok": True}
-            if c == "move_abs":
-                self._emit(self._reports_frames(
-                    R.abs_move_reports(float(cmd["x"]), float(cmd["y"]))))
-                return {"ok": True}
-            if c == "tap_abs":
-                self._emit(self._reports_frames(R.abs_click_reports(
-                    float(cmd["x"]), float(cmd["y"]), cmd.get("button", "left"))))
-                return {"ok": True}
-            if c == "touch":
-                self._emit(self._reports_frames(
-                    R.digitizer_tap_reports(float(cmd["x"]), float(cmd["y"]))))
-                return {"ok": True}
             return {"ok": False, "error": f"unknown cmd {c!r}"}
         except Exception as e:  # noqa: BLE001  (report the error back to the CLI, keep serving)
             return {"ok": False, "error": str(e)}
@@ -637,11 +610,6 @@ class BleHidDaemon:
     @staticmethod
     def _mouse_frames(reps):
         return [("mouse", r.data) for r in reps]
-
-    @staticmethod
-    def _reports_frames(reps):
-        # preserve each report's own kind (abs_mouse / digitizer) so _emit routes it correctly
-        return [(r.kind, r.data) for r in reps]
 
     def _start_control_socket(self):
         os.makedirs(os.path.dirname(self.control_sock), exist_ok=True)

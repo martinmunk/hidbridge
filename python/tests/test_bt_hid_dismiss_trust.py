@@ -5,7 +5,6 @@ maps onto a HidController, so we drive it against a RecordingTransport and asser
 Asserts:
   * build_dialog_dismiss_plan is the proven Tab(s)+activate recipe (wake -> tab*n -> activate);
   * build_trust_arrow_plan is arrow(toward Trust) -> activate -> passcode (the maintainer live 2026-07-14);
-  * build_trust_pointer_plan is aim(move_abs) -> click -> passcode; passcode omitted when asked;
   * plan_summary NEVER leaks the passcode (redacted) -- security invariant;
   * run_plan emits the right HID frames for keys/click/aim, and REQUIRES a pin for a passcode step;
   * resolve() accepts explicit target+bond OR a registry device, and errors when given neither;
@@ -68,24 +67,11 @@ def test_trust_arrow_plan_emits_arrow_then_activate_frames():
     assert all(kind == "keyboard" for kind, _ in frames)
 
 
-def test_trust_pointer_plan_shape():
-    plan = D.build_trust_pointer_plan(0.58, 0.62, with_passcode=True)
-    ops = [s["op"] for s in plan if s["op"] != "sleep"]
-    assert ops == ["wake", "move_abs", "click", "passcode"]
-    aim = next(s for s in plan if s["op"] == "move_abs")
-    assert (aim["x"], aim["y"]) == (0.58, 0.62)
-
-
-def test_trust_pointer_plan_without_passcode():
-    plan = D.build_trust_pointer_plan(0.5, 0.6, with_passcode=False)
-    assert not any(s["op"] == "passcode" for s in plan)
-
-
 def test_plan_summary_redacts_passcode():
-    plan = D.build_trust_pointer_plan(0.5, 0.6, with_passcode=True)
+    plan = [{"op": "wake"}, {"op": "click", "button": "left"}, {"op": "passcode"}]
     s = D.plan_summary(plan)
     assert "redacted" in s
-    assert "aim:0.50,0.60" in s and "click" in s
+    assert "click" in s
 
 
 # --------------------------------------------------------------------------- #
@@ -106,12 +92,12 @@ def test_run_dialog_plan_emits_wake_tab_space():
     assert all(kind == "keyboard" for kind, _ in frames)
 
 
-def test_run_click_and_aim():
-    plan = [{"op": "move_abs", "x": 0.5, "y": 0.6}, {"op": "click", "button": "left"}]
+def test_run_move_and_click():
+    plan = [{"op": "move", "dx": 40, "dy": -20}, {"op": "click", "button": "left"}]
     ran, frames = _frames_for(plan)
-    assert ran == ["aim", "click"]
+    assert ran == ["move", "click"]
     kinds = [k for k, _ in frames]
-    assert "mouse" in kinds  # the click + the abs move both ride mouse-family reports
+    assert "mouse" in kinds  # the relative move + the click both ride mouse reports
 
 
 def test_passcode_step_requires_pin():

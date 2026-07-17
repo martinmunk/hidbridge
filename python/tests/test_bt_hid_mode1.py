@@ -71,9 +71,6 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
     c.move(3, -4)
     c.click("back")
     c.scroll(-2)
-    c.move_abs(0.5, 0.25)
-    c.tap(0.1, 0.9, "left")
-    c.touch(0.3, 0.7)
 
     # every request is well-formed JSON-RPC 2.0 with an increasing id
     for i, req in enumerate(fake.requests, start=1):
@@ -85,13 +82,10 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
         ("move", {"dx": 3, "dy": -4}),
         ("click", {"button": "back"}),
         ("scroll", {"clicks": -2}),
-        ("moveabs", {"x": 0.5, "y": 0.25}),
-        ("tap", {"x": 0.1, "y": 0.9, "button": "left"}),
-        ("touch", {"x": 0.3, "y": 0.7}),
     ]
 
 
-_FULL_CAPS = ["keyboard", "mouse", "abs", "digitizer", "slots", "nickname", "connect", "frames"]
+_FULL_CAPS = ["keyboard", "mouse", "slots", "nickname", "connect", "frames"]
 
 
 def _cap_handler(caps, seen=None):
@@ -223,11 +217,11 @@ def test_no_response_raises():
 # hello / capabilities + auth + target parsing
 # --------------------------------------------------------------------------- #
 def test_hello_and_supports():
-    caps = {"proto": 1, "caps": ["keyboard", "mouse", "abs", "digitizer", "slots", "net"]}
+    caps = {"proto": 1, "caps": ["keyboard", "mouse", "slots", "net"]}
     fake = RpcFake(handler=lambda m, p: caps)
     c = mode1.Mode1Client(fake)
     assert c.hello()["proto"] == 1
-    assert c.supports("digitizer") and not c.supports("nope")
+    assert c.supports("keyboard") and not c.supports("nope")
 
 
 def test_authenticate_sends_token_line_and_accepts():
@@ -280,9 +274,6 @@ def test_firmware_dry_run_matches_reports_py():
             (c.move(300, 5, dry=True), R.mouse_move_reports(300, 5)),
             (c.click("back", dry=True), R.mouse_click_reports("back")),
             (c.scroll(-3, dry=True), R.mouse_scroll_reports(-3)),
-            (c.move_abs(0.5, 0.25, dry=True), R.abs_move_reports(0.5, 0.25)),
-            (c.tap(0.5, 0.5, "left", dry=True), R.abs_click_reports(0.5, 0.5, "left")),
-            (c.touch(0.3, 0.7, dry=True), R.digitizer_tap_reports(0.3, 0.7)),
         ]
         for res, rl in checks:
             assert res.get("frames") == frames(rl), f"drift: {res} != {frames(rl)}"

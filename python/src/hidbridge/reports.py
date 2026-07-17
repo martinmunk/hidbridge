@@ -17,7 +17,6 @@ no copy; callers must not log the argument.
 
 from __future__ import annotations
 
-import struct
 from dataclasses import dataclass
 
 # --------------------------------------------------------------------------- #
@@ -46,26 +45,11 @@ BTN_FORWARD = 0x10  # button 5 -- "Forward"
 # --------------------------------------------------------------------------- #
 REPORT_ID_KEYBOARD = 1
 REPORT_ID_MOUSE = 2
-REPORT_ID_ABS_MOUSE = 3        # absolute-position pointer (Generic Desktop Mouse, X/Y absolute)
-REPORT_ID_DIGITIZER = 4        # single-finger touchscreen digitizer (usage page 0x0D)
 
 KEYBOARD_BODY_LEN = 8          # mod, reserved, k1..k6
 MOUSE_BODY_LEN = 4             # buttons, dx, dy, wheel
-ABS_MOUSE_BODY_LEN = 5         # buttons, X(u16 LE), Y(u16 LE)
-DIGITIZER_BODY_LEN = 6         # flags(tip|inrange), contactID, X(u16 LE), Y(u16 LE)
 _KBD_MAX_KEYS = 6
 _MOUSE_STEP = 127              # max signed-int8 relative delta per report
-
-# Absolute coordinate space: both the absolute mouse and the digitizer report X/Y as a u16 in a
-# fixed 0..32767 logical range (the HID convention for a normalized absolute axis). Callers pass a
-# fraction 0.0..1.0 of the screen and we scale it to this range; the device (iOS) maps 0..32767
-# across the physical panel. 32767 = 0x7FFF is the max positive value that fits Logical Maximum
-# without needing a 32-bit (negative-looking) item, so it is the standard absolute-axis full scale.
-ABS_AXIS_MAX = 32767
-
-# Digitizer flag bits (report byte 0)
-TIP_SWITCH = 0x01   # finger is touching the surface (a "tap"/"press")
-IN_RANGE = 0x02     # finger is detected in range (hovering or touching)
 
 # BT-HID transport header for a DATA/Input transaction on the interrupt channel (type 0xA, param 1).
 BTHID_DATA_INPUT = 0xA1
@@ -129,72 +113,6 @@ REPORT_DESCRIPTOR = bytes([
     0x75, 0x08,        #     Report Size (8)
     0x95, 0x03,        #     Report Count (3)
     0x81, 0x06,        #     Input (Data,Var,Rel)  -- X, Y, Wheel
-    0xC0,              #   End Collection
-    0xC0,              # End Collection
-    # ---- Absolute Mouse, Report ID 3 ----
-    # Same Generic Desktop Mouse collection as reportID 2, but X/Y are ABSOLUTE (no Relative flag)
-    # and 16-bit over Logical 0..32767. iOS pointer support (iPadOS 13.4+) is RELATIVE for the
-    # AssistiveTouch cursor; whether it honours an ABSOLUTE mouse axis is what this report TESTS.
-    0x05, 0x01,        # Usage Page (Generic Desktop)
-    0x09, 0x02,        # Usage (Mouse)
-    0xA1, 0x01,        # Collection (Application)
-    0x85, 0x03,        #   Report ID (3)
-    0x09, 0x01,        #   Usage (Pointer)
-    0xA1, 0x00,        #   Collection (Physical)
-    0x05, 0x09,        #     Usage Page (Buttons)
-    0x19, 0x01,        #     Usage Minimum (1)
-    0x29, 0x03,        #     Usage Maximum (3)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x25, 0x01,        #     Logical Maximum (1)
-    0x95, 0x03,        #     Report Count (3)
-    0x75, 0x01,        #     Report Size (1)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- 3 buttons
-    0x95, 0x01,        #     Report Count (1)
-    0x75, 0x05,        #     Report Size (5)
-    0x81, 0x03,        #     Input (Const)          -- 5-bit padding
-    0x05, 0x01,        #     Usage Page (Generic Desktop)
-    0x09, 0x30,        #     Usage (X)
-    0x09, 0x31,        #     Usage (Y)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x26, 0xFF, 0x7F,  #     Logical Maximum (32767)
-    0x75, 0x10,        #     Report Size (16)
-    0x95, 0x02,        #     Report Count (2)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- X, Y ABSOLUTE (no Rel bit)
-    0xC0,              #   End Collection
-    0xC0,              # End Collection
-    # ---- Digitizer / Touch Screen, Report ID 4 ----
-    # A single-finger touchscreen digitizer. If iOS turns these into real touch events we get true
-    # taps at exact coordinates (the "true touch" path). Tip Switch = finger down; Contact ID = 0;
-    # X/Y absolute 0..32767 on the Generic Desktop page (the digitizer convention).
-    0x05, 0x0D,        # Usage Page (Digitizers)
-    0x09, 0x04,        # Usage (Touch Screen)
-    0xA1, 0x01,        # Collection (Application)
-    0x85, 0x04,        #   Report ID (4)
-    0x09, 0x22,        #   Usage (Finger)
-    0xA1, 0x02,        #   Collection (Logical)
-    0x09, 0x42,        #     Usage (Tip Switch)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x25, 0x01,        #     Logical Maximum (1)
-    0x75, 0x01,        #     Report Size (1)
-    0x95, 0x01,        #     Report Count (1)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- Tip Switch (bit 0)
-    0x09, 0x32,        #     Usage (In Range)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- In Range (bit 1)
-    0x95, 0x06,        #     Report Count (6)
-    0x81, 0x03,        #     Input (Const)          -- 6-bit padding to fill byte 0
-    0x75, 0x08,        #     Report Size (8)
-    0x95, 0x01,        #     Report Count (1)
-    0x09, 0x51,        #     Usage (Contact Identifier)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- Contact ID (byte 1)
-    0x05, 0x01,        #     Usage Page (Generic Desktop)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x26, 0xFF, 0x7F,  #     Logical Maximum (32767)
-    0x75, 0x10,        #     Report Size (16)
-    0x95, 0x01,        #     Report Count (1)
-    0x09, 0x30,        #     Usage (X)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- X ABSOLUTE
-    0x09, 0x31,        #     Usage (Y)
-    0x81, 0x02,        #     Input (Data,Var,Abs)   -- Y ABSOLUTE
     0xC0,              #   End Collection
     0xC0,              # End Collection
 ])
@@ -397,77 +315,3 @@ def mouse_scroll_reports(clicks: int) -> list[HidReport]:
     """Vertical wheel scroll of `clicks` detents (signed), split into bounded int8 steps."""
     steps = _split_delta(clicks)
     return [mouse_report(wheel=s) for s in steps] or [mouse_report(wheel=0)]
-
-
-# --------------------------------------------------------------------------- #
-# Absolute pointer helpers (fraction 0..1 of the screen -> 0..ABS_AXIS_MAX)
-# --------------------------------------------------------------------------- #
-def frac_to_abs(frac: float) -> int:
-    """Map a screen fraction (0.0 = left/top edge .. 1.0 = right/bottom edge) to a u16 axis value.
-
-    Clamps out-of-range fractions into [0, ABS_AXIS_MAX]. This is the single scaling rule shared by
-    the absolute mouse and the digitizer, so calibration (which fraction hits which pixel) lives in
-    one place.
-    """
-    return _clamp(int(round(frac * ABS_AXIS_MAX)), 0, ABS_AXIS_MAX)
-
-
-# --------------------------------------------------------------------------- #
-# Absolute Mouse (reportID 3) -- buttons, X(u16 LE), Y(u16 LE) ABSOLUTE
-# --------------------------------------------------------------------------- #
-def abs_mouse_report(buttons: int = 0, x: int = 0, y: int = 0) -> HidReport:
-    """One absolute-pointer report. x/y are u16 in [0, ABS_AXIS_MAX] (little-endian on the wire)."""
-    body = bytes([buttons & 0xFF]) + struct.pack(
-        "<HH", _clamp(x, 0, ABS_AXIS_MAX), _clamp(y, 0, ABS_AXIS_MAX))
-    return HidReport(REPORT_ID_ABS_MOUSE, body, "abs_mouse")
-
-
-def abs_mouse_release(x: int = 0, y: int = 0) -> HidReport:
-    """Buttons-up report, keeping the pointer at (x, y)."""
-    return abs_mouse_report(0, x, y)
-
-
-def abs_move_reports(x_frac: float, y_frac: float) -> list[HidReport]:
-    """Move the absolute pointer to (x_frac, y_frac) of the screen (no button)."""
-    x, y = frac_to_abs(x_frac), frac_to_abs(y_frac)
-    return [abs_mouse_report(0, x, y)]
-
-
-def abs_click_reports(x_frac: float, y_frac: float, button: str = "left") -> list[HidReport]:
-    """Move to (x_frac, y_frac) then press+release a button THERE -- an absolute-position click.
-
-    Emits: move-to (button up) -> button down at (x,y) -> button up at (x,y). Holding the position
-    across all three keeps the click anchored to the target for hosts that only act on the
-    button-down transition.
-    """
-    b = _BUTTON_NAME.get(button.lower())
-    if b is None:
-        raise ValueError(f"unknown mouse button {button!r}")
-    x, y = frac_to_abs(x_frac), frac_to_abs(y_frac)
-    return [abs_mouse_report(0, x, y), abs_mouse_report(b, x, y), abs_mouse_report(0, x, y)]
-
-
-# --------------------------------------------------------------------------- #
-# Digitizer / Touch Screen (reportID 4) -- flags, contactID, X(u16 LE), Y(u16 LE)
-# --------------------------------------------------------------------------- #
-def digitizer_report(tip: bool = False, contact_id: int = 0,
-                     x: int = 0, y: int = 0, in_range: bool | None = None) -> HidReport:
-    """One touch report. tip = finger touching; in_range defaults to tip (a touch is in range)."""
-    if in_range is None:
-        in_range = tip
-    flags = (TIP_SWITCH if tip else 0) | (IN_RANGE if in_range else 0)
-    body = bytes([flags, contact_id & 0xFF]) + struct.pack(
-        "<HH", _clamp(x, 0, ABS_AXIS_MAX), _clamp(y, 0, ABS_AXIS_MAX))
-    return HidReport(REPORT_ID_DIGITIZER, body, "digitizer")
-
-
-def digitizer_lift() -> HidReport:
-    """Finger-up, out-of-range report (all zero)."""
-    return HidReport(REPORT_ID_DIGITIZER, bytes(DIGITIZER_BODY_LEN), "digitizer")
-
-
-def digitizer_tap_reports(x_frac: float, y_frac: float,
-                          contact_id: int = 0) -> list[HidReport]:
-    """A single-finger tap at (x_frac, y_frac): finger-down at (x,y) then finger-up."""
-    x, y = frac_to_abs(x_frac), frac_to_abs(y_frac)
-    return [digitizer_report(tip=True, contact_id=contact_id, x=x, y=y), digitizer_lift()]

@@ -7,10 +7,8 @@ auto-reconnect (serial "EVT connected"), then send the whole sequence over that 
 Every report frame the firmware notifies to a connected central replies "OK" (vs "OK noconn").
 
 Sequence: wiggle+click the pointer -> Cmd+Space (open Spotlight = a focused text field) -> type a
-distinctive string -> Cmd+H (home) -> absolute-pointer move/click (reportID 3) -> digitizer tap
-(reportID 4). C920 webcam stills are grabbed at each step as visual ground truth (the on-glass image
-is the only proof the input actually registered, not just decoded). The abs/digitizer steps are the
-GATED ones (does iOS honour absolute HID); pass --skip-abs to run only the proven keyboard+rel-mouse.
+distinctive string -> Cmd+H (home). C920 webcam stills are grabbed at each step as visual ground
+truth (the on-glass image is the only proof the input actually registered, not just decoded).
 
 Usage:
     hidbridge/esp32_live_verify.py [--port /dev/ttyUSB1] [--cam /dev/video5]
@@ -56,8 +54,8 @@ def _drain(ser, secs: float, want: str | None, log: list[str]) -> bool:
 
 def _send(ser, reports_list, log: list[str], gap: float = 0.05):
     for r in reports_list:
-        # encode via the transport's framer so every kind (keyboard/mouse/abs_mouse/digitizer)
-        # gets the correct serial prefix from the single source of truth (no hardcoded K/M here).
+        # encode via the transport's framer so every kind (keyboard/mouse) gets the correct serial
+        # prefix from the single source of truth (no hardcoded K/M here).
         ser.write(TE.encode_frame(r.kind, r.data))
         ser.flush()
         time.sleep(gap)
@@ -84,9 +82,8 @@ def main(argv=None) -> int:
     ap.add_argument("--port", default=os.environ.get("BT_HID_ESP32_PORT", "/dev/ttyUSB1"))
     ap.add_argument("--cam", default=os.environ.get("CAM", "/dev/video5"))
     ap.add_argument("--text", default="ESP32HIDOK")
-    ap.add_argument("--wait", type=float, default=45.0, help="seconds to await iPad auto-reconnect")
-    ap.add_argument("--skip-abs", action="store_true",
-                    help="skip the absolute-pointer (ID 3) + digitizer (ID 4) test steps")
+    ap.add_argument("--wait", type=float, default=45.0,
+                    help="seconds to await the device auto-reconnect")
     ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
@@ -138,24 +135,6 @@ def main(argv=None) -> int:
         _send(ser, _kbd(R.MOD_LGUI, [0x0B]), log)   # Cmd+H (h usage = 0x0B)
         time.sleep(1.0)
         _grab(args.cam, out, "06_after_cmdH")
-
-        # --- absolute-pointer test (reportID 3) + digitizer touch (reportID 4) ---
-        # These are the GATED behaviours: whether iOS honours an ABSOLUTE mouse axis / a digitizer
-        # touch. Move the abs pointer to screen-center then the corners, then a touchscreen tap at
-        # center. If iOS honours them the cursor/touch jumps to the exact fraction (webcam-verified).
-        if not args.skip_abs:
-            print("abs pointer: center -> corners (reportID 3)")
-            _send(ser, R.abs_move_reports(0.5, 0.5), log); time.sleep(0.4)
-            _grab(args.cam, out, "07_abs_center")
-            for xf, yf in ((0.1, 0.1), (0.9, 0.1), (0.9, 0.9), (0.1, 0.9)):
-                _send(ser, R.abs_move_reports(xf, yf), log); time.sleep(0.3)
-            _grab(args.cam, out, "08_abs_corners")
-            print("abs pointer: click at center (reportID 3)")
-            _send(ser, R.abs_click_reports(0.5, 0.5), log); time.sleep(0.5)
-            _grab(args.cam, out, "09_abs_click")
-            print("digitizer: single-finger tap at center (reportID 4)")
-            _send(ser, R.digitizer_tap_reports(0.5, 0.5), log); time.sleep(0.5)
-            _grab(args.cam, out, "10_touch_tap")
 
         ser.write(b"P\n"); ser.flush(); time.sleep(0.3); _drain(ser, 2, None, log)
     finally:

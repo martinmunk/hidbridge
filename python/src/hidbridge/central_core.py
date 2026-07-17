@@ -538,13 +538,10 @@ class BackendProfile:
 # reports.py canonical ids (kept local to avoid importing the reports module here)
 _ID_KEYBOARD = 1
 _ID_MOUSE = 2
-_ID_ABS_MOUSE = 3
-_ID_DIGITIZER = 4
 
 BACKEND_PROFILES: dict[str, BackendProfile] = {
-    # ESP32 firmware embeds reports.py REPORT_DESCRIPTOR byte-for-byte (kbd id 1 + mouse id 2). The
-    # abs-pointer (id 3) + digitizer (id 4) reports exist only once the abs firmware is flashed;
-    # the harness discovers whichever report ids the live Report Map actually declares.
+    # ESP32 firmware embeds reports.py REPORT_DESCRIPTOR byte-for-byte (kbd id 1 + mouse id 2); the
+    # harness discovers whichever report ids the live Report Map actually declares.
     "esp32": BackendProfile(
         name="esp32", advert_name="HIDBRIDGE-esp32", report_id_remap={},
         byte_exact_map=False, mouse_report_id=_ID_MOUSE, mouse_pad_zero=False,

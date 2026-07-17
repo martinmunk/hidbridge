@@ -16,8 +16,6 @@ we send the exact 8-byte keyboard / 4-byte mouse body it builds; the Pico never 
 Line protocol (ASCII, one report per line, `\n`-terminated), host -> Pico:
     K <16 hex>   keyboard report    (8-byte boot body: mod,resv,k1..k6)          -> report ID 1
     M <8 hex>    relative mouse      (4-byte body: buttons,dx,dy,wheel)           -> report ID 2
-    A <10 hex>   absolute mouse      (5-byte body: buttons,Xlo,Xhi,Ylo,Yhi)       -> report ID 3
-    D <12 hex>   digitizer/touch     (6-byte body: flags,contactID,Xlo,Xhi,Ylo,Yhi) -> report ID 4
     P            ping           -> Pico replies e.g. `PONG name=HIDBRIDGE-pico conn=1`
 Pico -> host reply, one line per command: `OK` on success, `ERR <reason>` on failure.
 
@@ -31,11 +29,10 @@ import glob
 import os
 
 # Kind -> line prefix + expected report-body length (matches reports.py layouts). The kinds are the
-# HidReport.kind values produced by reports.py: keyboard(ID 1), mouse(ID 2, relative), abs_mouse
-# (ID 3, absolute pointer), digitizer(ID 4, touchscreen). Body length is the bytes AFTER the report
-# ID (the firmware prepends the ID); it MUST equal reports.py's *_BODY_LEN for that kind.
-_KIND_PREFIX = {"keyboard": "K", "mouse": "M", "abs_mouse": "A", "digitizer": "D"}
-_KIND_BODYLEN = {"keyboard": 8, "mouse": 4, "abs_mouse": 5, "digitizer": 6}
+# HidReport.kind values produced by reports.py: keyboard(ID 1), mouse(ID 2, relative). Body length is
+# the bytes AFTER the report ID (the firmware prepends the ID); it MUST equal reports.py's *_BODY_LEN.
+_KIND_PREFIX = {"keyboard": "K", "mouse": "M"}
+_KIND_BODYLEN = {"keyboard": 8, "mouse": 4}
 _PREFIX_KIND = {v: k for k, v in _KIND_PREFIX.items()}
 
 PICO_ADVERT_NAME = "HIDBRIDGE-pico"

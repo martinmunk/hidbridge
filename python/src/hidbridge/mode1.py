@@ -164,15 +164,6 @@ class Mode1Client:
     def scroll(self, clicks: int, *, dry: bool = False) -> dict:
         return self.call("scroll", {"clicks": int(clicks)}, dry=dry)
 
-    def move_abs(self, x: float, y: float, *, dry: bool = False) -> dict:
-        return self.call("moveabs", {"x": float(x), "y": float(y)}, dry=dry)
-
-    def tap(self, x: float, y: float, button: str = "left", *, dry: bool = False) -> dict:
-        return self.call("tap", {"x": float(x), "y": float(y), "button": button}, dry=dry)
-
-    def touch(self, x: float, y: float, *, dry: bool = False) -> dict:
-        return self.call("touch", {"x": float(x), "y": float(y)}, dry=dry)
-
     def frames(self, frames, *, dry: bool = False) -> dict:
         """Mode 2 semantics via JSON-RPC: relay PRE-BUILT report frames ('<ridHex><bodyHex>' strings,
         the shape a dry run returns) -- the board just notifies them."""

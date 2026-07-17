@@ -160,26 +160,11 @@ class HidController:
     def scroll(self, clicks: int) -> dict:
         return self._send(R.mouse_scroll_reports(clicks))
 
-    # ---- absolute pointer (reportID 3) -- fractions 0..1 of the screen ----
-    def move_abs(self, x_frac: float, y_frac: float) -> dict:
-        """Move the ABSOLUTE mouse pointer to (x_frac, y_frac) of the screen (no click)."""
-        return self._send(R.abs_move_reports(x_frac, y_frac))
-
-    def tap_abs(self, x_frac: float, y_frac: float, button: str = "left") -> dict:
-        """Absolute-position click: move to (x_frac, y_frac) then press+release there."""
-        return self._send(R.abs_click_reports(x_frac, y_frac, button))
-
-    # ---- digitizer / touchscreen (reportID 4) -- the true-touch path ----
-    def touch_tap(self, x_frac: float, y_frac: float) -> dict:
-        """A single-finger DIGITIZER tap at (x_frac, y_frac) of the screen."""
-        return self._send(R.digitizer_tap_reports(x_frac, y_frac))
-
     # ---- scripted timeline ----
     def play(self, events: list[dict], sleep: Callable[[float], None] = time.sleep) -> None:
         """Play a timeline of events. Each event: {"after": seconds, "action": <name>, **kwargs}.
 
         actions: type(text=), key(name=, modifiers=), move(dx=, dy=), click(button=),
-                 move_abs(x=, y=), tap_abs(x=, y=, button=), touch(x=, y=),
                  scroll(clicks=), wake(), unlock(passcode=, press_enter=), delay (no-op).
         `sleep` is injectable so tests run instantly + assert timing.
         """
@@ -198,12 +183,6 @@ class HidController:
                 self.send_key(ev["name"], int(ev.get("modifiers", 0)))
             elif action == "move":
                 self.move(int(ev["dx"]), int(ev["dy"]))
-            elif action == "move_abs":
-                self.move_abs(float(ev["x"]), float(ev["y"]))
-            elif action == "tap_abs":
-                self.tap_abs(float(ev["x"]), float(ev["y"]), ev.get("button", "left"))
-            elif action == "touch":
-                self.touch_tap(float(ev["x"]), float(ev["y"]))
             elif action == "click":
                 self.click(ev.get("button", "left"))
             elif action == "scroll":

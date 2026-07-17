@@ -493,8 +493,8 @@ class HidSession:
 
     # ---- report passthrough (delegate to the controller so reports.py stays the single source) ----
     def __getattr__(self, item):
-        # Forward action methods (type_text/send_key/unlock/wake/move/click/scroll/move_abs/
-        # tap_abs/touch_tap/play) to the controller once inside the `with`.
+        # Forward action methods (type_text/send_key/unlock/wake/move/click/scroll/play) to the
+        # controller once inside the `with`.
         controller = self.__dict__.get("controller")
         if controller is not None and hasattr(controller, item):
             return getattr(controller, item)

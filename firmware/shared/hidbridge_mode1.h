@@ -24,8 +24,6 @@ static const int      PROTO_VERSION   = 1;
 static const uint8_t  MOD_LSHIFT_BIT  = 0x02;
 static const uint8_t  RID_KEYBOARD    = 1;
 static const uint8_t  RID_MOUSE       = 2;
-static const uint8_t  RID_ABS_MOUSE   = 3;
-static const uint8_t  RID_DIGITIZER   = 4;
 
 // ---- keymap (mirrors reports.py) ----
 // Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE.
@@ -78,16 +76,6 @@ inline int buttonNameToBit(const char* name) {
 }
 
 inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-// Screen fraction (0..1) -> u16 absolute axis [0..32767]. Mirrors reports.frac_to_abs INCLUDING
-// Python round()'s round-half-to-EVEN, so the emitted bytes match exactly.
-inline uint16_t fracToAbs(double frac) {
-  double x = frac * 32767.0, fl = floor(x), diff = x - fl; long r;
-  if (diff < 0.5)      r = (long)fl;
-  else if (diff > 0.5) r = (long)fl + 1;
-  else { long f = (long)fl; r = (f % 2 == 0) ? f : f + 1; }
-  return (uint16_t)clampi((int)r, 0, 32767);
-}
 
 // ---- report sink: notify a report (firmware-specific), or (dry) collect rid+body hex ----
 struct ReportSink {
@@ -142,25 +130,6 @@ inline void emitScroll(ReportSink& s, int clicks) {
 inline void emitClick(ReportSink& s, uint8_t button) {
   emitMouse(s, button, 0, 0, 0);
   emitMouse(s, 0, 0, 0, 0);
-}
-inline void emitAbs(ReportSink& s, uint8_t buttons, uint16_t x, uint16_t y) {
-  uint8_t b[5] = { buttons, (uint8_t)(x & 0xFF), (uint8_t)(x >> 8),
-                   (uint8_t)(y & 0xFF), (uint8_t)(y >> 8) };
-  emitReport(s, RID_ABS_MOUSE, b, 5);
-}
-inline void emitMoveAbs(ReportSink& s, double xf, double yf) {
-  emitAbs(s, 0, fracToAbs(xf), fracToAbs(yf));
-}
-inline void emitTap(ReportSink& s, double xf, double yf, uint8_t button) {
-  uint16_t x = fracToAbs(xf), y = fracToAbs(yf);
-  emitAbs(s, 0, x, y); emitAbs(s, button, x, y); emitAbs(s, 0, x, y);
-}
-inline void emitTouch(ReportSink& s, double xf, double yf) {
-  uint16_t x = fracToAbs(xf), y = fracToAbs(yf);
-  uint8_t down[6] = { 0x03, 0, (uint8_t)(x&0xFF),(uint8_t)(x>>8),(uint8_t)(y&0xFF),(uint8_t)(y>>8) };
-  emitReport(s, RID_DIGITIZER, down, 6);       // tip + in_range
-  uint8_t lift[6] = { 0, 0, 0, 0, 0, 0 };
-  emitReport(s, RID_DIGITIZER, lift, 6);
 }
 
 inline int hexNibble(char c) {
@@ -263,14 +232,6 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
     if (bit < 0) argErr = "unknown 'button'"; else emitClick(s, (uint8_t)bit);
   } else if (!strcmp(method, "scroll")) {
     emitScroll(s, params["clicks"] | 0);
-  } else if (!strcmp(method, "moveabs")) {
-    emitMoveAbs(s, params["x"] | 0.0, params["y"] | 0.0);
-  } else if (!strcmp(method, "tap")) {
-    int bit = buttonNameToBit(params["button"] | "left");
-    if (bit < 0) argErr = "unknown 'button'";
-    else emitTap(s, params["x"] | 0.0, params["y"] | 0.0, (uint8_t)bit);
-  } else if (!strcmp(method, "touch")) {
-    emitTouch(s, params["x"] | 0.0, params["y"] | 0.0);
   } else if (!strcmp(method, "frames")) {
     // Mode 2 semantics inside JSON-RPC: the host sends PRE-BUILT report frames ("<ridHex><bodyHex>",
     // the same shape a dry run returns) and the board just relays them. Unifies "one protocol".

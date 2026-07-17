@@ -27,10 +27,9 @@ bonded BT keyboard CAN move the highlight onto "Trust" with ARROW keys and then 
     behaviour identical, pure localization.)
     (Ordinary dialogs like the Sidecar "Mistet forbindelse" one answer Tab-then-Space -- see
     `build_dialog_dismiss_plan`; that path is unchanged.)
-  * Relative / absolute pointer: still not aimable closed-loop (the iOS pointer is invisible in the
-    webcam -- dim, reflective glass, content shimmer; absolute coords ignored, memory
-    `ipad-absolute-hid-ignored`). The pointer path is retained as `method="trust-pointer"` for a
-    pointer-capable rig, but the ARROW-KEY path above is the one that actually works.
+  * Relative pointer: still not aimable closed-loop (the pointer is invisible in the webcam -- dim,
+    reflective glass, content shimmer; absolute coords were ignored by the host, memory
+    `ipad-absolute-hid-ignored`). The ARROW-KEY path above is the one that actually works.
 
 => On the current rig the Trust alert CAN be answered over BT HID via arrow-key focus + activate.
    This tool DETECTS the overlay (grabs a webcam frame for the caller to confirm), drives the
@@ -56,12 +55,6 @@ from hidbridge import targets as TG  # noqa: E402
 # Default location of the device unlock/confirm PIN (0600, never committed). Mirrors bt_hid.unlock.
 DEFAULT_PIN_FILE = os.path.join(os.path.expanduser("~"), ".config", "bt_hid", "idevice.pin")
 
-# The button-row target for a relative-pointer click, as a fraction of the screen (x, y in 0..1).
-# The "Trust This Computer?" alert is centred; its two buttons sit at ~62% down. Left/right button
-# fractions are approximate and orientation-dependent -- callers override with --pointer-frac.
-TRUST_BUTTON_FRAC = (0.58, 0.62)
-DECLINE_BUTTON_FRAC = (0.42, 0.62)
-
 
 # --------------------------------------------------------------------------- #
 # passcode (secure)
@@ -85,7 +78,6 @@ def read_pin(path: str = DEFAULT_PIN_FILE) -> str:
 #   {"op": "key",      "name": <keyname>, "mod": <int>}
 #   {"op": "click",    "button": "left"}
 #   {"op": "move",     "dx": int, "dy": int}
-#   {"op": "move_abs", "x": float, "y": float}      # fraction of screen (0..1)
 #   {"op": "passcode"}                              # types the PIN + Enter (secure, filled at run)
 #   {"op": "sleep",    "seconds": float}
 #   {"op": "wake"}
@@ -97,7 +89,7 @@ def build_dialog_dismiss_plan(activate_key: str = "space", focus_tabs: int = 1,
 
     This is the proven "Tab then Space" recipe for non-security dialogs (e.g. the Sidecar
     "Mistet forbindelse" alert). It does NOT dismiss the hardened "Trust This Computer?" alert
-    (see the module docstring) -- use `build_trust_pointer_plan` for a best-effort Trust attempt.
+    (see the module docstring) -- use `build_trust_arrow_plan` for the working Trust path.
     """
     plan: list[dict] = [{"op": "wake"}, {"op": "sleep", "seconds": settle}]
     for _ in range(max(0, focus_tabs)):
@@ -131,27 +123,6 @@ def build_trust_arrow_plan(*, direction: str = "right", presses: int = 2,
     return plan
 
 
-def build_trust_pointer_plan(x_frac: float, y_frac: float, *, with_passcode: bool = True,
-                             settle: float = 0.6) -> list[dict]:
-    """Best-effort "Trust" via a relative-pointer click at a screen-fraction target.
-
-    `move_abs` is emitted as the aim (iPadOS ignores the absolute coordinate, but a rig with a
-    visible/aimable pointer or a webcam servo can substitute a real position), then a left click,
-    then -- if the passcode confirm sheet appears -- the PIN + Enter. On the current rig the click
-    is unaimable (see docstring), so this is a scaffold for a pointer-capable rig, not a guarantee.
-    """
-    plan: list[dict] = [
-        {"op": "wake"}, {"op": "sleep", "seconds": 0.3},
-        {"op": "move_abs", "x": float(x_frac), "y": float(y_frac)},
-        {"op": "sleep", "seconds": 0.2},
-        {"op": "click", "button": "left"},
-        {"op": "sleep", "seconds": settle},
-    ]
-    if with_passcode:
-        plan += [{"op": "passcode"}, {"op": "sleep", "seconds": settle}]
-    return plan
-
-
 def plan_summary(plan: list[dict]) -> str:
     """A one-line, passcode-free summary of a plan (safe to log)."""
     parts = []
@@ -163,8 +134,6 @@ def plan_summary(plan: list[dict]) -> str:
             parts.append("passcode:<redacted>")
         elif op == "click":
             parts.append(f"click:{s.get('button', 'left')}")
-        elif op == "move_abs":
-            parts.append(f"aim:{s['x']:.2f},{s['y']:.2f}")
         elif op == "move":
             parts.append(f"move:{s['dx']},{s['dy']}")
         elif op in ("wake", "sleep"):
@@ -197,8 +166,6 @@ def run_plan(controller, plan: list[dict], *, pin: str | None = None,
             controller.click(s.get("button", "left")); done.append("click")
         elif op == "move":
             controller.move(int(s["dx"]), int(s["dy"])); done.append("move")
-        elif op == "move_abs":
-            controller.move_abs(float(s["x"]), float(s["y"])); done.append("aim")
         elif op == "passcode":
             if not pin:
                 raise ValueError("plan has a passcode step but no PIN was provided")
@@ -249,15 +216,13 @@ def grab_webcam(path: str, device: str = "/dev/video5", size: str = "1920x1080")
 def dismiss(target: str, bond: str, *, method: str = "dialog",
             activate_key: str = "space", focus_tabs: int = 1,
             arrow_direction: str = "right", arrow_presses: int = 2,
-            pointer_frac: tuple[float, float] = TRUST_BUTTON_FRAC,
             pin: str | None = None, ready_timeout: float = 8.0,
             connect_timeout: float = 20.0) -> dict:
-    """Connect the HID backend and run a dismissal plan against the iPad. Returns a result dict.
+    """Connect the HID backend and run a dismissal plan against the device. Returns a result dict.
 
     method:
       "dialog"        -> Tab(s) + activate (answers ORDINARY dialogs; inert on the Trust alert).
       "trust"         -> ARROW toward "Trust" + activate (+ passcode) -- the working path (2026-07-14).
-      "trust-pointer" -> relative-pointer click at pointer_frac (+ passcode) -- pointer-rig scaffold.
       "decline"       -> Tab + activate (the Tab-focused button is "Don't Trust" on the Trust alert).
     """
     from hidbridge.conn import HidSession
@@ -267,11 +232,8 @@ def dismiss(target: str, bond: str, *, method: str = "dialog",
     elif method == "trust":
         plan = build_trust_arrow_plan(direction=arrow_direction, presses=arrow_presses,
                                       activate_key=activate_key, with_passcode=bool(pin))
-    elif method == "trust-pointer":
-        plan = build_trust_pointer_plan(pointer_frac[0], pointer_frac[1],
-                                        with_passcode=bool(pin))
     else:
-        raise ValueError(f"unknown method {method!r} (dialog|trust|trust-pointer|decline)")
+        raise ValueError(f"unknown method {method!r} (dialog|trust|decline)")
 
     result = {"target": target, "bond": bond, "method": method,
               "plan": plan_summary(plan), "ran": None, "connected": False}
@@ -295,18 +257,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", help="explicit HidSession target (esp32:/dev/ttyUSB1, hci1, ...)")
     p.add_argument("--bond", help="explicit iOS-device bond identity")
     p.add_argument("--method", default="dialog",
-                   choices=["dialog", "trust", "trust-pointer", "decline"],
+                   choices=["dialog", "trust", "decline"],
                    help="dialog=Tab+activate (ordinary dialogs); trust=ARROW+activate (Trust alert, "
-                        "the working path); trust-pointer=pointer click (pointer-rig scaffold); "
-                        "decline=Tab+activate (Trust alert's 'Don't Trust' button)")
+                        "the working path); decline=Tab+activate (Trust alert's 'Don't Trust' button)")
     p.add_argument("--activate-key", default="space", help="key that activates the focused button")
     p.add_argument("--focus-tabs", type=int, default=1, help="number of Tabs to reveal focus")
     p.add_argument("--arrow-direction", default="right",
                    help="arrow toward Trust for method=trust (Trust is the RIGHT button)")
     p.add_argument("--arrow-presses", type=int, default=2,
                    help="arrow presses toward Trust for method=trust (2 = reveal+move, clamps at edge)")
-    p.add_argument("--pointer-frac", default=None,
-                   help="x,y screen fraction 0..1 for the pointer click (method=trust)")
     p.add_argument("--pin-file", default=DEFAULT_PIN_FILE,
                    help="0600 file with the device passcode (never logged)")
     p.add_argument("--no-passcode", action="store_true",
@@ -327,18 +286,11 @@ def main(argv=None) -> int:
         print(f"target error: {e}", file=sys.stderr)
         return 2
 
-    frac = TRUST_BUTTON_FRAC
-    if args.pointer_frac:
-        xs, ys = args.pointer_frac.split(",")
-        frac = (float(xs), float(ys))
-
     if args.dry_run:
         if args.method == "trust":
             plan = build_trust_arrow_plan(direction=args.arrow_direction, presses=args.arrow_presses,
                                           activate_key=args.activate_key,
                                           with_passcode=not args.no_passcode)
-        elif args.method == "trust-pointer":
-            plan = build_trust_pointer_plan(frac[0], frac[1], with_passcode=not args.no_passcode)
         else:
             plan = build_dialog_dismiss_plan(activate_key=args.activate_key,
                                              focus_tabs=args.focus_tabs)
@@ -347,7 +299,7 @@ def main(argv=None) -> int:
         return 0
 
     pin = None
-    if args.method in ("trust", "trust-pointer") and not args.no_passcode:
+    if args.method == "trust" and not args.no_passcode:
         try:
             pin = read_pin(args.pin_file)   # never logged
         except FileNotFoundError as e:
@@ -361,7 +313,7 @@ def main(argv=None) -> int:
     try:
         res = dismiss(target, bond, method=args.method, activate_key=args.activate_key,
                       focus_tabs=args.focus_tabs, arrow_direction=args.arrow_direction,
-                      arrow_presses=args.arrow_presses, pointer_frac=frac, pin=pin)
+                      arrow_presses=args.arrow_presses, pin=pin)
     except Exception as e:  # noqa: BLE001  (surface any live-HID failure as a clean CLI error)
         print(f"dismiss failed: {e}", file=sys.stderr)
         return 1
