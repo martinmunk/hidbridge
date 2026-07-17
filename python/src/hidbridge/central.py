@@ -41,6 +41,7 @@ from gi.repository import GLib
 from hidbridge import adapter as A  # noqa: E402
 from hidbridge import central_core as CC  # noqa: E402
 from hidbridge import reports as R  # noqa: E402
+from hidbridge.mode1 import Mode1Error  # noqa: E402
 
 BLUEZ = "org.bluez"
 OM = "org.freedesktop.DBus.ObjectManager"
@@ -109,6 +110,45 @@ class AutoAcceptAgent(dbus.service.Object):
 KNOWN_DRIVES = {
     R.REPORT_ID_KEYBOARD: ("keyboard", lambda: R.keyboard_report(0, [0x04]).data),  # 'a' down
     R.REPORT_ID_MOUSE:    ("mouse",    lambda: R.mouse_report(dx=3).data),          # move dx=3
+}
+
+
+# --------------------------------------------------------------------------- #
+# Live SCENARIOS -- Mode 1 (JSON-RPC) driven, ORDERED-notification-sequence verify.
+# --------------------------------------------------------------------------- #
+# Backs tests/test_bt_hid_layout_drag_live.py: instead of injecting ONE fixed frame and checking one
+# notification (the self-test above), a scenario drives a Mode 1 COMMAND SEQUENCE over the transport's
+# OWN open channel while the central captures the ORDERED sequence of GATT input-report notifications on
+# a single report characteristic, and byte-verifies that sequence against reports.py (via central_core).
+# Each scenario declares: the canonical reports.py report id to capture on; an optional `setup` Mode 1
+# call (e.g. set the target slot's layout); the `drive` Mode 1 call(s) whose reports are captured; an
+# optional `teardown` Mode 1 call (run in cleanup, e.g. restore the layout); and whether the firmware's
+# mouse-body trailing-zero padding is tolerated. Mode 1 only, so the daemon (dongle) backend self-skips.
+_AE_CHAR = "æ"   # U+00E6 LATIN SMALL LETTER AE -- the real Danish 'ae' character
+
+SCENARIOS = {
+    # (1) Danish layout end-to-end: set the connected target slot's layout to 'da', type the real
+    # 'ae' char, and assert the keyboard notifications are [down: usage 0x33, mod 0][up]. A US-layout
+    # regression would emit a different scancode. Restores the slot to 'us' on teardown.
+    "danish-ae": {
+        "canon_report_id": R.REPORT_ID_KEYBOARD,
+        "expected": CC.danish_ae_expected(),
+        "setup":    lambda c: c.layout("da"),
+        "drive":    lambda c: c.type_text(_AE_CHAR),
+        "teardown": lambda c: c.layout("us"),
+        "mouse_pad": False,
+    },
+    # (2) Click-and-drag: press left, move (20,10) with the button HELD, release. Asserts the mouse
+    # notifications are [0x01,0,0,0][0x01,20,10,0][0x00,0,0,0] -- the MIDDLE frame (buttons byte still
+    # 0x01 during the motion) is the load-bearing proof the held button survives the move.
+    "hold-drag": {
+        "canon_report_id": R.REPORT_ID_MOUSE,
+        "expected": CC.hold_drag_expected(),
+        "setup":    None,
+        "drive":    lambda c: (c.press("left"), c.move(20, 10), c.release("left")),
+        "teardown": None,
+        "mouse_pad": True,
+    },
 }
 
 
@@ -212,12 +252,17 @@ def transport_connected(transport, profile) -> bool | None:
 # --------------------------------------------------------------------------- #
 class CentralSelfTest:
     def __init__(self, backend: str, central_hci: str, transport, connect_method: str = "scan",
-                 mode: str = "frames"):
+                 mode: str = "frames", scenario: str | None = None):
         self.profile = CC.BACKEND_PROFILES[backend]
         self.backend = backend
         self.central_path = f"/org/bluez/{central_hci}"
         self.central_hci = central_hci
         self.transport = transport
+        # Optional live SCENARIO (SCENARIOS): when set, the fixed inject/verify is REPLACED by a Mode 1
+        # command sequence whose ORDERED input-report notifications are captured + byte-verified. None
+        # keeps the classic self-test path.
+        self.scenario = scenario
+        self.scenario_spec = SCENARIOS[scenario] if scenario else None
         # "scan" (direct Connect during active scan) or "connectdevice" (Adapter1.ConnectDevice
         # direct create-connection -- the hci0 auto-connect-stall escape). See central_core.
         self.connect_method = connect_method
@@ -246,6 +291,11 @@ class CentralSelfTest:
         self._agent_registered = False
         self._bonding = False        # guard: a Pair() is in flight (bond-before-discovery)
         self.target_address = None   # the DRIVEN board's BLE address (disambiguates same-name boards)
+        # scenario state (unused on the classic self-test path)
+        self._seq = []               # ORDERED captured notification bodies on the scenario char
+        self._scenario_fw_id = None  # firmware report id we capture on
+        self._scenario_client = None # Mode1Client bound to the transport's open channel
+        self._scenario_teardown = None
 
     # ---- dbus plumbing ----
     def _obj(self, path):
@@ -643,7 +693,10 @@ class CentralSelfTest:
             if v["report_type"] != CC.REPORT_TYPE_INPUT:
                 return self._fail(f"{label} report {rid} is not an INPUT report "
                                   f"(type={v['report_type']})")
-        # 4. build the drive/verify targets: every present report we can drive over the transport
+        # 4a. LIVE SCENARIO path: drive a Mode 1 command sequence + capture the ordered notifications.
+        if self.scenario is not None:
+            return self._run_scenario()
+        # 4b. classic self-test: build the drive/verify targets (every present report we can drive)
         self._plan_drives()
         if not self._drive_targets:
             return self._fail("no driveable report kinds resolved on this peripheral")
@@ -773,12 +826,102 @@ class CentralSelfTest:
         map_ok = self.result.get("report_map", {}).get("ok", False)
         self.result["status"] = "pass" if (v["ok"] and map_ok) else "fail"
 
+    # ---- live scenario: drive a Mode 1 command sequence + capture ordered notifications ----
+    def _run_scenario(self):
+        """Arm notifications on ONE report char, drive the scenario's Mode 1 sequence, capture the
+        ordered notifications, and byte-verify them against reports.py (via central_core)."""
+        spec = self.scenario_spec
+        canon = spec["canon_report_id"]
+        # canonical reports.py id -> this firmware's id (mouse is renumbered on some boards)
+        fw_id = self.profile.report_id_remap.get(canon, canon)
+        v = self.report_chars.get(fw_id)
+        if v is None:
+            return self._fail(
+                f"scenario {self.scenario!r}: report id {fw_id} characteristic not found "
+                f"(discovered: {sorted(self.report_chars)})")
+        self._scenario_fw_id = fw_id
+        cpath = v["char_path"]
+        self.bus.add_signal_receiver(
+            self._scenario_notify_cb, dbus_interface=PROP, signal_name="PropertiesChanged",
+            arg0=CHRC, path=cpath)
+        try:
+            self._iface(cpath, CHRC).StartNotify()
+            self.notify_started.append(cpath)
+        except dbus.DBusException as e:
+            return self._fail(f"StartNotify report {fw_id}: {e}")
+        self.result["steps"]["notify"] = "armed"
+        # Arm first, then drive after a short settle so the CCCD subscription is live before the reports.
+        GLib.timeout_add(900, lambda: (self._scenario_drive(), False)[1])
+
+    def _scenario_notify_cb(self, iface, changed, invalidated):
+        if "Value" in changed:
+            self._seq.append(bytes(bytearray(changed["Value"])))   # capture IN ARRIVAL ORDER
+
+    def _scenario_drive(self):
+        spec = self.scenario_spec
+        self.result["steps"]["scenario"] = f"driving {self.scenario}"
+        try:
+            client = self._rpc_client()
+            self._scenario_client = client
+            self._scenario_teardown = spec.get("teardown")
+            # Route reports to slot 0 -- the pinned advertised identity the central connected to (see
+            # _board_ble_address). Best-effort + guarded: keeps type/press notifying OUR central.
+            tgt = getattr(self.transport, "target_slot", None)
+            if tgt is not None:
+                try:
+                    tgt(0)
+                except Exception:  # noqa: BLE001
+                    pass
+            setup = spec.get("setup")
+            if setup is not None:
+                setup(client)
+            spec["drive"](client)
+        except Mode1Error as e:
+            # A missing method/capability (e.g. no per-slot `layout`, or no `press`/`release`) means
+            # the board is not on the current firmware -- a PRECONDITION miss, so SKIP (never fail): a
+            # real byte mismatch is decided later, in the verdict, only on notifications that ARRIVED.
+            return self._skip(
+                f"scenario {self.scenario!r}: board rejected a Mode 1 command (needs the current "
+                f"firmware -- per-slot layout + press/release drag): {e}")
+        except Exception as e:  # noqa: BLE001
+            return self._fail(f"scenario drive raised: {e}")
+        # Give the notifications time to arrive; the verdict is taken at the settle.
+        GLib.timeout_add_seconds(5, self._settle_scenario)
+
+    def _settle_scenario(self):
+        self._scenario_verdict()
+        self.loop.quit()
+        return False
+
+    def _scenario_verdict(self):
+        spec = self.scenario_spec
+        expected = spec["expected"]
+        allow_tz = bool(spec.get("mouse_pad") and self.profile.mouse_pad_zero)
+        received = list(self._seq)
+        v = CC.sequence_verdict(received, expected, allow_trailing_zero=allow_tz)
+        self.result["scenario"] = self.scenario
+        self.result["notifications"] = {
+            "report_id": self._scenario_fw_id,
+            "expected": [b.hex() for b in expected],
+            "received": [b.hex() for b in received],
+            "verdict": v}
+        map_ok = self.result.get("report_map", {}).get("ok", False)
+        self.result["status"] = "pass" if (v["ok"] and map_ok) else "fail"
+
     # ---- cleanup: restore hci0 as found ----
     def _cleanup(self):
         for cpath in self.notify_started:
             try:
                 self._iface(cpath, CHRC).StopNotify()
             except dbus.DBusException:
+                pass
+        # Restore any scenario state (e.g. the Danish-layout test resets the slot to 'us') over the
+        # STILL-OPEN transport channel, before we close it. Best-effort -- a teardown failure must not
+        # mask the verdict.
+        if self._scenario_teardown is not None and self._scenario_client is not None:
+            try:
+                self._scenario_teardown(self._scenario_client)
+            except Exception:  # noqa: BLE001
                 pass
         try:
             if self.transport is not None and hasattr(self.transport, "close"):
@@ -866,6 +1009,11 @@ def main(argv=None):
                    help="inject mode: frames (Mode 2 frame relay -- the host builds the report bytes) "
                         "or rpc (Mode 1 JSON-RPC `frames` over the transport's OWN channel -- the "
                         "board relays the same bytes). Both must deliver identical GATT notifications")
+    p.add_argument("--scenario", default=None, choices=sorted(SCENARIOS),
+                   help="run a live SCENARIO instead of the fixed self-test: drive a Mode 1 command "
+                        "sequence over the transport's OWN channel and byte-verify the ORDERED "
+                        "input-report notifications (danish-ae = Danish layout end-to-end; hold-drag "
+                        "= a held mouse button survives motion). Mode 1 only -- daemon backend skips.")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
@@ -885,6 +1033,15 @@ def main(argv=None):
                   "JSON-RPC) -- only mode=frames applies")
         out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
                "reason": reason}
+        print(json.dumps(out) if args.json else f"SKIP: {reason}")
+        return 2
+
+    # A live SCENARIO is Mode 1 (JSON-RPC) driven, so the daemon (dongle) backend cannot run it.
+    if args.scenario is not None and profile.driver == "daemon":
+        reason = (f"scenario {args.scenario!r} needs JSON-RPC firmware; the dongle backend is a BlueZ "
+                  "daemon (no JSON-RPC) -- skipping")
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "scenario": args.scenario, "reason": reason}
         print(json.dumps(out) if args.json else f"SKIP: {reason}")
         return 2
 
@@ -924,7 +1081,7 @@ def main(argv=None):
         return 2
 
     test = CentralSelfTest(args.backend, central, transport, connect_method=connect_method,
-                           mode=args.mode)
+                           mode=args.mode, scenario=args.scenario)
     result = test.run()
     result["connect_method"] = connect_method
     result["retryable"] = CC.is_retryable_failure(result)
