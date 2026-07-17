@@ -167,7 +167,11 @@ char (`{` = Mode 1, else Mode 2). Both coexist.
 - **A BlueZ dongle has one BLE identity for all its bonds**, so it can't be steered to "the right
   host" by identity and holds one at a time; `targets.py::resolve()` warns on that collision. MCU
   boards get per-bond identities ("host slots", `I<n>`/`T<n>`) -- the ESP32 remembers up to ten and
-  can hold two connected at once.
+  can hold two connected at once. The obvious alternative -- ONE shared identity + directed
+  advertising (`ADV_DIRECT_IND`) to a chosen bonded peer -- is NOT viable on these boards: it needs
+  the controller resolving list (RPA resolution from the bond IRK), which the classic ESP32 lacks and
+  arduino-pico's precompiled BTstack has compiled out. That is WHY we use distinct per-slot
+  identities, not a workaround. Evidence + the prototype branch: `docs/bt-hid-directed-advertising.md`.
 
 ## Conventions
 
@@ -186,5 +190,6 @@ with backticks/`$()` in the message gets shell-mangled, and a local bash guard t
 ## Further reading
 
 `docs/` holds the deep dives (MCU approach and host slots, multi-device routing, absolute pointer,
-trust-overlay dismissal, integration notes). The serial wire protocol (`K`/`M`/`A`/`D` frames,
+trust-overlay dismissal, integration notes, and why shared-identity + directed advertising was
+rejected in favour of per-slot identities: `bt-hid-directed-advertising.md`). The serial wire protocol (`K`/`M`/`A`/`D` frames,
 `P`/`X`/`O`/`I`/`T`/`S` commands, `EVT` events) is tabulated in `firmware/README.md`.
