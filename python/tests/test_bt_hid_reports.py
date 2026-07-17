@@ -22,12 +22,13 @@ from hidbridge import reports as R  # noqa: E402
 # Scancode map (HID usage page 0x07)
 # --------------------------------------------------------------------------- #
 def test_scancode_digits_and_letters_and_enter():
-    assert R.char_to_usage("1") == (0x1E, False)
-    assert R.char_to_usage("0") == (0x27, False)
-    assert R.char_to_usage("a") == (0x04, False)
-    assert R.char_to_usage("z") == (0x1D, False)
-    assert R.char_to_usage("A") == (0x04, True)   # shifted
-    assert R.char_to_usage(" ") == (0x2C, False)
+    # char_to_usage returns (usage, modifier_byte). No modifier == 0x00; Shift == MOD_LSHIFT (0x02).
+    assert R.char_to_usage("1") == (0x1E, 0)
+    assert R.char_to_usage("0") == (0x27, 0)
+    assert R.char_to_usage("a") == (0x04, 0)
+    assert R.char_to_usage("z") == (0x1D, 0)
+    assert R.char_to_usage("A") == (0x04, R.MOD_LSHIFT)   # shifted
+    assert R.char_to_usage(" ") == (0x2C, 0)
     # named keys
     assert R.KEY_NAME_TO_USAGE["enter"] == 0x28
     assert R.KEY_NAME_TO_USAGE["esc"] == 0x29
@@ -36,9 +37,77 @@ def test_scancode_digits_and_letters_and_enter():
 
 def test_scancode_shifted_symbol():
     # '!' is shift+'1'
-    assert R.char_to_usage("!") == (0x1E, True)
-    # '@' is shift+'2'
-    assert R.char_to_usage("@") == (0x1E + 1, True)
+    assert R.char_to_usage("!") == (0x1E, R.MOD_LSHIFT)
+    # '@' is shift+'2' on US
+    assert R.char_to_usage("@") == (0x1E + 1, R.MOD_LSHIFT)
+
+
+# --------------------------------------------------------------------------- #
+# Keyboard LAYOUTS -- Danish (da) char -> (usage, modifier byte)
+# --------------------------------------------------------------------------- #
+def test_us_layout_default_unchanged():
+    # The default layout is US and is byte-identical to the historical mapping.
+    assert R.DEFAULT_LAYOUT == "us"
+    assert R.char_to_usage("@") == R.char_to_usage("@", layout="us")
+    assert R.char_to_usage("'") == (0x34, 0)          # US apostrophe = usage 0x34, no modifier
+    assert R.type_text("aA1!@ [];'/") == R.type_text("aA1!@ [];'/", layout="us")
+
+
+def test_da_danish_letters_no_altgr():
+    # ae / oe / aa are single unshifted keys on the Danish layout (positional US ; ' [ keys).
+    assert R.char_to_usage("æ", layout="da") == (0x33, 0)
+    assert R.char_to_usage("ø", layout="da") == (0x34, 0)
+    assert R.char_to_usage("å", layout="da") == (0x2F, 0)
+    # uppercase = same usage + Shift
+    assert R.char_to_usage("Æ", layout="da") == (0x33, R.MOD_LSHIFT)
+    assert R.char_to_usage("Ø", layout="da") == (0x34, R.MOD_LSHIFT)
+    assert R.char_to_usage("Å", layout="da") == (0x2F, R.MOD_LSHIFT)
+
+
+def test_da_at_sign_is_altgr_2():
+    # '@' on Danish is AltGr + '2' (usage 0x1F, Right-Alt modifier), NOT Shift+2 like US.
+    assert R.char_to_usage("@", layout="da") == (0x1F, R.MOD_ALTGR)
+    assert R.MOD_ALTGR == R.MOD_RALT == 0x40
+
+
+def test_da_apostrophe_vs_oe_distinction():
+    # The bug this fixes: on US the "'" key (usage 0x34) is an apostrophe, but a Danish host renders
+    # that same key as oe. Under the Danish layout the apostrophe lives on usage 0x31 instead, so the
+    # two characters map to DIFFERENT usages -- no more typing oe when you meant an apostrophe.
+    assert R.char_to_usage("'", layout="da") == (0x31, 0)
+    assert R.char_to_usage("ø", layout="da") == (0x34, 0)
+    assert R.char_to_usage("'", layout="da")[0] != R.char_to_usage("ø", layout="da")[0]
+
+
+def test_da_altgr_bracket_family_and_pipe_backslash():
+    assert R.char_to_usage("{", layout="da") == (0x24, R.MOD_ALTGR)
+    assert R.char_to_usage("[", layout="da") == (0x25, R.MOD_ALTGR)
+    assert R.char_to_usage("]", layout="da") == (0x26, R.MOD_ALTGR)
+    assert R.char_to_usage("}", layout="da") == (0x27, R.MOD_ALTGR)
+    assert R.char_to_usage("$", layout="da") == (0x21, R.MOD_ALTGR)
+    assert R.char_to_usage("\\", layout="da") == (0x64, R.MOD_ALTGR)  # ISO <>\ key AltGr layer
+    assert R.char_to_usage("<", layout="da") == (0x64, 0)
+    assert R.char_to_usage(">", layout="da") == (0x64, R.MOD_LSHIFT)
+
+
+def test_da_dead_keys_and_unknown_layout_raise():
+    # ` ^ ~ are dead keys on Danish and deliberately unsupported (documented limitation).
+    for ch in ("`", "^", "~"):
+        with pytest.raises(ValueError):
+            R.char_to_usage(ch, layout="da")
+    with pytest.raises(ValueError, match="unknown keyboard layout"):
+        R.char_to_usage("a", layout="fr")
+
+
+def test_da_type_text_full_sequence():
+    # end-to-end: "æ@" -> ae(0x33,no mod) down/up, @(0x1F, AltGr) down/up
+    seq = R.type_text("æ@", layout="da")
+    assert [r.data for r in seq] == [
+        bytes([0x00, 0x00, 0x33, 0, 0, 0, 0, 0]),          # ae down
+        bytes(8),                                           # release
+        bytes([R.MOD_ALTGR, 0x00, 0x1F, 0, 0, 0, 0, 0]),   # @ = AltGr+2 down
+        bytes(8),                                           # release
+    ]
 
 
 # --------------------------------------------------------------------------- #
