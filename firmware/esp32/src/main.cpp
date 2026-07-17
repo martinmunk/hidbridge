@@ -1555,6 +1555,10 @@ static void handleWebRpc() {
   // TLS-PSK), so its report bytes cross the LAN in the clear -- the one remaining cleartext surface.
   bool authed = webServer.hasHeader("X-Auth-Token") && tokenEquals(webServer.header("X-Auth-Token"));
   StringPrinter sp;
+  // Same per-slot layout gate as the serial/TCP + WS paths: the HTTP /rpc fallback of the control
+  // page must also honor the TARGET slot's keyboard layout before dispatch.
+  hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
+                                                                 : hbmode1::LAYOUT_US);
   hbmode1::handleJsonRpc(webServer.arg("plain"), sp, authed, esp32Notify, esp32FillHello, esp32Custom);
   webServer.send(200, "application/json", sp.s);
 }
@@ -1617,6 +1621,11 @@ static void wsOnText(uint8_t num, uint8_t* payload, size_t length) {
   bool ownerMethod   = line.indexOf("\"method\":\"connect\"") >= 0 || line.indexOf("\"method\":\"pair\"") >= 0;
   bool releaseMethod = line.indexOf("\"method\":\"disconnect\"") >= 0 || line.indexOf("\"method\":\"unpair\"") >= 0;
 
+  // Same per-slot layout gate as the serial/TCP path (handleLine): pick the TARGET slot's keyboard
+  // layout before dispatch so `type`/`key` over the WS land the right characters on whatever host
+  // tgtSlot points at (laptop3=da, a US host=us, independently).
+  hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
+                                                                 : hbmode1::LAYOUT_US);
   hbmode1::handleJsonRpc(line, out, true, esp32Notify, esp32FillHello, esp32Custom);
 
   if (ownerMethod)        { g_wsOwner = (int)num; g_wsOwnerSlot = tgtSlot; }   // esp32Custom set tgtSlot
