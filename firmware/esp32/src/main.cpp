@@ -102,6 +102,7 @@
 #include <NetworkServer.h>
 #include <Preferences.h>
 #include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
+#include <WebSocketsServer.h> // Mode 1 WS DRIVE CHANNEL for the control page (port 81) -- see "WS DRIVE"
 #include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
 // The raw JSON-RPC / frame port (3333) is TLS-PSK ONLY -- see the TLS note below. The NVS token is
 // the pre-shared key. arduino-esp32 has no TLS *server* class, and the prebuilt esp_tls has PSK
@@ -222,6 +223,17 @@ static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
 static WebServer     webServer(80);          // Mode 1 control page + /rpc
+// WS DRIVE CHANNEL (port 81) -- the control page holds ONE WebSocket open while it is open, and drives
+// the board over it (the same Mode 1 JSON-RPC the /rpc POST carries). The point is the LIVE connection:
+// when the page closes / the tab dies / the laptop sleeps / the network drops, the WS closes and the
+// board deterministically PARKS the target that page was driving (drop the central, keep the bond, stop
+// advertising) -- "no connection without an active customer", with no heartbeat/timeout guessing. It is
+// PLAIN ws:// (browsers cannot speak TLS-PSK), so the token crosses the LAN in clear exactly like the
+// :80 HTTP page today -- LAN-only, do NOT confuse it with the encrypted TLS-PSK :3333 client path.
+static WebSocketsServer wsServer(81);
+static bool          wsAuthed[WEBSOCKETS_SERVER_CLIENT_MAX];   // per WS client: token accepted?
+static int           g_wsOwner     = -1;     // WS client num that owns the driven target (-1 = none)
+static int           g_wsOwnerSlot = -1;     // the slot that owner connected -> parked when it drops
 static IPAddress     hbLocalIP();            // local IP of the active interface (ETH/WiFi); def. below
 #else
 // No network on this board: NetSession is never defined, but handleLine still takes a NetSession*
@@ -448,6 +460,24 @@ static void netCloseSession(NetSession& s) {
 }
 #endif  // HIDBRIDGE_NET
 
+// ---- WS event fan-out queue (SPSC) ----------------------------------------------------------- //
+// evt() can run in the NimBLE HOST TASK (onConnect/onDisconnect/onSubscribe callbacks), but the
+// WebSocketsServer is driven from the LOOP task and is not safe to touch cross-task. So evt() only
+// ENQUEUES the (static-storage) EVT string pointer here; loop() drains it to the WS clients after
+// wsServer.loop(). Single producer (evt) / single consumer (loop drain); a full queue drops the event
+// (the page also polls every 3s, so a lost push is self-healing).
+#ifdef HIDBRIDGE_NET
+#define WS_EVT_Q 8
+static volatile const char* g_wsEvtQ[WS_EVT_Q];
+static volatile uint8_t     g_wsEvtHead = 0, g_wsEvtTail = 0;
+static void wsEnqueueEvt(const char* msg) {
+  uint8_t nt = (uint8_t)((g_wsEvtTail + 1) & (WS_EVT_Q - 1));
+  if (nt == g_wsEvtHead) return;               // full -> drop (polling backstops it)
+  g_wsEvtQ[g_wsEvtTail] = msg;
+  g_wsEvtTail = nt;
+}
+#endif
+
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
 // An EVT line ("EVT connected" / "EVT ready" / ...) is UNSOLICITED: it is not a reply to any one
 // channel's command, so it must reach every attached host, not just whoever spoke last. Sessions that
@@ -464,6 +494,7 @@ static void evt(const char* msg) {
         s.wantClose = true;                // dead peer -- reap it in the next netPoll
     }
   }
+  wsEnqueueEvt(msg);                         // push to the WS control page(s) too (drained in loop())
 #endif
 }
 
@@ -842,6 +873,20 @@ static void fillIdentity(JsonObject o, int i) {
   o["bonded"] = NimBLEDevice::isBonded(slotAddr[i]);   // a stored LTK exists for this identity
 }
 
+// Park ONE slot: drop its central (keep the bond), stop advertising, and mark the board parked so
+// onDisconnect does NOT auto-re-advertise. This is the shared body of the `disconnect` custom method
+// AND the WS-owner-left lifecycle path -- both must have byte-identical park semantics. Returns whether
+// a live central was actually dropped.
+static bool parkTargetSlot(int slot) {
+  if (slot < 0 || slot >= NUM_SLOTS) return false;
+  uint16_t h = slotConn[slot];
+  bool had = (h != BLE_HS_CONN_HANDLE_NONE);
+  parked = true;                             // onDisconnect must NOT auto-re-advertise
+  if (had && server != nullptr) server->disconnect(h);
+  NimBLEDevice::stopAdvertising();
+  return had;
+}
+
 static void esp32Custom(const char* method, JsonObjectConst params, JsonObject result,
                         bool* handled, int* errCode, const char** errMsg) {
   if (!strcmp(method, "nickname")) {
@@ -908,12 +953,9 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     *handled = true;
     int slot = slotFromParams(params, tgtSlot);   // default: the current target
     if (slot < 0) { *errCode = -32000; *errMsg = "unknown client/slot"; return; }
-    uint16_t h = slotConn[slot];
-    parked = true;                           // onDisconnect must NOT auto-re-advertise
-    if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
-    NimBLEDevice::stopAdvertising();
+    bool had = parkTargetSlot(slot);         // drop central + stop advertising (keep the bond)
     result["slot"] = slot;
-    result["disconnected"] = (h != BLE_HS_CONN_HANDLE_NONE);
+    result["disconnected"] = had;
     return;
   }
   if (!strcmp(method, "unpair")) {
@@ -1298,12 +1340,13 @@ align-items:center;justify-content:center;text-align:center;user-select:none;cur
 <div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off
 onkeydown="if(event.key=='Enter')unlock()">
 <button onclick=unlock()>Unlock</button></div>
-<p><small>This page is plain HTTP on your LAN -- keystrokes here are NOT encrypted (unlike the TLS
-client path). Use it only on a network you trust.</small></p></section>
+<p><small>This page (HTTP + its ws:// drive link) is plaintext on your LAN -- the token and keystrokes
+here are NOT encrypted (unlike the TLS client path). Use it only on a network you trust.</small></p></section>
 
 <section id=app class=hide>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
-<button onclick=lock()>Lock</button></div>
+<span class=row><span id=wss class=dot title="no live link (using HTTP fallback)"></span>
+<button onclick=lock()>Lock</button></span></div>
 <div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off
 onkeydown="if(event.key=='Enter')setNick()">
 <button onclick=setNick()>Rename</button>
@@ -1332,19 +1375,53 @@ Alt/Cmd + a key sends a shortcut (e.g. Cmd+C); a bare key types. Click = tap (no
 <div id=out></div><script>
 let TOK=null,id=0,ready=false,live=false;
 const $=s=>document.getElementById(s),show=(el,on)=>el.classList.toggle('hide',!on);
-async function rpc(m,p){const r=await fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':TOK||''},
-body:JSON.stringify({jsonrpc:'2.0',id:++id,method:m,params:p||{}})});
-const j=await r.json();if(j&&j.error)throw new Error(j.error.message||'error');return j.result||{}}
 const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
 
+// ---- WS DRIVE CHANNEL. While unlocked the page holds ONE WebSocket to :81 open and sends every
+// JSON-RPC over it (replies id-matched). The board ties the driven target lifecycle to THIS socket:
+// if it closes (tab shut, laptop asleep, network drop, or a ping/pong timeout on a hung page) the board
+// parks the target. HTTP /rpc stays a fallback -- used automatically if the WS cannot open, and by curl.
+let WS=null,wsReady=false,pending={};
+function setWsState(on){const d=$('wss');if(!d)return;d.classList.toggle('on',on);
+d.title=on?'live link to board':'no live link (using HTTP fallback)'}
+function onEvt(){refresh()}   // any server-pushed EVT line -> re-read identities so the page updates live
+function wsConnect(){return new Promise(res=>{let settled=false;const fin=v=>{if(!settled){settled=true;res(v)}};
+let sock;try{sock=new WebSocket('ws://'+location.hostname+':81/')}catch(e){return fin(false)}
+WS=sock;const to=setTimeout(()=>{try{sock.close()}catch(e){}fin(false)},4000);
+sock.onopen=()=>{try{sock.send('@'+(TOK||''))}catch(e){}};   // authenticate first, before any rpc
+sock.onmessage=ev=>{const raw=ev.data;
+if(typeof raw==='string'&&raw.slice(0,4)==='EVT '){onEvt(raw);return}
+let j;try{j=JSON.parse(raw)}catch(e){return}
+if(!wsReady){if(j.result&&j.result.auth===true){wsReady=true;clearTimeout(to);setWsState(true);fin(true)}
+else if(j.error){clearTimeout(to);try{sock.close()}catch(e){}fin(false)}return}
+const cb=pending[j.id];if(cb){delete pending[j.id];j.error?cb.rej(new Error(j.error.message||'error')):cb.res(j.result||{})}};
+sock.onclose=()=>{const was=wsReady;wsReady=false;if(WS===sock)WS=null;clearTimeout(to);setWsState(false);
+for(const k in pending){pending[k].rej(new Error('connection closed'));delete pending[k]}
+fin(false);if(was)onWsDown()};
+sock.onerror=()=>{}})}
+function onWsDown(){if(live)release();setReady(false);
+log('live link to the board dropped -- the target has been parked. Reconnecting...');
+if(TOK)setTimeout(()=>{if(TOK&&!wsReady)wsConnect().then(ok=>{if(ok){log('live link restored');refresh()}})},1500)}
+
+function rpc(m,p){const mid=++id;
+if(wsReady&&WS){return new Promise((res,rej)=>{pending[mid]={res,rej};
+try{WS.send(JSON.stringify({jsonrpc:'2.0',id:mid,method:m,params:p||{}}))}catch(e){delete pending[mid];return rej(e)}
+setTimeout(()=>{if(pending[mid]){delete pending[mid];rej(new Error('timeout'))}},8000)})}
+return fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':TOK||''},          // HTTP fallback (also curl)
+body:JSON.stringify({jsonrpc:'2.0',id:mid,method:m,params:p||{}})}).then(r=>r.json())
+.then(j=>{if(j&&j.error)throw new Error(j.error.message||'error');return j.result||{}})}
+
 async function unlock(){TOK=$('tok').value;try{
+await wsConnect();            // best-effort: open the live WS + authenticate (HTTP fallback if it fails)
 const info=await rpc('hello');await rpc('identities');
 localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
 $('board').textContent=info.name||info.device||'hidbridge';
 $('nick').value=info.nick||'';
 show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
 catch(e){TOK=null;log('unlock failed: '+e.message)}}
-function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
+function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)release();
+if(WS){try{WS.close()}catch(e){}}WS=null;wsReady=false;setWsState(false);
+show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
 async function setNick(){const n=$('nick').value.trim();if(!n)return;
 try{const r=await rpc('nickname',{name:n});$('board').textContent=r.name||n;$('nick').value=r.nick||n;
 log('renamed to '+(r.nick||n)+' (advertised as '+(r.name||'')+')');refresh()}catch(e){log(e.message)}}
@@ -1431,6 +1508,105 @@ static void handleWebRpc() {
   webServer.send(200, "application/json", sp.s);
 }
 
+// ---- WS DRIVE CHANNEL (port 81) --------------------------------------------------------------- //
+// A Print that funnels one JSON-RPC reply into ONE WS text frame. handleJsonRpc writes a reply as many
+// small chunks then a trailing newline (println); we accumulate until that newline and flush the whole
+// line as a single sendTXT, so the browser gets one clean frame per reply (never fragmented).
+struct WsPrinter : public Print {
+  uint8_t num; String buf;
+  explicit WsPrinter(uint8_t n) : num(n) {}
+  size_t write(uint8_t c) override {
+    if (c == '\n')      { wsServer.sendTXT(num, buf); buf = ""; }
+    else if (c != '\r') { buf += (char)c; }
+    return 1;
+  }
+  size_t write(const uint8_t* b, size_t n) override { for (size_t i = 0; i < n; i++) write(b[i]); return n; }
+};
+
+// Verify a token from a WS client and flip its authed flag. Cleartext ws:// (LAN-only) -- same trust
+// model as the :80 page. Uses the SAME constant-time tokenEquals + fail-closed hasToken gate as TCP.
+static void wsTryAuth(uint8_t num, const String& token, Print& out) {
+  if (hasToken() && tokenEquals(token)) {
+    wsAuthed[num] = true;
+    out.println("{\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{\"auth\":true}}");
+  } else {
+    out.println("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"auth failed\"}}");
+  }
+}
+
+// One text frame from a WS client. Fail-closed: until this client authenticates (an `@<token>` line or
+// {"method":"auth","params":{"token":...}}) only `hello` is answered. Once authed, the line goes to the
+// SAME hbmode1::handleJsonRpc dispatcher the /rpc + TCP + serial paths use, with a WsPrinter routing the
+// reply back over THIS client. A connect/pair marks this client the OWNER of the driven target (parked
+// when it drops -- see wsEvent); disconnect/unpair by the owner releases that ownership.
+static void wsOnText(uint8_t num, uint8_t* payload, size_t length) {
+  String line; line.reserve(length + 1);
+  for (size_t i = 0; i < length; i++) { char c = (char)payload[i]; if (c != '\r' && c != '\n') line += c; }
+  line.trim();
+  if (line.length() == 0) return;
+  WsPrinter out(num);
+
+  if (!wsAuthed[num]) {
+    if (line[0] == '@') { wsTryAuth(num, line.substring(1), out); return; }
+    JsonDocument d;
+    if (deserializeJson(d, line) == DeserializationError::Ok) {
+      const char* m = d["method"] | "";
+      if (!strcmp(m, "auth")) { wsTryAuth(num, String((const char*)(d["params"]["token"] | "")), out); return; }
+      if (strcmp(m, "hello") != 0) {
+        out.println("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32001,\"message\":\"auth required\"}}");
+        return;
+      }
+    }
+    hbmode1::handleJsonRpc(line, out, false, esp32Notify, esp32FillHello, esp32Custom);   // hello only
+    return;
+  }
+
+  // Authed. OWNERSHIP: cheap compact-JSON substring test (JSON.stringify emits no spaces) keeps the hot
+  // pointer-move path to a SINGLE parse (inside handleJsonRpc).
+  bool ownerMethod   = line.indexOf("\"method\":\"connect\"") >= 0 || line.indexOf("\"method\":\"pair\"") >= 0;
+  bool releaseMethod = line.indexOf("\"method\":\"disconnect\"") >= 0 || line.indexOf("\"method\":\"unpair\"") >= 0;
+
+  hbmode1::handleJsonRpc(line, out, true, esp32Notify, esp32FillHello, esp32Custom);
+
+  if (ownerMethod)        { g_wsOwner = (int)num; g_wsOwnerSlot = tgtSlot; }   // esp32Custom set tgtSlot
+  else if (releaseMethod && g_wsOwner == (int)num) { g_wsOwner = -1; g_wsOwnerSlot = -1; }
+}
+
+// The WS lifecycle callback. THE core feature is WStype_DISCONNECTED: when the owning page's socket
+// closes (tab closed, laptop asleep, network dropped, or the built-in ping/pong timed out a hung page),
+// PARK the target that page was driving -- deterministic, no timeout guessing.
+static void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      wsAuthed[num] = false;                 // each new socket must (re)authenticate
+      break;
+    case WStype_DISCONNECTED:
+      wsAuthed[num] = false;
+      if ((int)num == g_wsOwner) {           // the driving page went away -> park its target
+        parkTargetSlot(g_wsOwnerSlot);
+        g_wsOwner = -1; g_wsOwnerSlot = -1;
+        Serial.println("note: ws owner left -- parked its target");
+      }
+      break;
+    case WStype_TEXT:
+      wsOnText(num, payload, length);
+      break;
+    default:                                 // BIN/PING/PONG/ERROR: nothing to do (heartbeat is auto)
+      break;
+  }
+}
+
+// Drain queued EVT pushes to every AUTHENTICATED WS client (called from loop()). Runs in the loop task,
+// so touching wsServer here is safe.
+static void wsDrainEvts() {
+  while (g_wsEvtHead != g_wsEvtTail) {
+    const char* msg = (const char*)g_wsEvtQ[g_wsEvtHead];
+    g_wsEvtHead = (uint8_t)((g_wsEvtHead + 1) & (WS_EVT_Q - 1));
+    for (uint8_t i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
+      if (wsAuthed[i]) wsServer.sendTXT(i, msg);
+  }
+}
+
 static void netSetup() {
   // Create the NVS namespace up front. Opening it READ-ONLY (hasToken/tokenEquals) before it has
   // ever been written logs an ESP error to the UART -- "nvs_open failed: NOT_FOUND" -- which
@@ -1470,9 +1646,17 @@ static void netSetup() {
   webServer.on("/", handleWebRoot);
   webServer.on("/rpc", HTTP_POST, handleWebRpc);
   webServer.begin();
+  // WS drive channel (:81). enableHeartbeat pings each client every 15s and drops it after 2 missed
+  // pongs (6s), so a HARD-crashed page (no clean close) is still detected -> WStype_DISCONNECTED ->
+  // its target is parked. That is what makes "page died" deterministic without app-level timeouts.
+  for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++) wsAuthed[i] = false;
+  wsServer.begin();
+  wsServer.onEvent(wsEvent);
+  wsServer.enableHeartbeat(15000, 3000, 2);
   if (MDNS.begin(g_mdnsHost)) {
     MDNS.addService("hidbridge", "tcp", HB_NET_PORT);   // the raw JSON-RPC / frame line port
     MDNS.addService("http", "tcp", 80);                 // the control webpage
+    MDNS.addService("ws", "tcp", 81);                   // the control-page WS drive channel
   }
   // OTA firmware update over the network. Gated behind the token (reused as the OTA password) so it is
   // fail-closed like the rest: an unprovisioned board cannot be reflashed over the LAN. The default
@@ -1512,6 +1696,8 @@ void loop() {
 #ifdef HIDBRIDGE_NET
   netPoll();
   webServer.handleClient();
+  wsServer.loop();                           // WS drive channel: reads frames + drives ping/pong
+  wsDrainEvts();                             // push queued EVT lines to the WS control page(s)
   ArduinoOTA.handle();
 #endif
   delay(2);
