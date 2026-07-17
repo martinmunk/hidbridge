@@ -159,18 +159,98 @@ _SHIFTED_SYMBOLS: dict[str, str] = {
 }
 
 
-def char_to_usage(ch: str) -> tuple[int, bool]:
-    """Map a single character to (HID usage, shift_required).
+# --------------------------------------------------------------------------- #
+# Keyboard LAYOUTS -- char -> (HID usage, modifier byte)
+# --------------------------------------------------------------------------- #
+# A BLE HID keyboard sends physical-key USAGES (scancodes); the HOST turns those into characters using
+# ITS active keyboard layout. So to type the RIGHT character on a non-US host we must send the usage +
+# modifier(s) that, under THAT host's layout, land on the character we want. The modifier byte carries
+# Shift (MOD_LSHIFT 0x02) and/or AltGr (MOD_RALT 0x40 -- "Right Alt", the layer that reaches @ [ ] { }
+# \ | etc. on the Danish and other European layouts).
+#
+# `us` is the original US-QWERTY table and is the DEFAULT: with layout="us" every function here emits
+# BYTE-FOR-BYTE what it always did (a shift bool is just modifier 0x00 / 0x02).
+MOD_ALTGR = MOD_RALT     # AltGr = the Right-Alt modifier, the third (European) shift level
 
-    Raises ValueError for a character with no boot-keyboard mapping.
-    """
+
+def _us_char_to_usage(ch: str) -> tuple[int, int]:
     if ch in _BASE_USAGE:
-        return _BASE_USAGE[ch], False
+        return _BASE_USAGE[ch], 0
     if ch.isalpha() and ch.lower() in _BASE_USAGE:
-        return _BASE_USAGE[ch.lower()], True      # uppercase letter -> shift
+        return _BASE_USAGE[ch.lower()], MOD_LSHIFT     # uppercase letter -> shift
     if ch in _SHIFTED_SYMBOLS:
-        return _BASE_USAGE[_SHIFTED_SYMBOLS[ch]], True
-    raise ValueError(f"no HID scancode for character {ch!r}")
+        return _BASE_USAGE[_SHIFTED_SYMBOLS[ch]], MOD_LSHIFT
+    raise ValueError(f"no US HID scancode for character {ch!r}")
+
+
+# Danish (ISO) layout. Letters + digits share the US usages (Danish is QWERTY, z/y NOT swapped), so
+# they are handled programmatically; this table is the punctuation + Danish-letter + AltGr layer.
+# Verified against the on-disk X11 keymap (/usr/share/X11/xkb/symbols/dk), the Windows KBDDA reference
+# (kbdlayout.info/KBDDA), and the USB HID usage tables -- see docs/bt-hid-keyboard-layouts.md.
+# DEAD KEYS OMITTED: on a Danish host `` ` ``, ^, ~ (and the accent glyphs) are dead keys -- one
+# keypress arms an accent for the NEXT letter, so they cannot be sent as a single self-contained
+# keystroke. They are intentionally absent here; typing one raises ValueError (documented limitation).
+_DA_SYMBOLS: dict[str, tuple[int, int]] = {
+    " ": (0x2C, 0), "\n": (0x28, 0), "\t": (0x2B, 0),
+    # Danish letters (positional: ae=US ';', oe=US "'", aa=US '[')
+    "æ": (0x33, 0), "Æ": (0x33, MOD_LSHIFT),   # ae / AE
+    "ø": (0x34, 0), "Ø": (0x34, MOD_LSHIFT),   # oe / OE
+    "å": (0x2F, 0), "Å": (0x2F, MOD_LSHIFT),   # aa / AA
+    # number-row Shift layer
+    "!": (0x1E, MOD_LSHIFT), '"': (0x1F, MOD_LSHIFT), "#": (0x20, MOD_LSHIFT),
+    "%": (0x22, MOD_LSHIFT), "&": (0x23, MOD_LSHIFT), "/": (0x24, MOD_LSHIFT),
+    "(": (0x25, MOD_LSHIFT), ")": (0x26, MOD_LSHIFT), "=": (0x27, MOD_LSHIFT),
+    # number-row AltGr layer
+    "@": (0x1F, MOD_ALTGR), "£": (0x20, MOD_ALTGR), "$": (0x21, MOD_ALTGR),
+    "€": (0x22, MOD_ALTGR),                          # euro
+    "{": (0x24, MOD_ALTGR), "[": (0x25, MOD_ALTGR), "]": (0x26, MOD_ALTGR), "}": (0x27, MOD_ALTGR),
+    "|": (0x2E, MOD_ALTGR), "\\": (0x64, MOD_ALTGR),
+    # '+ ?' key (US '-' position)
+    "+": (0x2D, 0), "?": (0x2D, MOD_LSHIFT),
+    # "' *" key (US backslash position) -- base apostrophe is a REAL char (not dead)
+    "'": (0x31, 0), "*": (0x31, MOD_LSHIFT),
+    # bottom-row punctuation
+    ",": (0x36, 0), ";": (0x36, MOD_LSHIFT),
+    ".": (0x37, 0), ":": (0x37, MOD_LSHIFT),
+    "-": (0x38, 0), "_": (0x38, MOD_LSHIFT),
+    # ISO key left of Z (usage 0x64)
+    "<": (0x64, 0), ">": (0x64, MOD_LSHIFT),
+}
+
+
+def _da_char_to_usage(ch: str) -> tuple[int, int]:
+    if "a" <= ch <= "z":
+        return 0x04 + (ord(ch) - ord("a")), 0
+    if "A" <= ch <= "Z":
+        return 0x04 + (ord(ch) - ord("A")), MOD_LSHIFT
+    if "1" <= ch <= "9":
+        return 0x1E + (ord(ch) - ord("1")), 0
+    if ch == "0":
+        return 0x27, 0
+    if ch in _DA_SYMBOLS:
+        return _DA_SYMBOLS[ch]
+    raise ValueError(f"no Danish HID scancode for character {ch!r} "
+                     f"(note: ` ^ ~ are dead keys on the Danish layout and are not supported)")
+
+
+# The layout registry. Add a layout by dropping a `char -> (usage, mod)` resolver here; the whole
+# type/key path threads a `layout=` name through to it. (A future per-target layout just passes the
+# target's layout name per call.)
+LAYOUTS: dict[str, "callable"] = {"us": _us_char_to_usage, "da": _da_char_to_usage}
+DEFAULT_LAYOUT = "us"
+
+
+def char_to_usage(ch: str, layout: str = DEFAULT_LAYOUT) -> tuple[int, int]:
+    """Map a single character to (HID usage, modifier_byte) under `layout`.
+
+    The modifier byte carries Shift (MOD_LSHIFT) and/or AltGr (MOD_RALT). layout="us" (the default)
+    reproduces the original US-QWERTY mapping byte-for-byte. Raises ValueError for an unmapped
+    character or an unknown layout name.
+    """
+    resolve = LAYOUTS.get(layout)
+    if resolve is None:
+        raise ValueError(f"unknown keyboard layout {layout!r} (known: {', '.join(sorted(LAYOUTS))})")
+    return resolve(ch)
 
 
 def _clamp(v: int, lo: int, hi: int) -> int:
@@ -213,21 +293,24 @@ def keyboard_release() -> HidReport:
     return HidReport(REPORT_ID_KEYBOARD, bytes(KEYBOARD_BODY_LEN), "keyboard")
 
 
-def _char_reports(ch: str) -> list[HidReport]:
-    usage, shift = char_to_usage(ch)
-    mod = MOD_LSHIFT if shift else 0
+def _char_reports(ch: str, layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
+    usage, mod = char_to_usage(ch, layout)
     return [keyboard_report(mod, [usage]), keyboard_release()]
 
 
-def type_text(text: str) -> list[HidReport]:
-    """Expand a string into the down/up keyboard report sequence that types it."""
+def type_text(text: str, layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
+    """Expand a string into the down/up keyboard report sequence that types it.
+
+    `layout` selects the target host's keyboard layout ("us" default, "da" Danish); it decides which
+    usage + modifier(s) each character maps to. With the default it is byte-identical to before.
+    """
     seq: list[HidReport] = []
     for ch in text:
-        seq += _char_reports(ch)
+        seq += _char_reports(ch, layout)
     return seq
 
 
-def key_reports(name: str, modifiers: int = 0) -> list[HidReport]:
+def key_reports(name: str, modifiers: int = 0, layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
     """Press + release a single key (optionally with modifiers held).
 
     `name` is a named key ("enter", "tab", "f5", ...) OR a single printable char ("c", "/") so that
@@ -238,13 +321,14 @@ def key_reports(name: str, modifiers: int = 0) -> list[HidReport]:
     if key in KEY_NAME_TO_USAGE:
         usage = KEY_NAME_TO_USAGE[key]
     elif len(name) == 1:
-        usage, _shift = char_to_usage(name)
+        usage, _mod = char_to_usage(name, layout)
     else:
         raise ValueError(f"unknown key name {name!r}")
     return [keyboard_report(modifiers, [usage]), keyboard_release()]
 
 
-def passcode_reports(passcode: str, press_enter: bool = True) -> list[HidReport]:
+def passcode_reports(passcode: str, press_enter: bool = True,
+                     layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
     """Reports that type a device passcode at the lock screen, then optionally Enter.
 
     SECURITY: does NOT retain or log the passcode. Callers MUST NOT log the argument.
@@ -252,7 +336,7 @@ def passcode_reports(passcode: str, press_enter: bool = True) -> list[HidReport]
     seq: list[HidReport] = []
     for ch in passcode:
         # digits only for a numeric passcode, but accept any typeable char (alphanumeric passcodes)
-        seq += _char_reports(ch)
+        seq += _char_reports(ch, layout)
     if press_enter:
         seq += [keyboard_report(0, [KEY_NAME_TO_USAGE["enter"]]), keyboard_release()]
     return seq

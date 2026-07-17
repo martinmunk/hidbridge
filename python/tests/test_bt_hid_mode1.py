@@ -281,5 +281,20 @@ def test_firmware_dry_run_matches_reports_py():
         ]
         for res, rl in checks:
             assert res.get("frames") == frames(rl), f"drift: {res} != {frames(rl)}"
+
+        # Per-slot Danish layout: set the CURRENT TARGET slot -> da (no slot arg == tgtSlot), so the
+        # firmware's active layout for `type` becomes Danish; assert its dry-run bytes equal
+        # reports.type_text(..., layout="da"). Restore the slot to us afterwards + re-assert the
+        # default-US path, so the board is left in its default state.
+        try:
+            c.layout("da")                                     # target slot -> Danish
+            da = "æøåÆØÅ@{}[]|<>$"                              # ae/oe/aa + AltGr @ { } [ ] | $ , ISO <>
+            assert c.type_text(da, dry=True).get("frames") == frames(R.type_text(da, layout="da")), \
+                "drift: firmware da-layout type != reports.type_text(layout='da')"
+        finally:
+            c.layout("us")                                     # restore default
+        # default-US path still holds after the round-trip
+        assert c.type_text("aA@'", dry=True).get("frames") == frames(R.type_text("aA@'")), \
+            "drift: firmware default-us type != reports.type_text() after layout round-trip"
     finally:
         c.close()

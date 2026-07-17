@@ -22,11 +22,24 @@ namespace hbmode1 {
 
 static const int      PROTO_VERSION   = 1;
 static const uint8_t  MOD_LSHIFT_BIT  = 0x02;
+static const uint8_t  MOD_ALTGR_BIT   = 0x40;   // Right-Alt: the 3rd (European) shift level (Danish @ [ ] { } \ | ...)
 static const uint8_t  RID_KEYBOARD    = 1;
 static const uint8_t  RID_MOUSE       = 2;
 
-// ---- keymap (mirrors reports.py) ----
-// Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE.
+// ---- keyboard LAYOUTS (mirror reports.py) ----
+// A BLE HID keyboard sends physical-key USAGES; the HOST maps them to characters via ITS layout. So
+// to type the right char on a non-US host we send the usage + modifier(s) that land on it under that
+// host's layout. LAYOUT_US is the original US-QWERTY map (default, byte-for-byte unchanged);
+// LAYOUT_DA is Danish (ISO). The ACTIVE layout is a global the firmware sets per dispatch from the
+// TARGET slot's layout (see setActiveLayout); type/key consult it. Mirrors reports.LAYOUTS.
+enum { LAYOUT_US = 0, LAYOUT_DA = 1 };
+static int g_activeLayout = LAYOUT_US;
+inline void setActiveLayout(int l) { g_activeLayout = (l == LAYOUT_DA) ? LAYOUT_DA : LAYOUT_US; }
+inline int  activeLayout() { return g_activeLayout; }
+inline int  layoutFromName(const char* n) { return (n && !strcasecmp(n, "da")) ? LAYOUT_DA : LAYOUT_US; }
+inline const char* layoutName(int l) { return l == LAYOUT_DA ? "da" : "us"; }
+
+// Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE (US layer).
 inline int baseUsage(char c) {
   if (c >= 'a' && c <= 'z') return 0x04 + (c - 'a');
   if (c >= '1' && c <= '9') return 0x1E + (c - '1');
@@ -40,16 +53,74 @@ inline int baseUsage(char c) {
   return -1;
 }
 
-// char -> (usage, shift). Mirrors reports.char_to_usage. Returns false if unmapped.
-inline bool charToUsage(char c, uint8_t* usage, bool* shift) {
-  int u = baseUsage(c);
-  if (u >= 0) { *usage = (uint8_t)u; *shift = false; return true; }
-  if (c >= 'A' && c <= 'Z') { *usage = 0x04 + (c - 'A'); *shift = true; return true; }
-  static const char shf[] = "!@#$%^&*()_+{}|:\"~<>?";     // reports._SHIFTED_SYMBOLS keys
-  static const char bas[] = "1234567890-=[]\\;'`,./";      //   -> their unshifted base char
-  for (int i = 0; shf[i]; i++)
-    if (c == shf[i]) { *usage = (uint8_t)baseUsage(bas[i]); *shift = true; return true; }
+// US layer: codepoint -> (usage, mod). Mirrors reports._us_char_to_usage. Returns false if unmapped.
+inline bool usUsage(uint32_t cp, uint8_t* usage, uint8_t* mod) {
+  if (cp < 0x80) {
+    int u = baseUsage((char)cp);
+    if (u >= 0) { *usage = (uint8_t)u; *mod = 0; return true; }
+    if (cp >= 'A' && cp <= 'Z') { *usage = 0x04 + (cp - 'A'); *mod = MOD_LSHIFT_BIT; return true; }
+    static const char shf[] = "!@#$%^&*()_+{}|:\"~<>?";   // reports._SHIFTED_SYMBOLS keys
+    static const char bas[] = "1234567890-=[]\\;'`,./";    //   -> their unshifted base char
+    for (int i = 0; shf[i]; i++)
+      if ((char)cp == shf[i]) { *usage = (uint8_t)baseUsage(bas[i]); *mod = MOD_LSHIFT_BIT; return true; }
+  }
   return false;
+}
+
+// Danish (ISO) layer: codepoint -> (usage, mod). Mirrors reports._da_char_to_usage. Letters/digits
+// share the US usages (Danish is QWERTY); this table is the punctuation + Danish-letter + AltGr layer.
+// Danish letters (ae/oe/aa) and £ € arrive as multi-byte UTF-8, so we key on the Unicode CODEPOINT.
+// Dead keys (` ^ ~) are intentionally absent (single-keystroke-only model) -- returns false for them.
+inline bool daUsage(uint32_t cp, uint8_t* usage, uint8_t* mod) {
+  if (cp >= 'a' && cp <= 'z') { *usage = 0x04 + (cp - 'a'); *mod = 0; return true; }
+  if (cp >= 'A' && cp <= 'Z') { *usage = 0x04 + (cp - 'A'); *mod = MOD_LSHIFT_BIT; return true; }
+  if (cp >= '1' && cp <= '9') { *usage = 0x1E + (cp - '1'); *mod = 0; return true; }
+  if (cp == '0')              { *usage = 0x27; *mod = 0; return true; }
+  struct E { uint32_t cp; uint8_t u; uint8_t m; };
+  static const E tbl[] = {
+    {' ', 0x2C, 0}, {'\n', 0x28, 0}, {'\t', 0x2B, 0},
+    {0xE6, 0x33, 0}, {0xC6, 0x33, MOD_LSHIFT_BIT},   // ae / AE  (U+00E6 / U+00C6)
+    {0xF8, 0x34, 0}, {0xD8, 0x34, MOD_LSHIFT_BIT},   // oe / OE  (U+00F8 / U+00D8)
+    {0xE5, 0x2F, 0}, {0xC5, 0x2F, MOD_LSHIFT_BIT},   // aa / AA  (U+00E5 / U+00C5)
+    {'!', 0x1E, MOD_LSHIFT_BIT}, {'"', 0x1F, MOD_LSHIFT_BIT}, {'#', 0x20, MOD_LSHIFT_BIT},
+    {'%', 0x22, MOD_LSHIFT_BIT}, {'&', 0x23, MOD_LSHIFT_BIT}, {'/', 0x24, MOD_LSHIFT_BIT},
+    {'(', 0x25, MOD_LSHIFT_BIT}, {')', 0x26, MOD_LSHIFT_BIT}, {'=', 0x27, MOD_LSHIFT_BIT},
+    {'@', 0x1F, MOD_ALTGR_BIT}, {0xA3, 0x20, MOD_ALTGR_BIT}, {'$', 0x21, MOD_ALTGR_BIT},
+    {0x20AC, 0x22, MOD_ALTGR_BIT},                   // euro (U+20AC), pound = U+00A3 above
+    {'{', 0x24, MOD_ALTGR_BIT}, {'[', 0x25, MOD_ALTGR_BIT}, {']', 0x26, MOD_ALTGR_BIT},
+    {'}', 0x27, MOD_ALTGR_BIT}, {'|', 0x2E, MOD_ALTGR_BIT}, {'\\', 0x64, MOD_ALTGR_BIT},
+    {'+', 0x2D, 0}, {'?', 0x2D, MOD_LSHIFT_BIT},
+    {'\'', 0x31, 0}, {'*', 0x31, MOD_LSHIFT_BIT},
+    {',', 0x36, 0}, {';', 0x36, MOD_LSHIFT_BIT},
+    {'.', 0x37, 0}, {':', 0x37, MOD_LSHIFT_BIT},
+    {'-', 0x38, 0}, {'_', 0x38, MOD_LSHIFT_BIT},
+    {'<', 0x64, 0}, {'>', 0x64, MOD_LSHIFT_BIT},
+  };
+  for (auto& e : tbl) if (cp == e.cp) { *usage = e.u; *mod = e.m; return true; }
+  return false;
+}
+
+// codepoint -> (usage, mod) under `layout`. Mirrors reports.char_to_usage. Returns false if unmapped.
+inline bool charToUsage(uint32_t cp, uint8_t* usage, uint8_t* mod, int layout) {
+  return (layout == LAYOUT_DA) ? daUsage(cp, usage, mod) : usUsage(cp, usage, mod);
+}
+
+// Decode one UTF-8 codepoint at *p and advance *p past it. On a malformed byte, consumes 1 byte and
+// returns 0xFFFFFFFF (which maps to no key -> emitType reports "unmappable"). ASCII passes through.
+inline uint32_t utf8Next(const char** p) {
+  const uint8_t* s = (const uint8_t*)*p;
+  uint32_t c = s[0];
+  if (c < 0x80) { *p += 1; return c; }
+  if ((c & 0xE0) == 0xC0 && (s[1] & 0xC0) == 0x80) {
+    *p += 2; return ((c & 0x1F) << 6) | (s[1] & 0x3F);
+  }
+  if ((c & 0xF0) == 0xE0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80) {
+    *p += 3; return ((c & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+  }
+  if ((c & 0xF8) == 0xF0 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80) {
+    *p += 4; return ((c & 0x07) << 18) | ((s[1] & 0x3F) << 12) | ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+  }
+  *p += 1; return 0xFFFFFFFFu;
 }
 
 // Named key -> usage, or -1. Mirrors reports.KEY_NAME_TO_USAGE.
@@ -103,10 +174,12 @@ inline void emitKeyUsage(ReportSink& s, uint8_t mod, uint8_t usage) {
   uint8_t up[8]   = { 0, 0, 0, 0, 0, 0, 0, 0 };        emitReport(s, RID_KEYBOARD, up, 8);
 }
 inline bool emitType(ReportSink& s, const char* text) {
-  for (const char* p = text; *p; ++p) {
-    uint8_t usage; bool shift;
-    if (!charToUsage(*p, &usage, &shift)) return false;
-    emitKeyUsage(s, shift ? MOD_LSHIFT_BIT : 0, usage);
+  const char* p = text;
+  while (*p) {
+    uint32_t cp = utf8Next(&p);               // decode UTF-8 (Danish ae/oe/aa, £, euro are multi-byte)
+    uint8_t usage, mod;
+    if (!charToUsage(cp, &usage, &mod, g_activeLayout)) return false;
+    emitKeyUsage(s, mod, usage);
   }
   return true;
 }
@@ -230,8 +303,8 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
     // mod:0x08 -> LGUI+c (Cmd+C). The explicit `mod` is authoritative; the char's own shift is
     // ignored (the caller sets modifiers). This is what the browser passthrough uses for Cmd/Ctrl+key.
     if (usage < 0 && name && name[0] && name[1] == '\0') {
-      uint8_t u; bool sh;
-      if (charToUsage(name[0], &u, &sh)) usage = u;
+      uint8_t u, m;
+      if (charToUsage((uint8_t)name[0], &u, &m, g_activeLayout)) usage = u;
     }
     if (usage < 0) argErr = "unknown 'name'";
     else emitKeyUsage(s, (uint8_t)(params["mod"] | 0), (uint8_t)usage);

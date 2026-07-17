@@ -174,6 +174,68 @@ def _firmware_function_body(name: str) -> str:
     raise AssertionError(f"unterminated body for {name}()")
 
 
+def _strip_ws(s: str) -> str:
+    return "".join(s.split())
+
+
+# --------------------------------------------------------------------------- #
+# WS DRIVE CHANNEL lifecycle -- STRUCTURAL source-parse guards.
+#
+# The WebSocket drive channel (port 81) can only be exercised end-to-end with a real board + a live
+# BLE peer + a browser, none of which exist offline. These tests therefore parse main.cpp and pin the
+# two load-bearing wiring facts that a refactor (or a bad merge) could silently drop -- they can NOT
+# run the firmware, only assert its shape. The invariants:
+#   (a) page-closed -> park: a WStype_DISCONNECTED of the OWNING client must parkTargetSlot() so a
+#       closed/crashed control page deterministically releases the target it was driving; and
+#   (b) fail-closed auth: an UNauthenticated WS client can reach only `hello` -- every other method is
+#       refused ("auth required") -- the same fail-closed gate the HTTP /rpc path enforces.
+# --------------------------------------------------------------------------- #
+def test_ws_disconnect_of_owner_parks_target():
+    """(a) wsEvent's WStype_DISCONNECTED case, for the OWNING client (num == g_wsOwner), must call
+    parkTargetSlot(g_wsOwnerSlot) -- the page-closed -> park wiring. Without it, a closed browser tab
+    would leave its target live and connected with nothing driving it."""
+    body = _strip_ws(_firmware_function_body("wsEvent"))
+    assert "caseWStype_DISCONNECTED:" in body, "wsEvent must handle WStype_DISCONNECTED"
+    assert "(int)num==g_wsOwner" in body, (
+        "the DISCONNECTED handler must check whether the leaving client OWNS the driven target")
+    assert "parkTargetSlot(g_wsOwnerSlot)" in body, (
+        "a WStype_DISCONNECTED of the owning WS client must parkTargetSlot(g_wsOwnerSlot) -- the "
+        "page-closed -> park wiring (deterministic release, no timeout guessing)")
+
+
+def test_ws_text_handler_is_fail_closed_auth_gated():
+    """(b) wsOnText must be fail-closed: while a client is NOT authed (!wsAuthed[num]) the ONLY method
+    that reaches the dispatcher is `hello`; any other method is refused with an 'auth required' error,
+    and the single dispatch reachable while unauthed is the hello-only call (authed=false). This is the
+    WS mirror of the HTTP /rpc token gate -- WS drive must not be a way around authentication."""
+    body = _strip_ws(_firmware_function_body("wsOnText"))
+    assert "if(!wsAuthed[num])" in body, "wsOnText must gate on the per-client authed flag"
+    # non-hello while unauthed is rejected
+    assert 'strcmp(m,"hello")' in body, "the unauthed branch must special-case only `hello`"
+    # the message text lives inside a JSON string literal, so its quotes are backslash-escaped in C;
+    # match the whitespace-stripped message body ("auth required" -> authrequired).
+    assert "authrequired" in body, "a non-hello method while unauthed must be refused (auth required)"
+    # the ONLY dispatch reachable before auth passes authed=false (hello-only); the post-auth dispatch
+    # passes true. Both call sites must be present with those exact trust flags.
+    assert "handleJsonRpc(line,out,false," in body, (
+        "the pre-auth dispatch must pass authed=false (so handleJsonRpc answers hello only)")
+    assert "handleJsonRpc(line,out,true," in body, "the post-auth dispatch passes authed=true"
+
+
+def test_ws_authed_dispatch_sets_target_slot_layout():
+    """Merge-critical wiring guard: the WS text handler must setActiveLayout(slotLayout[tgtSlot])
+    BEFORE the authed handleJsonRpc dispatch, exactly like the serial/TCP path (handleLine), so typing
+    driven over the WS honors the per-slot keyboard layout (feat/keyboard-layouts + feat/ws-drive-channel
+    must stay integrated). If this drops, WS `type` would emit US scancodes to a `da` host."""
+    body = _strip_ws(_firmware_function_body("wsOnText"))
+    setlay = body.index("setActiveLayout(")
+    authed_dispatch = body.index("handleJsonRpc(line,out,true,")
+    assert setlay < authed_dispatch, (
+        "wsOnText must setActiveLayout(slotLayout[tgtSlot]) BEFORE the authed handleJsonRpc dispatch")
+    assert "setActiveLayout((tgtSlot>=0&&tgtSlot<NUM_SLOTS)?slotLayout[tgtSlot]" in body, (
+        "the WS layout gate must select the TARGET slot's layout (matching the serial/TCP path)")
+
+
 def test_firmware_gap_name_and_advertised_name_share_one_source():
     """The GAP Device Name characteristic (0x2A00, read after connecting) and the advertised Complete
     Local Name (seen while scanning) must come from the SAME per-slot source. If they diverge, a peer

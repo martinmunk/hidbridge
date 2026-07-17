@@ -187,7 +187,7 @@ class Mode1Client:
         return self.call("nickname", {"name": name} if name else {})
 
     def identities(self) -> dict:
-        """List the board's identity slots: {slots:[{slot,client,addr,name,conn,sub}], adv, tgt}."""
+        """List the board's identity slots: {slots:[{slot,client,addr,name,conn,sub,layout}], adv, tgt}."""
         self.require_cap("connect")
         return self.call("identities")
 
@@ -213,6 +213,24 @@ class Mode1Client:
         the device must pair again."""
         self.require_cap("connect")
         return self.call("unpair", {"client": client})
+
+    def layout(self, name: str | None = None, *, slot: int | None = None,
+               client: str | None = None) -> dict:
+        """Get or set a device slot's keyboard layout (PER SLOT: each bonded device remembers its
+        own). With no `name`, returns the current layout; with `name` ('us'/'da'), sets + persists it.
+
+        Address the slot like connect/unpair: an explicit `slot` index or a `client` name; with
+        neither, the CURRENT TARGET slot. The active layout for `type`/`key` is always the target
+        slot's. Persisted in NVS, changeable on the fly (not only at pair)."""
+        self.require_cap("layout")
+        p: dict = {}
+        if name is not None:
+            p["name"] = name
+        if slot is not None:
+            p["slot"] = int(slot)
+        if client is not None:
+            p["client"] = client
+        return self.call("layout", p)
 
     def close(self) -> None:
         if hasattr(self._ch, "close"):
