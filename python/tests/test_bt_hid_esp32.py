@@ -157,10 +157,15 @@ def test_firmware_report_map_matches_reports_descriptor():
 
 
 def _firmware_function_body(name: str) -> str:
-    """Return the brace-balanced body of C function `name` from main.cpp (its definition, not a call)."""
+    """Return the brace-balanced body of C function `name` from main.cpp (its definition, not a call).
+
+    Matches a definition: an (optional `static`) return type, the name, a parenthesised arg list, then
+    the opening brace. A CALL site ends in `;`/`)` not `{`, so only the definition matches -- this works
+    for any return type (void/bool/int/...), not just void.
+    """
     import re
     src = (ROOT / "firmware/esp32/src/main.cpp").read_text()
-    m = re.search(r"\bvoid\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", src)
+    m = re.search(r"(?:static\s+)?[A-Za-z_][\w:<>\*&]*\s+" + re.escape(name) + r"\s*\([^)]*\)\s*\{", src)
     assert m, f"no definition of {name}() found in main.cpp"
     b = src.index("{", m.start())
     depth = 0
@@ -179,35 +184,71 @@ def _strip_ws(s: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# WS DRIVE CHANNEL lifecycle -- STRUCTURAL source-parse guards.
+# PER-SESSION MULTI-DRIVER TARGETING -- STRUCTURAL source-parse guards.
 #
-# The WebSocket drive channel (port 81) can only be exercised end-to-end with a real board + a live
-# BLE peer + a browser, none of which exist offline. These tests therefore parse main.cpp and pin the
-# two load-bearing wiring facts that a refactor (or a bad merge) could silently drop -- they can NOT
-# run the firmware, only assert its shape. The invariants:
-#   (a) page-closed -> park: a WStype_DISCONNECTED of the OWNING client must parkTargetSlot() so a
-#       closed/crashed control page deterministically releases the target it was driving; and
-#   (b) fail-closed auth: an UNauthenticated WS client can reach only `hello` -- every other method is
-#       refused ("auth required") -- the same fail-closed gate the HTTP /rpc path enforces.
+# Each driver SESSION (WS client / TCP net session / serial) owns ONE BLE claim; its commands route to
+# ITS claimed slot, and a slot is parked only when its LAST claiming session goes away (ref-counted).
+# None of this can be exercised offline (it needs a real board + live BLE peers + two drivers), so these
+# tests parse main.cpp and pin the load-bearing wiring a refactor / bad merge could silently drop. They
+# assert the SHAPE, not runtime behaviour. The invariants:
+#   (a) per-session routing: notifyTarget notifies g_activeTarget (the IN-FLIGHT session's claimed
+#       slot the dispatcher loaded), NOT a bare global set only by connect;
+#   (b) ref-counted session-end park: a session ending (WS disconnect / net session close) releases its
+#       claim and parks the slot only when slotClaimCount() hits 0 (never yanks a slot another driver
+#       still holds);
+#   (c) no stateless driving: the HTTP /rpc drive endpoint is gone (driving is WS/TCP/serial only);
+#   (d) fail-closed auth: an UNauthenticated WS client can still reach only `hello`.
 # --------------------------------------------------------------------------- #
-def test_ws_disconnect_of_owner_parks_target():
-    """(a) wsEvent's WStype_DISCONNECTED case, for the OWNING client (num == g_wsOwner), must call
-    parkTargetSlot(g_wsOwnerSlot) -- the page-closed -> park wiring. Without it, a closed browser tab
-    would leave its target live and connected with nothing driving it."""
-    body = _strip_ws(_firmware_function_body("wsEvent"))
-    assert "caseWStype_DISCONNECTED:" in body, "wsEvent must handle WStype_DISCONNECTED"
-    assert "(int)num==g_wsOwner" in body, (
-        "the DISCONNECTED handler must check whether the leaving client OWNS the driven target")
-    assert "parkTargetSlot(g_wsOwnerSlot)" in body, (
-        "a WStype_DISCONNECTED of the owning WS client must parkTargetSlot(g_wsOwnerSlot) -- the "
-        "page-closed -> park wiring (deterministic release, no timeout guessing)")
+def test_notify_target_routes_via_active_session_target():
+    """(a) notifyTarget must route to g_activeTarget -- the slot the dispatcher set from the CALLING
+    session's claim before this line -- so two sessions driving two slots each hit their own central.
+    It must NOT read a single global drive target (the old tgtSlot). Paired with the dispatcher wiring:
+    handleLine loads the session's stored slot into g_activeTarget before dispatch and stores it back
+    after, which is what makes the routing per-session instead of one board-wide target."""
+    body = _strip_ws(_firmware_function_body("notifyTarget"))
+    assert "slotConn[g_activeTarget]" in body, (
+        "notifyTarget must notify the ACTIVE session target slotConn[g_activeTarget], not a global tgtSlot")
+    assert "tgtSlot" not in body, "the single global drive target (tgtSlot) must be gone from notifyTarget"
+    # the dispatcher sets g_activeTarget from the session's stored claim BEFORE dispatch and stores the
+    # (possibly moved) claim back AFTER -- the before/after-dispatch wiring that makes routing per-session.
+    disp = _strip_ws(_firmware_function_body("handleLine"))
+    assert "g_activeTarget=old" in disp and "dispatchLine(line,out,sess)" in disp, (
+        "handleLine must load the session's claim into g_activeTarget BEFORE dispatchLine (per-session routing)")
+    assert "finishRoute(store,old)" in disp, (
+        "handleLine must store the (possibly moved) claim back AFTER dispatch (finishRoute, ref-counted park)")
+
+
+def test_session_end_ref_counts_the_park():
+    """(b) A session ENDING must release its claim and park the slot ONLY when it was the last claimer.
+    Both session-end paths must ref-count via slotClaimCount(): the WS client leaving (wsEvent's
+    WStype_DISCONNECTED) and a TCP net session closing (netCloseSession). Without the count a second
+    tab/client driving the same slot would have its central yanked when the first one leaves."""
+    ws = _strip_ws(_firmware_function_body("wsEvent"))
+    assert "caseWStype_DISCONNECTED:" in ws, "wsEvent must handle WStype_DISCONNECTED"
+    assert "g_wsDrivenSlot[num]=-1" in ws, (
+        "the DISCONNECTED handler must release THIS client's claim (g_wsDrivenSlot[num] = -1)")
+    assert "slotClaimCount(slot)==0" in ws and "parkTargetSlot(slot)" in ws, (
+        "a WS client leaving must park its slot only when slotClaimCount(slot)==0 (ref-counted release)")
+    net = _strip_ws(_firmware_function_body("netCloseSession"))
+    assert "slotClaimCount(slot)==0" in net and "parkTargetSlot(slot)" in net, (
+        "a closing TCP net session must ref-count-park its driven slot too (slotClaimCount==0)")
+
+
+def test_no_stateless_http_rpc_drive_endpoint():
+    """(c) Driving is WS/TCP/serial only -- each a persistent SESSION with a BLE claim. There must be NO
+    stateless HTTP /rpc drive endpoint (it had no session to route to). Guard: neither the handler nor
+    its route survive; the page HTML is still served at GET /."""
+    src = (ROOT / "firmware/esp32/src/main.cpp").read_text()
+    assert "handleWebRpc" not in src, "the stateless HTTP /rpc drive handler must be removed"
+    assert '"/rpc"' not in src, "the /rpc route registration must be removed"
+    assert 'webServer.on("/", handleWebRoot)' in src, "GET / must still serve the control page HTML"
 
 
 def test_ws_text_handler_is_fail_closed_auth_gated():
-    """(b) wsOnText must be fail-closed: while a client is NOT authed (!wsAuthed[num]) the ONLY method
+    """(d) wsOnText must be fail-closed: while a client is NOT authed (!wsAuthed[num]) the ONLY method
     that reaches the dispatcher is `hello`; any other method is refused with an 'auth required' error,
-    and the single dispatch reachable while unauthed is the hello-only call (authed=false). This is the
-    WS mirror of the HTTP /rpc token gate -- WS drive must not be a way around authentication."""
+    and the single dispatch reachable while unauthed is the hello-only call (authed=false). WS drive
+    must not be a way around authentication."""
     body = _strip_ws(_firmware_function_body("wsOnText"))
     assert "if(!wsAuthed[num])" in body, "wsOnText must gate on the per-client authed flag"
     # non-hello while unauthed is rejected
@@ -222,18 +263,18 @@ def test_ws_text_handler_is_fail_closed_auth_gated():
     assert "handleJsonRpc(line,out,true," in body, "the post-auth dispatch passes authed=true"
 
 
-def test_ws_authed_dispatch_sets_target_slot_layout():
-    """Merge-critical wiring guard: the WS text handler must setActiveLayout(slotLayout[tgtSlot])
-    BEFORE the authed handleJsonRpc dispatch, exactly like the serial/TCP path (handleLine), so typing
-    driven over the WS honors the per-slot keyboard layout (feat/keyboard-layouts + feat/ws-drive-channel
-    must stay integrated). If this drops, WS `type` would emit US scancodes to a `da` host."""
+def test_ws_authed_dispatch_sets_active_target_layout():
+    """Merge-critical wiring guard: the WS text handler must setActiveLayout for the caller's claimed
+    slot (g_activeTarget) BEFORE the authed handleJsonRpc dispatch, exactly like the serial/TCP path
+    (dispatchLine), so typing driven over the WS honors the per-slot keyboard layout. If this drops, WS
+    `type` would emit US scancodes to a `da` host."""
     body = _strip_ws(_firmware_function_body("wsOnText"))
     setlay = body.index("setActiveLayout(")
     authed_dispatch = body.index("handleJsonRpc(line,out,true,")
     assert setlay < authed_dispatch, (
-        "wsOnText must setActiveLayout(slotLayout[tgtSlot]) BEFORE the authed handleJsonRpc dispatch")
-    assert "setActiveLayout((tgtSlot>=0&&tgtSlot<NUM_SLOTS)?slotLayout[tgtSlot]" in body, (
-        "the WS layout gate must select the TARGET slot's layout (matching the serial/TCP path)")
+        "wsOnText must setActiveLayout(slotLayout[g_activeTarget]) BEFORE the authed handleJsonRpc dispatch")
+    assert "setActiveLayout((g_activeTarget>=0&&g_activeTarget<NUM_SLOTS)?slotLayout[g_activeTarget]" in body, (
+        "the WS layout gate must select the caller's ACTIVE target slot's layout (matching the serial/TCP path)")
 
 
 def test_firmware_gap_name_and_advertised_name_share_one_source():

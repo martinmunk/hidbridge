@@ -101,7 +101,7 @@
 #include <NetworkClient.h>
 #include <NetworkServer.h>
 #include <Preferences.h>
-#include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
+#include <WebServer.h>       // serves the Mode 1 control webpage HTML (:80) -- no /rpc drive endpoint
 #include <WebSocketsServer.h> // Mode 1 WS DRIVE CHANNEL for the control page (port 81) -- see "WS DRIVE"
 #include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
 // The raw JSON-RPC / frame port (3333) is TLS-PSK ONLY -- see the TLS note below. The NVS token is
@@ -210,6 +210,7 @@ struct NetSession {
   mbedtls_ssl_context ssl;                    // per-connection TLS state
   mbedtls_net_context nc;                     // holds the accepted socket fd (mbedtls BIO owns it)
   String              buf;
+  int                 drivenSlot  = -1;       // the BLE slot THIS session drives/claims (-1 = none)
   uint8_t             fails       = 0;
 };
 static int                      g_listenFd = -1;     // raw TLS listen socket (replaces NetworkServer)
@@ -222,18 +223,19 @@ static const int g_pskCiphers[] = { MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256, 0 }
 static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
-static WebServer     webServer(80);          // Mode 1 control page + /rpc
-// WS DRIVE CHANNEL (port 81) -- the control page holds ONE WebSocket open while it is open, and drives
-// the board over it (the same Mode 1 JSON-RPC the /rpc POST carries). The point is the LIVE connection:
-// when the page closes / the tab dies / the laptop sleeps / the network drops, the WS closes and the
-// board deterministically PARKS the target that page was driving (drop the central, keep the bond, stop
-// advertising) -- "no connection without an active customer", with no heartbeat/timeout guessing. It is
-// PLAIN ws:// (browsers cannot speak TLS-PSK), so the token crosses the LAN in clear exactly like the
-// :80 HTTP page today -- LAN-only, do NOT confuse it with the encrypted TLS-PSK :3333 client path.
+static WebServer     webServer(80);          // serves the Mode 1 control page HTML (no /rpc drive route)
+// WS DRIVE CHANNEL (port 81) -- each browser tab holds ONE WebSocket open while it is open, and drives
+// the board over it (the same Mode 1 JSON-RPC the raw port carries). The point is the LIVE connection:
+// when a page closes / the tab dies / the laptop sleeps / the network drops, ITS WebSocket closes and
+// the board deterministically PARKS the slot that page was driving IFF no other session still drives it
+// (ref-counted, see slotClaimCount) -- "no connection without an active customer", with no
+// heartbeat/timeout guessing. Each WS client owns its OWN claimed slot (g_wsDrivenSlot[num]), so two
+// tabs can drive two different devices at once. It is PLAIN ws:// (browsers cannot speak TLS-PSK), so
+// the token crosses the LAN in clear exactly like the :80 HTTP page -- LAN-only, do NOT confuse it with
+// the encrypted TLS-PSK :3333 client path.
 static WebSocketsServer wsServer(81);
-static bool          wsAuthed[WEBSOCKETS_SERVER_CLIENT_MAX];   // per WS client: token accepted?
-static int           g_wsOwner     = -1;     // WS client num that owns the driven target (-1 = none)
-static int           g_wsOwnerSlot = -1;     // the slot that owner connected -> parked when it drops
+static bool          wsAuthed[WEBSOCKETS_SERVER_CLIENT_MAX];       // per WS client: token accepted?
+static int           g_wsDrivenSlot[WEBSOCKETS_SERVER_CLIENT_MAX]; // per WS client: slot it claims (-1=none)
 static IPAddress     hbLocalIP();            // local IP of the active interface (ETH/WiFi); def. below
 #else
 // No network on this board: NetSession is never defined, but handleLine still takes a NetSession*
@@ -315,7 +317,8 @@ static NimBLEServer*       server = nullptr;
 // slotAddr[0] = native public address (captured at setup); slotAddr[k>=1] = derived static-random.
 // slotConn[k] = the conn handle of the central connected on slot k (or NONE). slotSub[k] = iOS has
 // enabled the keyboard report CCCD on slot k (readiness). advSlot = the slot currently ADVERTISING;
-// tgtSlot = the slot K/M reports are notified to. slotName[k] = that slot's advertised name.
+// g_activeTarget = the slot the IN-FLIGHT dispatch notifies K/M to (see below). slotName[k] = that
+// slot's advertised name.
 static NimBLEAddress       slotAddr[NUM_SLOTS];
 static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
@@ -329,7 +332,15 @@ static int                 slotLayout[NUM_SLOTS];     // per-slot keyboard LAYOU
 // net. The full name still lives in the GAP Device Name characteristic (0x2A00, no 31-byte cap).
 static const size_t        HB_MAX_ADV_NAME = 26;
 static int                 advSlot = 0;
-static int                 tgtSlot = 0;
+// ROUTING is PER SESSION now, not one global drive target. g_activeTarget holds the slot the CURRENTLY
+// DISPATCHING line routes reports to (notifyTarget reads it): the dispatcher loads it from the calling
+// session's claimed slot BEFORE the line and stores any change back AFTER (a connect/pair/T moves the
+// session's single claim). -1 = the caller claims no slot yet (K/M answer "OK noconn").
+static int                 g_activeTarget = -1;
+// The USB SERIAL channel is itself one persistent session, so it owns ONE claimed slot exactly like a
+// TCP session or a WS client (-1 = none). Serial never "closes", so its claim only moves, it is never
+// ref-count-parked on a session-end.
+static int                 g_serialDrivenSlot = -1;
 static bool                parked = false;   // true = intentionally NOT advertising (host parked it)
 
 // The device NICKNAME (Mode 1). Advertised BLE base name = "HIDBRIDGE-<nick>"; per-slot with a client
@@ -345,6 +356,10 @@ static char                g_mdnsHost[48] = "hidbridge-esp32";
 // Forward declarations: the server callbacks (below) resume/point advertising; defined after setup().
 static void selectSlotAdvertise(int n, const char* name);
 static void startAdvertisingSlot();
+// Ref-counted per-session targeting helpers (defined after parkTargetSlot). Forward-declared here
+// because netCloseSession (a TCP session ending) parks its driven slot only if it was the last claimer.
+static bool parkTargetSlot(int slot);
+static int  slotClaimCount(int slot);
 #ifdef HIDBRIDGE_NET
 static void netSetup();                        // Ethernet + TCP line server; called from setup()
 static bool netTlsSetup();                      // build the PSK config + open the TLS port (def. below)
@@ -464,17 +479,24 @@ struct TlsPrinter : public Print {
   size_t write(const uint8_t* b, size_t n) override { return tlsWrite(ssl, b, n) ? n : 0; }
 };
 
-// Close a session and release its TLS + socket state. mbedtls_net_free() closes the owned fd.
+// Close a session and release its TLS + socket state. mbedtls_net_free() closes the owned fd. SESSION
+// END is a claim-release point: drop this session's slot claim and, if it was the LAST session driving
+// that slot, park it (drop the central, keep the bond, stop advertising) -- the ref-counted twin of the
+// WS page-closed park. drivenSlot is cleared BEFORE the count so this session is excluded from it.
 static void netCloseSession(NetSession& s) {
   if (s.inUse) {
+    int slot = s.drivenSlot;
+    s.drivenSlot = -1;
     mbedtls_ssl_free(&s.ssl);
     mbedtls_net_free(&s.nc);
+    if (slot >= 0 && slotClaimCount(slot) == 0) parkTargetSlot(slot);
   }
   s.inUse = false;
   s.handshaking = false;
   s.authed = false;
   s.wantClose = false;
   s.buf = "";
+  s.drivenSlot = -1;
   s.fails = 0;
 }
 #endif  // HIDBRIDGE_NET
@@ -749,15 +771,17 @@ static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
   snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", v[5], v[4], v[3], v[2], v[1], v[0]);
 }
 
-// Notify ONE report to the target slot's central. Returns true if it actually notified (a central is
-// connected on the target slot), false if there was none. Shared by Mode 2 (raw frame relay) and
-// Mode 1 (the native report builders below).
+// Notify ONE report to the ACTIVE target slot's central. Returns true if it actually notified (a
+// central is connected on that slot), false if there was none. Routes via g_activeTarget, which the
+// dispatcher has set to the CALLING SESSION's claimed slot before this line -- so two sessions driving
+// two slots each hit their own central. Shared by Mode 2 (raw frame relay) and Mode 1 (below).
 static bool notifyTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len) {
   if (chr == nullptr) return false;
   chr->setValue((uint8_t*)body, len);
-  uint16_t h = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotConn[tgtSlot] : BLE_HS_CONN_HANDLE_NONE;
+  uint16_t h = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) ? slotConn[g_activeTarget]
+                                                                   : BLE_HS_CONN_HANDLE_NONE;
   if (h == BLE_HS_CONN_HANDLE_NONE) return false;
-  chr->notify(h);                              // drive ONLY the target slot's central
+  chr->notify(h);                              // drive ONLY the active session's target central
   return true;
 }
 
@@ -787,7 +811,7 @@ static void printSlotsStatus(Print& out) {
   out.print(" adv=");
   out.print(advSlot);
   out.print(" tgt=");
-  out.print(tgtSlot);
+  out.print(g_activeTarget);                   // the CALLING session's currently-claimed target slot
   out.print(" multi=1");                       // NimBLE holds distinct identities simultaneously
   for (int i = 0; i < NUM_SLOTS; i++) {
     out.print(" c");
@@ -875,7 +899,7 @@ static int allocSlotForClient(const char* client) {
 }
 // Resolve a target slot from a request: an explicit "slot" index wins (so the webpage can act on an
 // UNNAMED but bonded slot), else look up "client" by name. `dflt` is returned when neither is given
-// (tgtSlot for disconnect; -1 to force an explicit choice for connect/unpair).
+// (the caller's g_activeTarget for disconnect/layout; -1 to force an explicit choice for connect/unpair).
 static int slotFromParams(JsonObjectConst params, int dflt) {
   if (params["slot"].is<int>()) {
     int s = params["slot"].as<int>();
@@ -910,6 +934,57 @@ static bool parkTargetSlot(int slot) {
   return had;
 }
 
+// # of live SESSIONS (serial + net + WS) currently claiming `slot` as their drive target. A slot is
+// parked only when this hits 0 -- so ONE driver dropping does not yank a slot ANOTHER driver still
+// holds (ref-counted claims). Each session records its claim in g_serialDrivenSlot / NetSession.
+// drivenSlot / g_wsDrivenSlot[num].
+static int slotClaimCount(int slot) {
+  if (slot < 0) return 0;
+  int n = 0;
+  if (g_serialDrivenSlot == slot) n++;
+#ifdef HIDBRIDGE_NET
+  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++)
+    if (netSessions[i].inUse && netSessions[i].drivenSlot == slot) n++;
+  for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
+    if (g_wsDrivenSlot[i] == slot) n++;
+#endif
+  return n;
+}
+
+// Drop EVERY session's claim on `slot`. Used by unpair: deleting a bond is inherently global, so no
+// session may keep driving that identity afterwards. Also clears the in-flight g_activeTarget.
+static void clearAllClaims(int slot) {
+  if (slot < 0) return;
+  if (g_serialDrivenSlot == slot) g_serialDrivenSlot = -1;
+  if (g_activeTarget == slot)     g_activeTarget = -1;
+#ifdef HIDBRIDGE_NET
+  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++)
+    if (netSessions[i].drivenSlot == slot) netSessions[i].drivenSlot = -1;
+  for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
+    if (g_wsDrivenSlot[i] == slot) g_wsDrivenSlot[i] = -1;
+#endif
+}
+
+// After dispatching ONE session's line: store the (possibly moved) claim back into that session's slot,
+// and if the session's PREVIOUS slot (`old`) now has zero claimers, release it. This is the ref-counted
+// half of "connect/pair/T claims a slot; disconnect + session-end release it". `store` points at the
+// session's own drivenSlot; the write-back happens BEFORE the count so this session is already excluded.
+//
+// RELEASE has two shapes so a claim MOVE does not kill the fresh advert: if the session moved to a NEW
+// target (g_activeTarget >= 0, already being advertised by connect/pair's selectSlotAdvertise), only DROP
+// the old slot's central -- keep the new advert up. If it released entirely (g_activeTarget < 0, from
+// disconnect/X/session-end), full parkTargetSlot (drop central AND stop advertising).
+static void finishRoute(int* store, int old) {
+  *store = g_activeTarget;
+  if (old < 0 || old == g_activeTarget || slotClaimCount(old) != 0) return;
+  if (g_activeTarget >= 0) {
+    uint16_t h = slotConn[old];                // moved to a new (advertising) target -> just drop old central
+    if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
+  } else {
+    parkTargetSlot(old);                       // released outright -> drop central + stop advertising
+  }
+}
+
 static void esp32Custom(const char* method, JsonObjectConst params, JsonObject result,
                         bool* handled, int* errCode, const char** errMsg) {
   if (!strcmp(method, "nickname")) {
@@ -939,15 +1014,16 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     *handled = true;
     JsonArray arr = result["slots"].to<JsonArray>();
     for (int i = 0; i < NUM_SLOTS; i++) fillIdentity(arr.add<JsonObject>(), i);
-    result["adv"] = advSlot; result["tgt"] = tgtSlot;
+    result["adv"] = advSlot;
+    result["tgt"] = g_activeTarget;              // the CALLING session's own claimed slot (per-session)
     return;
   }
   if (!strcmp(method, "layout")) {
     // Get or set a SLOT's keyboard layout (per device). Addressed like connect/unpair: an explicit
-    // "slot" index or a "client" name, else the current target (tgtSlot). With a "name" ("us"/"da")
-    // it sets + persists; without, it just reports. Changeable any time (not only at pair).
+    // "slot" index or a "client" name, else the caller's current target (g_activeTarget). With a "name"
+    // ("us"/"da") it sets + persists; without, it just reports. Changeable any time (not only at pair).
     *handled = true;
-    int slot = slotFromParams(params, tgtSlot);
+    int slot = slotFromParams(params, g_activeTarget);
     if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "unknown/invalid 'client' or 'slot'"; return; }
     const char* name = params["name"] | (const char*)nullptr;
     if (name && name[0]) {
@@ -979,7 +1055,7 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     buildSlotName(slot);
     persistSlotClient(slot);                // survive a reboot/reflash, like the bond does
     selectSlotAdvertise(slot, nullptr);     // bring this identity up + advertise (the iPad (re)connects)
-    tgtSlot = slot;                          // route reports to it
+    g_activeTarget = slot;                   // CLAIM it for this session (finishRoute stores it back)
     fillIdentity(result, slot);
     return;
   }
@@ -988,15 +1064,21 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     int slot = slotFromParams(params, -1);   // by "slot" index or "client" name
     if (slot < 0) { *errCode = -32000; *errMsg = "unknown client/slot (pair it first)"; return; }
     selectSlotAdvertise(slot, nullptr);     // bring this identity up + advertise (the iPad (re)connects)
-    tgtSlot = slot;                          // route reports to it
-    fillIdentity(result, slot);
+    g_activeTarget = slot;                   // CLAIM it for THIS session; if it had another claim, that
+    fillIdentity(result, slot);              // one moves here (finishRoute parks the old iff last claimer)
     return;
   }
   if (!strcmp(method, "disconnect")) {
+    // Release the CALLING session's claim (default: its current target g_activeTarget) and park the
+    // slot only if NO other session still drives it (finishRoute, ref-counted). An explicit slot the
+    // caller does NOT itself claim is parked only when it is already idle (0 claimers) -- never yanked
+    // from another live driver.
     *handled = true;
-    int slot = slotFromParams(params, tgtSlot);   // default: the current target
-    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client/slot"; return; }
-    bool had = parkTargetSlot(slot);         // drop central + stop advertising (keep the bond)
+    int slot = slotFromParams(params, g_activeTarget);
+    if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32000; *errMsg = "unknown client/slot"; return; }
+    bool had = slotConn[slot] != BLE_HS_CONN_HANDLE_NONE;
+    if (slot == g_activeTarget)          g_activeTarget = -1;    // drop my claim; finishRoute parks iff last
+    else if (slotClaimCount(slot) == 0)  parkTargetSlot(slot);  // an idle slot nobody drives -> park now
     result["slot"] = slot;
     result["disconnected"] = had;
     return;
@@ -1018,6 +1100,7 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     slotClient[slot][0] = 0;
     buildSlotName(slot);
     persistSlotClient(slot);                 // removes the NVS label key
+    clearAllClaims(slot);                    // no session may keep driving a now-unbonded identity
     if (advSlot == slot) NimBLEDevice::stopAdvertising();
     result["slot"] = slot;
     result["unpaired"] = true;
@@ -1040,8 +1123,9 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
 }
 
 
+// Dispatch ONE already-routed line (g_activeTarget is set to the caller's claimed slot by handleLine).
 // `sess` is the originating TCP session, or nullptr when the line came from USB serial.
-static void handleLine(String line, Print& out, NetSession* sess) {
+static void dispatchLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
   if (line[0] == '{') {                                             // Mode 1: JSON-RPC
@@ -1051,10 +1135,10 @@ static void handleLine(String line, Print& out, NetSession* sess) {
 #else
     (void)sess;
 #endif
-    // The ACTIVE keyboard layout for this dispatch is the TARGET slot's -- so `type`/`key` land the
-    // right characters on whatever host tgtSlot points at (laptop3=da, a US host=us, independently).
-    hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
-                                                                   : hbmode1::LAYOUT_US);
+    // The ACTIVE keyboard layout for this dispatch is the caller's TARGET slot's -- so `type`/`key`
+    // land the right characters on whatever host g_activeTarget points at (laptop3=da, a US host=us).
+    hbmode1::setActiveLayout((g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) ? slotLayout[g_activeTarget]
+                                                                                 : hbmode1::LAYOUT_US);
     hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
@@ -1076,11 +1160,11 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     if (!parseHexBody(arg, body, MOUSE_BODY_LEN)) { out.println("ERR badmouse"); return; }
     sendReportToTarget(inputMouse, body, MOUSE_BODY_LEN, out);
   } else if (cmd == 'P') {
-    // Report the TARGET slot's state (default slot 0 = legacy single-central behaviour).
+    // Report the CALLING session's active-target slot state (g_activeTarget; -1 => sub/con both 0).
     // subscribed= BEFORE conn= so a legacy host's endswith("conn=1") parse still works.
-    bool sub = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) && slotSub[tgtSlot];
-    bool con = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) &&
-               slotConn[tgtSlot] != BLE_HS_CONN_HANDLE_NONE;
+    bool sub = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) && slotSub[g_activeTarget];
+    bool con = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) &&
+               slotConn[g_activeTarget] != BLE_HS_CONN_HANDLE_NONE;
     out.print("OK HIDBRIDGE-esp32 subscribed=");
     out.print(sub ? "1" : "0");
     out.print(" conn=");
@@ -1110,10 +1194,12 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     out.print(" conn=");
     out.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
   } else if (cmd == 'T') {
-    // T<n> -- route subsequent K/M reports to slot n's connection.
+    // T<n> -- CLAIM slot n for THIS session: route its subsequent K/M reports to slot n's connection.
+    // Unlike connect it does NOT advertise/bring the slot up (it assumes an already-live central); it
+    // just moves this session's single claim (handleLine/finishRoute parks the old slot iff last claimer).
     int n = arg.toInt();
     if (arg.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
-    tgtSlot = n;
+    g_activeTarget = n;
     out.print("OK tgt=");
     out.println(n);
   } else if (cmd == 'S') {
@@ -1160,18 +1246,14 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     out.println("ERR nonet");
 #endif
   } else if (cmd == 'X') {
-    // Disconnect the TARGET slot's central but KEEP the bond, then PARK (stop advertising) so the
-    // released iPad is free to attach to ANOTHER board (deterministic cross-board handoff). The host
-    // brings this board back with I<n>. Other slots' connections are untouched.
-    uint16_t h = (tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotConn[tgtSlot] : BLE_HS_CONN_HANDLE_NONE;
-    parked = true;                            // onDisconnect must NOT auto-re-advertise
-    if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) {
-      server->disconnect(h);
-      out.println("OK disc");
-    } else {
-      out.println("OK noconn");
-    }
-    NimBLEDevice::stopAdvertising();
+    // Release THIS session's claim on its active-target central + KEEP the bond, then PARK (stop
+    // advertising) so the released iPad is free to attach to ANOTHER board -- but ref-counted, so a slot
+    // that ANOTHER session still drives is NOT yanked (finishRoute parks iff I was the last claimer).
+    // The host brings this board back with I<n>/connect. Other slots' connections are untouched.
+    int slot = g_activeTarget;
+    bool had = (slot >= 0 && slot < NUM_SLOTS && slotConn[slot] != BLE_HS_CONN_HANDLE_NONE);
+    g_activeTarget = -1;                       // drop my claim; finishRoute parks the slot iff last claimer
+    out.println(had ? "OK disc" : "OK noconn");
   } else if (cmd == 'O') {
     // Park: stop advertising but KEEP existing connections + bonds. Lets the OTHER board's test run
     // without this board grabbing an iPad. Resume with I<n>.
@@ -1181,6 +1263,22 @@ static void handleLine(String line, Print& out, NetSession* sess) {
   } else {
     out.println("ERR unknown");
   }
+}
+
+// The single per-session entry for serial + TCP lines. Before dispatch, load THIS session's claimed
+// slot into the routing global g_activeTarget (so its K/M + Mode-1 reports hit ITS target); after
+// dispatch, store back any claim the line moved (connect/pair/T/disconnect/X) and ref-count-park a
+// released slot (finishRoute). Serial (sess == nullptr) uses the one g_serialDrivenSlot; a TCP session
+// uses its own drivenSlot. This is the SAME before/after-dispatch pattern the WS path (wsOnText) uses.
+static void handleLine(String line, Print& out, NetSession* sess) {
+  int* store = &g_serialDrivenSlot;
+#ifdef HIDBRIDGE_NET
+  if (sess != nullptr) store = &sess->drivenSlot;
+#endif
+  int old = *store;
+  g_activeTarget = old;
+  dispatchLine(line, out, sess);
+  finishRoute(store, old);
 }
 
 // ---- network service: accept clients + feed their lines through the SAME handleLine ------------ //
@@ -1265,6 +1363,7 @@ static void netPoll() {
       s.authed = false;
       s.wantClose = false;
       s.buf = "";
+      s.drivenSlot = -1;                       // a fresh session claims no slot until it connects/T's
       s.fails = 0;
       // set_bio drives the socket through mbedtls_net_send/recv, which return WANT_READ/WRITE on a
       // non-blocking fd -- exactly what makes the handshake + reads below non-blocking.
@@ -1353,16 +1452,10 @@ static void onNetEvent(arduino_event_id_t event) {
   }
 }
 
-// A Print that captures into a String, so handleJsonRpc's reply can be sent as an HTTP body.
-struct StringPrinter : public Print {
-  String s;
-  size_t write(uint8_t c) override { s += (char)c; return 1; }
-  size_t write(const uint8_t* b, size_t n) override { s.concat((const char*)b, n); return n; }
-};
-
-// Self-contained control page (one PROGMEM string, no external assets). It POSTs the SAME Mode 1
-// JSON-RPC to /rpc that the serial/TCP clients speak, with the token as an X-Auth-Token header. Flow:
-// (1) unlock -- enter the token, verified by an authed call; (2) Devices -- pair/connect/disconnect
+// Self-contained control page (one PROGMEM string, no external assets). It drives the board ONLY over
+// its WebSocket (:81), speaking the SAME Mode 1 JSON-RPC the serial/TCP clients speak (there is no HTTP
+// /rpc drive endpoint -- driving is WS/TCP/serial only, a persistent session per driver). Flow:
+// (1) unlock -- enter the token, verified over the WS; (2) Devices -- pair/connect/disconnect
 // identities by name; the HID controls stay disabled UNTIL a device is connected; (3) live control --
 // pointer-lock the pad so the real mouse + keyboard drive the target. Mouse/scroll deltas are
 // CONFLATED: at most one request is in flight and deltas accumulate meanwhile, so total motion is
@@ -1387,12 +1480,12 @@ align-items:center;justify-content:center;text-align:center;user-select:none;cur
 <div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off
 onkeydown="if(event.key=='Enter')unlock()">
 <button onclick=unlock()>Unlock</button></div>
-<p><small>This page (HTTP + its ws:// drive link) is plaintext on your LAN -- the token and keystrokes
+<p><small>This page and its ws:// drive link are plaintext on your LAN -- the token and keystrokes
 here are NOT encrypted (unlike the TLS client path). Use it only on a network you trust.</small></p></section>
 
 <section id=app class=hide>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
-<span class=row><span id=wss class=dot title="no live link (using HTTP fallback)"></span>
+<span class=row><span id=wss class=dot title="not connected to the board"></span>
 <button onclick=lock()>Lock</button></span></div>
 <div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off
 onkeydown="if(event.key=='Enter')setNick()">
@@ -1404,7 +1497,8 @@ onkeydown="if(event.key=='Enter')setNick()">
 onkeydown="if(event.key=='Enter')pairNew()">
 <button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
 <small>Pair advertises a free slot so a device can bond (accept the pairing on that device). Connect
-brings a paired identity back up and targets it. A filled star marks the current target.</small></fieldset>
+brings a paired identity back up and claims it for THIS page (its own driver session). A filled star
+marks the device this page is driving.</small></fieldset>
 
 <div id=notready><em>Connect a device to enable the controls below.</em></div>
 
@@ -1424,13 +1518,15 @@ let TOK=null,id=0,ready=false,live=false;
 const $=s=>document.getElementById(s),show=(el,on)=>el.classList.toggle('hide',!on);
 const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
 
-// ---- WS DRIVE CHANNEL. While unlocked the page holds ONE WebSocket to :81 open and sends every
-// JSON-RPC over it (replies id-matched). The board ties the driven target lifecycle to THIS socket:
-// if it closes (tab shut, laptop asleep, network drop, or a ping/pong timeout on a hung page) the board
-// parks the target. HTTP /rpc stays a fallback -- used automatically if the WS cannot open, and by curl.
+// ---- WS DRIVE CHANNEL. While unlocked the page holds ONE WebSocket to :81 open and drives the board
+// over it EXCLUSIVELY (every JSON-RPC goes over the WS, replies id-matched -- there is no HTTP fallback).
+// This WS IS the driver session: the board routes this page's commands to the slot this page connected,
+// and ties that slot's lifecycle to THIS socket -- if it closes (tab shut, laptop asleep, network drop,
+// or a ping/pong timeout on a hung page) the board parks that slot (unless another session still drives
+// it). If the WS is down, driving stops and the page shows a disconnected state until it reconnects.
 let WS=null,wsReady=false,pending={};
 function setWsState(on){const d=$('wss');if(!d)return;d.classList.toggle('on',on);
-d.title=on?'live link to board':'no live link (using HTTP fallback)'}
+d.title=on?'live link to board':'disconnected -- driving is paused'}
 function onEvt(){refresh()}   // any server-pushed EVT line -> re-read identities so the page updates live
 function wsConnect(){return new Promise(res=>{let settled=false;const fin=v=>{if(!settled){settled=true;res(v)}};
 let sock;try{sock=new WebSocket('ws://'+location.hostname+':81/')}catch(e){return fin(false)}
@@ -1450,16 +1546,16 @@ function onWsDown(){if(live)release();setReady(false);
 log('live link to the board dropped -- the target has been parked. Reconnecting...');
 if(TOK)setTimeout(()=>{if(TOK&&!wsReady)wsConnect().then(ok=>{if(ok){log('live link restored');refresh()}})},1500)}
 
+// WS-ONLY: every command goes over the live WebSocket session. No socket -> reject (the page shows a
+// disconnected state and stops live control; wsConnect reopens it). There is no HTTP /rpc fallback.
 function rpc(m,p){const mid=++id;
-if(wsReady&&WS){return new Promise((res,rej)=>{pending[mid]={res,rej};
+if(!(wsReady&&WS))return Promise.reject(new Error('not connected to the board'));
+return new Promise((res,rej)=>{pending[mid]={res,rej};
 try{WS.send(JSON.stringify({jsonrpc:'2.0',id:mid,method:m,params:p||{}}))}catch(e){delete pending[mid];return rej(e)}
 setTimeout(()=>{if(pending[mid]){delete pending[mid];rej(new Error('timeout'))}},8000)})}
-return fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':TOK||''},          // HTTP fallback (also curl)
-body:JSON.stringify({jsonrpc:'2.0',id:mid,method:m,params:p||{}})}).then(r=>r.json())
-.then(j=>{if(j&&j.error)throw new Error(j.error.message||'error');return j.result||{}})}
 
 async function unlock(){TOK=$('tok').value;try{
-await wsConnect();            // best-effort: open the live WS + authenticate (HTTP fallback if it fails)
+if(!await wsConnect())throw new Error('could not open the live link to the board (check the token + network)');
 const info=await rpc('hello');await rpc('identities');
 localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
 $('board').textContent=info.name||info.device||'hidbridge';
@@ -1549,19 +1645,9 @@ document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked b
 
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
 
-static void handleWebRpc() {
-  // The X-Auth-Token header must equal the NVS token (fail-closed -- with no token provisioned, only
-  // `hello` works). Unlike the TLS-PSK TCP path, THIS webpage is plain HTTP (browsers cannot do
-  // TLS-PSK), so its report bytes cross the LAN in the clear -- the one remaining cleartext surface.
-  bool authed = webServer.hasHeader("X-Auth-Token") && tokenEquals(webServer.header("X-Auth-Token"));
-  StringPrinter sp;
-  // Same per-slot layout gate as the serial/TCP + WS paths: the HTTP /rpc fallback of the control
-  // page must also honor the TARGET slot's keyboard layout before dispatch.
-  hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
-                                                                 : hbmode1::LAYOUT_US);
-  hbmode1::handleJsonRpc(webServer.arg("plain"), sp, authed, esp32Notify, esp32FillHello, esp32Custom);
-  webServer.send(200, "application/json", sp.s);
-}
+// NOTE: there is deliberately NO HTTP /rpc DRIVE endpoint. Driving is stateful -- a persistent SESSION
+// (WS client / TCP session / serial) owns one BLE claim -- so a stateless per-POST /rpc has no session
+// to route to and was removed. The page drives over its WebSocket (:81); curl/scripts use TCP 3333.
 
 // ---- WS DRIVE CHANNEL (port 81) --------------------------------------------------------------- //
 // A Print that funnels one JSON-RPC reply into ONE WS text frame. handleJsonRpc writes a reply as many
@@ -1591,9 +1677,11 @@ static void wsTryAuth(uint8_t num, const String& token, Print& out) {
 
 // One text frame from a WS client. Fail-closed: until this client authenticates (an `@<token>` line or
 // {"method":"auth","params":{"token":...}}) only `hello` is answered. Once authed, the line goes to the
-// SAME hbmode1::handleJsonRpc dispatcher the /rpc + TCP + serial paths use, with a WsPrinter routing the
-// reply back over THIS client. A connect/pair marks this client the OWNER of the driven target (parked
-// when it drops -- see wsEvent); disconnect/unpair by the owner releases that ownership.
+// SAME hbmode1::handleJsonRpc dispatcher the TCP + serial paths use, with a WsPrinter routing the reply
+// back over THIS client. Each WS client is its OWN driver SESSION: its claimed slot lives in
+// g_wsDrivenSlot[num], loaded into g_activeTarget before dispatch and stored back after (a connect/pair/
+// disconnect moves this client's claim; finishRoute ref-count-parks a released slot). This is the same
+// before/after-dispatch routing as handleLine -- so two tabs drive two devices independently.
 static void wsOnText(uint8_t num, uint8_t* payload, size_t length) {
   String line; line.reserve(length + 1);
   for (size_t i = 0; i < length; i++) { char c = (char)payload[i]; if (c != '\r' && c != '\n') line += c; }
@@ -1616,38 +1704,38 @@ static void wsOnText(uint8_t num, uint8_t* payload, size_t length) {
     return;
   }
 
-  // Authed. OWNERSHIP: cheap compact-JSON substring test (JSON.stringify emits no spaces) keeps the hot
-  // pointer-move path to a SINGLE parse (inside handleJsonRpc).
-  bool ownerMethod   = line.indexOf("\"method\":\"connect\"") >= 0 || line.indexOf("\"method\":\"pair\"") >= 0;
-  bool releaseMethod = line.indexOf("\"method\":\"disconnect\"") >= 0 || line.indexOf("\"method\":\"unpair\"") >= 0;
-
-  // Same per-slot layout gate as the serial/TCP path (handleLine): pick the TARGET slot's keyboard
-  // layout before dispatch so `type`/`key` over the WS land the right characters on whatever host
-  // tgtSlot points at (laptop3=da, a US host=us, independently).
-  hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
-                                                                 : hbmode1::LAYOUT_US);
+  // Authed: route this client's line to ITS claimed slot (before/after-dispatch, like handleLine).
+  int old = g_wsDrivenSlot[num];
+  g_activeTarget = old;
+  // Same per-slot layout gate as the serial/TCP path: pick this client's TARGET slot's keyboard layout
+  // before dispatch so `type`/`key` over the WS land the right characters on whatever host g_activeTarget
+  // points at (laptop3=da, a US host=us, independently).
+  hbmode1::setActiveLayout((g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) ? slotLayout[g_activeTarget]
+                                                                               : hbmode1::LAYOUT_US);
   hbmode1::handleJsonRpc(line, out, true, esp32Notify, esp32FillHello, esp32Custom);
-
-  if (ownerMethod)        { g_wsOwner = (int)num; g_wsOwnerSlot = tgtSlot; }   // esp32Custom set tgtSlot
-  else if (releaseMethod && g_wsOwner == (int)num) { g_wsOwner = -1; g_wsOwnerSlot = -1; }
+  finishRoute(&g_wsDrivenSlot[num], old);      // store this client's (moved) claim; ref-count-park the old
 }
 
-// The WS lifecycle callback. THE core feature is WStype_DISCONNECTED: when the owning page's socket
+// The WS lifecycle callback. THE core feature is WStype_DISCONNECTED: when a driving page's socket
 // closes (tab closed, laptop asleep, network dropped, or the built-in ping/pong timed out a hung page),
-// PARK the target that page was driving -- deterministic, no timeout guessing.
+// release THAT client's slot claim and PARK it IFF no other session still drives it (ref-counted, via
+// slotClaimCount) -- deterministic, no timeout guessing, and it never yanks a slot a second tab holds.
 static void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
       wsAuthed[num] = false;                 // each new socket must (re)authenticate
+      g_wsDrivenSlot[num] = -1;              // a fresh client claims no slot until it connects
       break;
-    case WStype_DISCONNECTED:
+    case WStype_DISCONNECTED: {
       wsAuthed[num] = false;
-      if ((int)num == g_wsOwner) {           // the driving page went away -> park its target
-        parkTargetSlot(g_wsOwnerSlot);
-        g_wsOwner = -1; g_wsOwnerSlot = -1;
-        Serial.println("note: ws owner left -- parked its target");
+      int slot = g_wsDrivenSlot[num];        // the slot this client was driving (if any)
+      g_wsDrivenSlot[num] = -1;              // release BEFORE counting so this client is excluded
+      if (slot >= 0 && slotClaimCount(slot) == 0) {
+        parkTargetSlot(slot);                // last driver of this slot went away -> park it
+        Serial.println("note: ws client left -- parked its (now unclaimed) target");
       }
       break;
+    }
     case WStype_TEXT:
       wsOnText(num, payload, length);
       break;
@@ -1701,15 +1789,12 @@ static void netSetup() {
   ETH.setHostname(g_mdnsHost);
 #endif
   netTlsSetup();                               // TLS-PSK listener on HB_NET_PORT (or none, unprovisioned)
-  static const char* kHdrs[] = { "X-Auth-Token" };
-  webServer.collectHeaders(kHdrs, 1);
-  webServer.on("/", handleWebRoot);
-  webServer.on("/rpc", HTTP_POST, handleWebRpc);
+  webServer.on("/", handleWebRoot);            // serve the control page HTML only -- no /rpc drive endpoint
   webServer.begin();
   // WS drive channel (:81). enableHeartbeat pings each client every 15s and drops it after 2 missed
   // pongs (6s), so a HARD-crashed page (no clean close) is still detected -> WStype_DISCONNECTED ->
-  // its target is parked. That is what makes "page died" deterministic without app-level timeouts.
-  for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++) wsAuthed[i] = false;
+  // its target is parked (ref-counted). That is what makes "page died" deterministic without timeouts.
+  for (int i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++) { wsAuthed[i] = false; g_wsDrivenSlot[i] = -1; }
   wsServer.begin();
   wsServer.onEvent(wsEvent);
   wsServer.enableHeartbeat(15000, 3000, 2);
