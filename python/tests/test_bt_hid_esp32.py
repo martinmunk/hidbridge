@@ -237,7 +237,11 @@ def test_firmware_gap_name_and_advertised_name_share_one_source():
     suffix). Guard: startAdvertisingSlot sets BOTH from slotName[advSlot]."""
     body = _firmware_function_body("startAdvertisingSlot").replace(" ", "")
     assert "setDeviceName(slotName[advSlot])" in body, (
-        "startAdvertisingSlot must sync the GAP Device Name to slotName[advSlot] (else a connected "
-        "peer reads a different name than it saw while scanning)")
-    assert "setName(slotName[advSlot])" in body, (
-        "startAdvertisingSlot must advertise slotName[advSlot] as the Complete Local Name")
+        "startAdvertisingSlot must sync the GAP Device Name (0x2A00) to the FULL slotName[advSlot] "
+        "(else a connected peer reads a different name than it saw while scanning)")
+    # the advertised Complete Local Name is the same per-slot name, length-capped into `advName` to
+    # fit the 31-byte advertising packet (an over-long name would silently fail to advertise).
+    assert 'snprintf(advName,sizeof(advName),"%s",slotName[advSlot])' in body, (
+        "the advertised name must derive from slotName[advSlot] (capped to fit the advert packet)")
+    assert "setName(advName)" in body, (
+        "startAdvertisingSlot must advertise the length-capped per-slot name")

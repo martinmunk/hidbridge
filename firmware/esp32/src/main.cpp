@@ -380,6 +380,12 @@ static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
 static char                slotName[NUM_SLOTS][40];   // advertised LocalName = HIDBRIDGE-<nick>[-<client>]
 static char                slotClient[NUM_SLOTS][24]; // per-slot CLIENT label (empty = unassigned)
+// The BLE advertising payload is 31 bytes: flags(3) + Complete Local Name(2 header + N) => N <= 26.
+// A name OVER this silently fails to advertise -- NimBLE keeps the PREVIOUS advert, so the board would
+// broadcast a name that disagrees with what it reports (caught by test_bt_hid_naming_live.py). So
+// pair/nickname REJECT over-budget names, and startAdvertisingSlot truncates as a last-ditch safety
+// net. The full name still lives in the GAP Device Name characteristic (0x2A00, no 31-byte cap).
+static const size_t        HB_MAX_ADV_NAME = 26;
 static int                 advSlot = 0;
 static int                 tgtSlot = 0;
 static bool                parked = false;   // true = intentionally NOT advertising (host parked it)
@@ -631,10 +637,12 @@ static void startAdvertisingSlot() {
   // fixed init() name "HIDBRIDGE-esp32" once it CONNECTS and reads 0x2A00 -- so a paired device showed
   // up as bare "HIDBRIDGE-esp32", dropping the -<nick>-<client> suffix. iOS caches the GAP name at
   // pair time, so setting it here (before the peer bonds) is what makes "...-16pro" stick.
-  NimBLEDevice::setDeviceName(slotName[advSlot]);
+  NimBLEDevice::setDeviceName(slotName[advSlot]);   // GAP name (0x2A00): the FULL name, no 31-byte cap
+  char advName[HB_MAX_ADV_NAME + 1];
+  snprintf(advName, sizeof(advName), "%s", slotName[advSlot]);   // truncate to fit the advert packet
   NimBLEAdvertisementData d;
   d.setFlags(0x06);                           // LE General Discoverable, BR/EDR not supported
-  d.setName(slotName[advSlot]);               // the ACTIVE slot's target-scoped name (main packet)
+  d.setName(advName);                         // the ACTIVE slot's target-scoped name (main packet)
   adv->setAdvertisementData(d);
   NimBLEAdvertisementData sr;                  // scan response: constant across slots
   sr.setAppearance(0x03C1);                   // HID Keyboard (the iPad Bluetooth-list icon)
@@ -916,7 +924,11 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
         if (*p == ' ' || *p == ':' || *p == '\n' || *p == '\r') {
           *errCode = -32602; *errMsg = "nickname must not contain space/colon/newline"; return;
         }
-      if (strlen(name) > 20) { *errCode = -32602; *errMsg = "nickname too long (max 20)"; return; }
+      // "HIDBRIDGE-<nick>" (the base advertised name) must fit the 31-byte BLE budget => nick <= 16.
+      if (strlen("HIDBRIDGE-") + strlen(name) > HB_MAX_ADV_NAME) {
+        *errCode = -32602;
+        *errMsg = "nickname too long: HIDBRIDGE-<nick> must be <= 26 chars (nickname max 16)"; return;
+      }
       Preferences pr; pr.begin("hidbridge", false); pr.putString("nick", name); pr.end();
       snprintf(g_nick, sizeof(g_nick), "%s", name);
       snprintf(g_advName, sizeof(g_advName), "HIDBRIDGE-%s", g_nick);
@@ -938,6 +950,13 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     *handled = true;
     const char* client = params["client"] | (const char*)nullptr;
     if (!client || !client[0]) { *errCode = -32602; *errMsg = "missing 'client'"; return; }
+    // Reject a label that would push the advertised name (g_advName + "-" + client) past the 31-byte
+    // BLE budget -- else the board would report a name it cannot actually advertise.
+    if (strlen(g_advName) + 1 + strlen(client) > HB_MAX_ADV_NAME) {
+      *errCode = -32602;
+      *errMsg = "label too long: advertised name would exceed 26 chars; shorten the label or the nickname";
+      return;
+    }
     int slot = allocSlotForClient(client);
     if (slot < 0) { *errCode = -32000; *errMsg = "no free identity slot"; return; }
     snprintf(slotClient[slot], sizeof(slotClient[slot]), "%s", client);
