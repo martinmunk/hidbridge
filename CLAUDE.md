@@ -141,6 +141,13 @@ the dense one-liner report/bit-parser style (`E701`, `E702`, `import a,b,c`) is 
 tolerated. Don't reformat it. Module docstrings here carry the *why* -- the hardware quirk, the
 verdict, the date it was verified live. Match that when you add one.
 
+**Commit + push as you go.** At every stable point (a feature works, a fix is verified, a refactor
+lands green), make a focused git commit and `git push origin main` -- don't batch a session's work
+into one big commit. Keep messages descriptive; note what was verified live. A pre-commit hook blocks
+confusable Unicode (em/en dashes, smart quotes) -- use ASCII `--` and straight quotes. `git commit -m`
+with backticks/`$()` in the message gets shell-mangled, and a local bash guard trips on the words
+`until`/`while` in a command; write the message to a file and use `git commit -F <file>` to avoid both.
+
 ## Further reading
 
 `docs/` holds the deep dives (MCU approach and host slots, multi-device routing, absolute pointer,
