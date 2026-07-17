@@ -345,21 +345,53 @@ def cmd_wake(args):
     print("sent wake keystroke.")
 
 
+def _layout_of(args) -> str:
+    """The target host's keyboard layout for character->scancode mapping ('us' default, 'da')."""
+    return (getattr(args, "layout", None) or R.DEFAULT_LAYOUT)
+
+
 def cmd_unlock(args):
     # Expand LOCALLY to frames; never send/log the passcode text.
     frames = [{"kind": "keyboard", "hex": r.data.hex()}
-              for r in R.passcode_reports(args.passcode, press_enter=not args.no_enter)]
+              for r in R.passcode_reports(args.passcode, press_enter=not args.no_enter,
+                                          layout=_layout_of(args))]
     _require_ok(_send({"cmd": "reports", "frames": frames}))
     print("sent passcode + Enter." if not args.no_enter else "sent passcode.")
 
 
 def cmd_type(args):
-    _require_ok(_send({"cmd": "type", "text": args.text}))
-    print(f"typed {len(args.text)} chars.")
+    layout = _layout_of(args)
+    if layout != R.DEFAULT_LAYOUT:
+        # Non-US layout: expand HOST-SIDE with reports.py (the single source of truth) and send the
+        # pre-built frames -- works uniformly across every Mode 2 backend (dongle daemon / MCU serial)
+        # without teaching each one about layouts. For --rpc (Mode 1) the board owns the layout,
+        # selected PER SLOT with `hidbridge --rpc ... ` + the board's `layout` method / web UI.
+        try:
+            frames = [{"kind": "keyboard", "hex": r.data.hex()}
+                      for r in R.type_text(args.text, layout=layout)]
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        _require_ok(_send({"cmd": "reports", "frames": frames}))
+    else:
+        _require_ok(_send({"cmd": "type", "text": args.text}))
+    print(f"typed {len(args.text)} chars ({layout}).")
 
 
 def cmd_key(args):
-    _require_ok(_send({"cmd": "key", "name": args.name, "modifiers": args.mod}))
+    layout = _layout_of(args)
+    if layout != R.DEFAULT_LAYOUT and len(args.name) == 1:
+        # A single printable char is layout-dependent; expand host-side. Named keys (enter/f5/...)
+        # are layout-independent and take the normal path.
+        try:
+            frames = [{"kind": "keyboard", "hex": r.data.hex()}
+                      for r in R.key_reports(args.name, args.mod, layout=layout)]
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(1)
+        _require_ok(_send({"cmd": "reports", "frames": frames}))
+    else:
+        _require_ok(_send({"cmd": "key", "name": args.name, "modifiers": args.mod}))
     print(f"pressed {args.name}.")
 
 
@@ -594,6 +626,12 @@ def build_parser():
     p.add_argument("--host", default=os.environ.get("BT_HID_NET_HOST"),
                    help="network backend host (mDNS name or IP), e.g. --backend net "
                         "--host hidbridge-esp32.local")
+    p.add_argument("--layout", default=os.environ.get("BT_HID_LAYOUT", R.DEFAULT_LAYOUT),
+                   choices=sorted(R.LAYOUTS),
+                   help="keyboard layout the TARGET host uses ('us' default, 'da' Danish). Decides "
+                        "which scancode+modifier each character maps to for type/key/unlock (Mode 2). "
+                        "For --rpc/Mode 1 the board owns the layout, set PER DEVICE with its `layout` "
+                        "method / web UI.")
     p.add_argument("--rpc", action="store_true", default=bool(os.environ.get("BT_HID_RPC")),
                    help="Mode 1: tell the BOARD what to do (JSON-RPC); it builds the HID reports "
                         "itself, instead of the host building frames. Needs an MCU backend "

@@ -309,6 +309,7 @@ static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
 static char                slotName[NUM_SLOTS][40];   // advertised LocalName = HIDBRIDGE-<nick>[-<client>]
 static char                slotClient[NUM_SLOTS][24]; // per-slot CLIENT label (empty = unassigned)
+static int                 slotLayout[NUM_SLOTS];     // per-slot keyboard LAYOUT (hbmode1::LAYOUT_US/DA)
 // The BLE advertising payload is 31 bytes: flags(3) + Complete Local Name(2 header + N) => N <= 26.
 // A name OVER this silently fails to advertise -- NimBLE keeps the PREVIOUS advert, so the board would
 // broadcast a name that disagrees with what it reports (caught by test_bt_hid_naming_live.py). So
@@ -385,6 +386,24 @@ static void loadSlotClients() {
     char key[8]; snprintf(key, sizeof(key), "cli%d", i);
     String v = pr.getString(key, "");
     snprintf(slotClient[i], sizeof(slotClient[i]), "%s", v.c_str());
+  }
+  pr.end();
+}
+
+// Per-slot keyboard LAYOUT persists in NVS ("lay<slot>") exactly like the client label, so each
+// bonded device remembers its own locale ("da" for a Danish host, "us" default) across reboot/reflash.
+static void persistSlotLayout(int slot) {
+  char key[8]; snprintf(key, sizeof(key), "lay%d", slot);
+  Preferences pr; pr.begin("hidbridge", false);
+  pr.putString(key, hbmode1::layoutName(slotLayout[slot]));
+  pr.end();
+}
+static void loadSlotLayouts() {
+  Preferences pr; pr.begin("hidbridge", true);
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    char key[8]; snprintf(key, sizeof(key), "lay%d", i);
+    String v = pr.getString(key, "us");
+    slotLayout[i] = hbmode1::layoutFromName(v.c_str());
   }
   pr.end();
 }
@@ -630,6 +649,7 @@ void setup() {
     slotConn[i] = BLE_HS_CONN_HANDLE_NONE;
     slotSub[i] = false;
     slotClient[i][0] = 0;
+    slotLayout[i] = hbmode1::LAYOUT_US;         // default each slot to US until set (loadSlotLayouts)
   }
 
   NimBLEDevice::init(DEVICE_NAME);
@@ -655,6 +675,7 @@ void setup() {
   deriveSlotAddresses();                       // needs init() done (public address available)
   loadNickname();                              // NVS nick, or a unique esp32-<mac> default
   loadSlotClients();                           // NVS per-slot client labels (survive reboot/reflash)
+  loadSlotLayouts();                           // NVS per-slot keyboard layout (us/da), same lifetime
   buildMdnsHost();                             // hidbridge-<nick> (unique per board)
   for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
   // Boot PARKED: advertise NOTHING until a customer explicitly asks for a device (connect/pair). This
@@ -802,6 +823,7 @@ static void esp32FillHello(JsonObject r) {
   JsonArray caps = r["caps"].to<JsonArray>();
   caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
+  caps.add("layout");                            // per-slot keyboard layout (us/da)
 #ifdef HIDBRIDGE_NET
   caps.add("net");
   r["mdns"] = String(g_mdnsHost) + ".local";     // how to reach this specific board over the network
@@ -840,6 +862,7 @@ static void fillIdentity(JsonObject o, int i) {
   o["conn"] = slotConn[i] != BLE_HS_CONN_HANDLE_NONE;
   o["sub"]  = (bool)slotSub[i];
   o["bonded"] = NimBLEDevice::isBonded(slotAddr[i]);   // a stored LTK exists for this identity
+  o["layout"] = hbmode1::layoutName(slotLayout[i]);    // this device's keyboard layout (us/da)
 }
 
 static void esp32Custom(const char* method, JsonObjectConst params, JsonObject result,
@@ -872,6 +895,26 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     JsonArray arr = result["slots"].to<JsonArray>();
     for (int i = 0; i < NUM_SLOTS; i++) fillIdentity(arr.add<JsonObject>(), i);
     result["adv"] = advSlot; result["tgt"] = tgtSlot;
+    return;
+  }
+  if (!strcmp(method, "layout")) {
+    // Get or set a SLOT's keyboard layout (per device). Addressed like connect/unpair: an explicit
+    // "slot" index or a "client" name, else the current target (tgtSlot). With a "name" ("us"/"da")
+    // it sets + persists; without, it just reports. Changeable any time (not only at pair).
+    *handled = true;
+    int slot = slotFromParams(params, tgtSlot);
+    if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "unknown/invalid 'client' or 'slot'"; return; }
+    const char* name = params["name"] | (const char*)nullptr;
+    if (name && name[0]) {
+      if (strcasecmp(name, "us") && strcasecmp(name, "da")) {
+        *errCode = -32602; *errMsg = "layout must be 'us' or 'da'"; return;
+      }
+      slotLayout[slot] = hbmode1::layoutFromName(name);
+      persistSlotLayout(slot);                // survive a reboot/reflash, like the client label does
+    }
+    result["slot"] = slot;
+    result["client"] = slotClient[slot];
+    result["layout"] = hbmode1::layoutName(slotLayout[slot]);
     return;
   }
   if (!strcmp(method, "pair")) {
@@ -966,6 +1009,10 @@ static void handleLine(String line, Print& out, NetSession* sess) {
 #else
     (void)sess;
 #endif
+    // The ACTIVE keyboard layout for this dispatch is the TARGET slot's -- so `type`/`key` land the
+    // right characters on whatever host tgtSlot points at (laptop3=da, a US host=us, independently).
+    hbmode1::setActiveLayout((tgtSlot >= 0 && tgtSlot < NUM_SLOTS) ? slotLayout[tgtSlot]
+                                                                   : hbmode1::LAYOUT_US);
     hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
@@ -1363,7 +1410,11 @@ const c=document.createElement('button');c.textContent='connect';c.onclick=()=>a
 const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',{slot:s.slot});
 const u=document.createElement('button');u.textContent='unpair';
 u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- also Forget it in its own Bluetooth settings afterwards.'))act('unpair',{slot:s.slot})};
-acts.append(c,d,u);tb.append(tr)});
+// per-device keyboard layout (us/da) -- the char->scancode map for THIS host, persisted per slot
+const ly=document.createElement('select');ly.title='keyboard layout of this device';
+['us','da'].forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
+ly.onchange=()=>act('layout',{slot:s.slot,name:ly.value});
+acts.append(c,d,u,ly);tb.append(tr)});
 setReady(tgtConn)}
 function setReady(on){ready=on;$('controls').disabled=!on;show($('notready'),!on);if(!on&&live)release()}
 async function act(m,p){try{await rpc(m,p);refresh()}catch(e){log(e.message)}}

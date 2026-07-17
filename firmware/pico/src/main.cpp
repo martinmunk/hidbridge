@@ -102,6 +102,7 @@ static char      slot_name[NUM_SLOTS][24];
 static bool      slot_addr_ready = false;     // slot addresses derived (needs HCI up)
 static int       adv_slot = 0;                // slot currently advertising
 static int       tgt_slot = 0;                // send-target slot (single-conn wrapper: informational)
+static int       slot_layout[NUM_SLOTS] = {}; // per-slot keyboard LAYOUT (hbmode1::LAYOUT_US/DA), RAM-only
 static int       conn_slot = -1;              // slot whose central is connected (-1 = none)
 static hci_con_handle_t pico_con_handle = HCI_CON_HANDLE_INVALID;  // for X (disconnect)
 
@@ -246,6 +247,9 @@ static void handle_line(char *line) {
     if (line[0] == 0) return;
 
     if (line[0] == '{') {                       // Mode 1: JSON-RPC (serial is trusted -> authed=true)
+        // The active keyboard layout is the TARGET slot's, so `type`/`key` map to the right chars.
+        hbmode1::setActiveLayout((tgt_slot >= 0 && tgt_slot < NUM_SLOTS) ? slot_layout[tgt_slot]
+                                                                         : hbmode1::LAYOUT_US);
         hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello);
         return;
     }
@@ -282,6 +286,21 @@ static void handle_line(char *line) {
         tgt_slot = n;
         Serial.print("OK tgt=");
         Serial.println(n);
+        return;
+    }
+    if (kind == 'L' || kind == 'l') {
+        // L<us|da> -- set the TARGET slot's keyboard layout (RAM-only on Pico); bare L reports it.
+        char *rest = line + 1;
+        while (*rest == ' ') rest++;
+        if (*rest) {
+            if (!strcasecmp(rest, "us") || !strcasecmp(rest, "da"))
+                slot_layout[tgt_slot] = hbmode1::layoutFromName(rest);
+            else { Serial.println("ERR badlayout"); return; }
+        }
+        Serial.print("OK slot=");
+        Serial.print(tgt_slot);
+        Serial.print(" layout=");
+        Serial.println(hbmode1::layoutName(slot_layout[tgt_slot]));
         return;
     }
     if (kind == 'S' || kind == 's') {
