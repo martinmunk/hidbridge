@@ -347,6 +347,9 @@ static bool                parked = false;   // true = intentionally NOT adverti
 // reset-detection) -- only the advertised name follows the nickname.
 static char                g_nick[24] = "";
 static char                g_advName[40] = "HIDBRIDGE-esp32";
+// mDNS hostname, derived from the nickname so MULTIPLE boards on one LAN don't collide on a fixed
+// name: "hidbridge-<nick>.local" (e.g. hidbridge-esp32-ee03.local). Built at boot from g_nick.
+static char                g_mdnsHost[48] = "hidbridge-esp32";
 
 // Forward declarations: the server callbacks (below) resume/point advertising; defined after setup().
 static void selectSlotAdvertise(int n, const char* name);
@@ -385,6 +388,20 @@ static void loadNickname() {
     snprintf(g_nick, sizeof(g_nick), "esp32-%02x%02x", v[1], v[0]);
   }
   snprintf(g_advName, sizeof(g_advName), "HIDBRIDGE-%s", g_nick);
+}
+
+// Build the mDNS hostname "hidbridge-<nick>" from g_nick, sanitised to hostname-safe chars
+// ([a-z0-9-], others -> '-'). Unique per board, so two boards on the LAN don't collide.
+static void buildMdnsHost() {
+  const char* prefix = "hidbridge-";
+  size_t i = 0;
+  for (; prefix[i] && i < sizeof(g_mdnsHost) - 1; i++) g_mdnsHost[i] = prefix[i];
+  for (const char* p = g_nick; *p && i < sizeof(g_mdnsHost) - 1; p++) {
+    char c = *p;
+    if (c >= 'A' && c <= 'Z') c += 32;
+    g_mdnsHost[i++] = ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') ? c : '-';
+  }
+  g_mdnsHost[i] = 0;
 }
 
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
@@ -583,6 +600,7 @@ void setup() {
   server->start();                             // starts the HID + battery + devinfo services
   deriveSlotAddresses();                       // needs init() done (public address available)
   loadNickname();                              // NVS nick, or a unique esp32-<mac> default
+  buildMdnsHost();                             // hidbridge-<nick> (unique per board)
   for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
   selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
   Serial.println("OK HIDBRIDGE-esp32 ready");
@@ -693,7 +711,7 @@ static void printNetStatus(Print& out) {
   out.print(" port=");
   out.print(HB_NET_PORT);
   out.print(" mdns=");
-  out.print(HB_MDNS_HOST ".local");
+  out.print(g_mdnsHost); out.print(".local");
   out.print(" token=");
   out.print(hasToken() ? "1" : "0");           // provisioned? (never the token itself)
   out.print(" clients=");
@@ -730,6 +748,7 @@ static void esp32FillHello(JsonObject r) {
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
 #ifdef HIDBRIDGE_NET
   caps.add("net");
+  r["mdns"] = String(g_mdnsHost) + ".local";     // how to reach this specific board over the network
 #endif
 }
 
@@ -1070,11 +1089,17 @@ input,button{font-size:1em;padding:.4em;margin:.15em}fieldset{margin:.6em 0;bord
 <input id=txt size=28 placeholder="text to type"> <button onclick=type_()>type</button>
 <button onclick="key('enter')">enter</button> <button onclick="key('backspace')">bksp</button></fieldset>
 <fieldset><legend>pointer</legend>
-tap <input id=tx type=number step=.01 value=.5 style=width:5em>
-<input id=ty type=number step=.01 value=.5 style=width:5em> <button onclick=tap()>tap</button><br>
-move <input id=dx type=number value=20 style=width:5em>
-<input id=dy type=number value=0 style=width:5em> <button onclick=move_()>move</button>
-<button onclick=click_()>click</button></fieldset><div id=out></div><script>
+<label>tap at x <input id=tx type=number step=.01 min=0 max=1 value=.5 style=width:4.5em
+ title="0=left edge .. 1=right edge"> y <input id=ty type=number step=.01 min=0 max=1 value=.5
+ style=width:4.5em title="0=top edge .. 1=bottom edge"></label> <button onclick=tap()>tap</button>
+<small>x,y are a FRACTION of the screen: 0 = left/top .. 1 = right/bottom (0.5, 0.5 = centre).</small>
+<hr style=border:none;border-top:1px solid #ddd>
+<label>move by dx <input id=dx type=number value=20 style=width:4.5em title="+ right, - left">
+ dy <input id=dy type=number value=0 style=width:4.5em title="+ down, - up"></label>
+<button onclick=move_()>move</button> <button onclick=click_()>click</button>
+<small>relative move in HID units (~pixels): dx + right / - left, dy + down / - up. Note: iOS acts
+only on RELATIVE moves (AssistiveTouch); absolute tap works on Android/desktop hosts.</small>
+</fieldset><div id=out></div><script>
 let id=0;async function rpc(method,params){try{
 const r=await fetch('/rpc',{method:'POST',headers:{'X-Auth-Token':tok.value},
 body:JSON.stringify({jsonrpc:'2.0',id:++id,method,params:params||{}})});
@@ -1113,7 +1138,7 @@ static void netSetup() {
     String ssid = wp.getString("wifi_ssid", ""), pass = wp.getString("wifi_pass", "");
     wp.end();
     WiFi.mode(WIFI_STA);
-    WiFi.setHostname(HB_MDNS_HOST);
+    WiFi.setHostname(g_mdnsHost);
     if (ssid.length()) {
       WiFi.begin(ssid.c_str(), pass.c_str());
       Serial.print("wifi connecting ssid="); Serial.println(ssid);
@@ -1127,7 +1152,7 @@ static void netSetup() {
     Serial.println("ERR eth init");            // wrong PHY/pins for this board, or no PHY at all
     return;
   }
-  ETH.setHostname(HB_MDNS_HOST);
+  ETH.setHostname(g_mdnsHost);
 #endif
   tcpServer.begin();
   tcpServer.setNoDelay(true);
@@ -1136,7 +1161,7 @@ static void netSetup() {
   webServer.on("/", handleWebRoot);
   webServer.on("/rpc", HTTP_POST, handleWebRpc);
   webServer.begin();
-  if (MDNS.begin(HB_MDNS_HOST)) {
+  if (MDNS.begin(g_mdnsHost)) {
     MDNS.addService("hidbridge", "tcp", HB_NET_PORT);   // the raw JSON-RPC / frame line port
     MDNS.addService("http", "tcp", 80);                 // the control webpage
   }
@@ -1146,7 +1171,7 @@ static void netSetup() {
   {
     String tok = getToken();
     if (tok.length() >= HB_MIN_TOKEN_LEN) {
-      ArduinoOTA.setHostname(HB_MDNS_HOST);
+      ArduinoOTA.setHostname(g_mdnsHost);
       ArduinoOTA.setPassword(tok.c_str());
       ArduinoOTA.begin();
       Serial.println("OK ota enabled");
@@ -1157,7 +1182,7 @@ static void netSetup() {
   Serial.print("OK net listening port=");
   Serial.print(HB_NET_PORT);
   Serial.print(" mdns=");
-  Serial.print(HB_MDNS_HOST ".local");
+  Serial.print(g_mdnsHost); Serial.print(".local");
   Serial.print(" token=");
   Serial.println(hasToken() ? "1" : "0");      // 0 = unprovisioned: TCP cannot drive HID yet
 }
