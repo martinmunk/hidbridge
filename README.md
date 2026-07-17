@@ -3,18 +3,19 @@
 > **Note:** `hidbridge` is a **temporary placeholder name** for this project pending a rename.
 > It is used for the repo folder and the Python package throughout; expect it to change.
 
-**Drive a Bluetooth-LE HID target -- an iPad, iPhone, or any BLE-HID host -- from Linux.**
-Type text, press keys, move and click the pointer, tap at exact screen coordinates, and enter a
-lock-screen passcode, all programmatically from a Linux host.
+**Drive any Bluetooth-LE HID host from Linux.** Type text, press keys, move and click the pointer,
+and enter a lock-screen passcode -- all programmatically from a Linux host, over a standard
+HID-over-GATT (HOG) link that any BLE-HID central accepts (phones, tablets, laptops, desktops).
 
-hidbridge presents the HID keyboard + pointer to the target one of two ways:
+hidbridge presents the HID keyboard + relative pointer to the host one of two ways:
 
 - **BlueZ backend (`dongle`)** -- the Linux host's *own* Bluetooth stack (a USB adapter). A small
   daemon exports a HID-over-GATT peripheral; the CLI drives it.
 - **MCU backend (`pico` / `esp32`)** -- a **Raspberry Pi Pico 2 W** or an **ESP32** running its own
-  BLE stack (firmware in [`firmware/`](firmware/)), reached over a **USB serial** link. The MCU owns
-  its BLE bonds, so it sidesteps the iOS HID-over-GATT (CCCD / Report-Reference) subscription quirk
-  that the BlueZ path fights -- it "just works" for keystroke/pointer delivery to iOS.
+  BLE stack (firmware in [`firmware/`](firmware/)), reached over a **USB serial** link (or, on an
+  Ethernet/WiFi ESP32, over the network). The MCU owns its BLE bonds, so it sidesteps the
+  HID-over-GATT input-report subscription quirk (CCCD / Report-Reference) that the BlueZ path fights
+  with some hosts -- it "just works" for keystroke/pointer delivery.
 
 Both backends emit the **exact same report bytes** (from one report descriptor), so behaviour is
 identical regardless of transport -- and the MCU firmware installs that descriptor byte-for-byte, a
@@ -25,40 +26,40 @@ parity test guards it.
 ```
    Linux host                         serial            MCU (Pico 2W / ESP32)      BLE
   +-------------------+          (USB, 115200)         +--------------------+
-  |  hidbridge CLI    |  ---- K/M/A/D report frames -->|  BTstack / NimBLE  | ~~~ BLE HID ~~> iPad /
-  |  (hidbridge.*)    |  <---- OK / EVT ready ----------|  HOG peripheral    |                iPhone /
-  |  reports.py       |                                 |  own bond database |                any host
+  |  hidbridge CLI    |  ---- K/M report frames ------>|  BTstack / NimBLE  | ~~~ BLE HID ~~> any
+  |  (hidbridge.*)    |  <---- OK / EVT ready ----------|  HOG peripheral    |               BLE-HID
+  |  reports.py       |                                 |  own bond database |                host
   +---------+---------+                                 +--------------------+
             |
             |  (alternative backend: the host's OWN BlueZ stack)
             v
   +-------------------+   D-Bus    +-----------+   BLE
-  |  ble_hid daemon   |<---------->|  BlueZ    | ~~~ BLE HID ~~> target
+  |  ble_hid daemon   |<---------->|  BlueZ    | ~~~ BLE HID ~~> host
   |  (HID-over-GATT)  |            |  adapter  |
   +-------------------+            +-----------+
 ```
 
 ## Headline features
 
-- **One report layer, three transports.** Keyboard, relative pointer, **absolute pointer** (tap at
-  an exact screen fraction), and a **digitizer/touch** report -- identical bytes over BlueZ, Pico,
-  or ESP32.
+- **One report layer, three transports.** Keyboard + relative pointer -- identical bytes over BlueZ,
+  Pico, or ESP32.
 - **Per-bond identities.** An MCU board presents a **distinct BLE address + a target-scoped
-  advertised name per bonded device** ("host slots"), so it can be bonded to several iPads and
-  switch between them deterministically -- no re-pairing.
-- **Simultaneous dual-hold (ESP32).** One ESP32 holds **two iPads connected at once** on distinct
-  addresses (no time-slicing); `T<n>` routes report frames to a chosen target.
-- **Deterministic park / handoff (`X` / `O`).** Cleanly disconnect a target while keeping the bond
-  (`X`), or park (stop advertising, keep links + bonds) (`O`), for reliable cross-board / cross-iPad
-  handoff.
-- **Reset-free serial link.** The transport avoids the DTR/RTS auto-reset that would reboot a
-  running MCU mid-session; a readiness handshake (`subscribed=` / `EVT ready`) means the first
-  keystroke after (re)connect actually lands instead of being dropped in the iOS activation window.
+  advertised name per bonded host** ("host slots"), so it can be bonded to several devices and switch
+  between them deterministically -- no re-pairing. The ESP32 remembers up to ten.
+- **Simultaneous dual-hold (ESP32).** One ESP32 holds **two hosts connected at once** on distinct
+  addresses (no time-slicing); it routes report frames to a chosen target.
+- **Encrypted network path (ESP32).** An Ethernet/WiFi ESP32 also serves the same protocol over
+  **TLS-PSK** on TCP (the provisioned token is the pre-shared key), plus a self-contained control
+  web page.
+- **Deterministic park / handoff.** Cleanly disconnect a target while keeping the bond, or park (stop
+  advertising, keep links + bonds), for reliable cross-board / cross-host handoff.
+- **Reset-free serial link.** The transport avoids the DTR/RTS auto-reset that would reboot a running
+  MCU mid-session; a readiness handshake (`subscribed=` / `EVT ready`) means the first keystroke
+  after (re)connect actually lands instead of being dropped in the host's post-connect activation
+  window.
 - **Multi-adapter / multi-daemon isolation.** Per-adapter socket + D-Bus object naming lets several
   BlueZ dongles run side by side (even the TP-Link UB500 defect that makes dongles share a BD
   address).
-- **Named targets + hands-free trust-overlay dismissal.** A `device -> backend` registry, and a
-  helper that answers the iOS "Trust This Computer" dialog and the passcode-confirm sheet.
 
 ## Repository layout
 
@@ -73,7 +74,7 @@ hidbridge/
   firmware/            the MCU firmware  (has its own README)
     pico/              Raspberry Pi Pico 2 W  (PlatformIO, BTstack HOG)
     esp32/             ESP32  (PlatformIO, NimBLE-Arduino)
-  docs/                deep-dive notes (report format, MCU approach, multi-device, trust overlay)
+  docs/                deep-dive notes (report format, MCU approach, multi-device, network path)
 ```
 
 Why one repo? Python and firmware share a strict contract -- the HID report descriptor and the
@@ -90,7 +91,7 @@ straightforward if desired.
 ```bash
 cd python
 pip install -e ".[mcu]"
-hidbridge --backend pico type "hello ipad"
+hidbridge --backend pico type "hello world"
 hidbridge --backend pico move 40 0
 hidbridge --backend pico click left
 ```
@@ -100,7 +101,7 @@ hidbridge --backend pico click left
 ```bash
 cd python
 pip install -e ".[dongle]"      # or: sudo apt install python3-dbus python3-gi
-sudo hidbridge pair-mode        # advertise as a keyboard; pair from the iPad's Bluetooth settings
+sudo hidbridge pair-mode        # advertise as a keyboard; pair from the host's Bluetooth settings
 sudo hidbridge connect mini5
 sudo hidbridge type "hello"
 ```
@@ -111,11 +112,13 @@ the boards.
 
 ## Security / secrets
 
-- The device **passcode PIN** is read at run time from `~/.config/bt_hid/idevice.pin` -- a `0600`
+- The host **passcode PIN** is read at run time from `~/.config/bt_hid/idevice.pin` -- a `0600`
   file **outside** this repo, **never committed and never logged**. The passcode is expanded to HID
   frames locally; only frames go over the wire.
-- No tokens, credentials, captures, or real device identities are committed. `.gitignore` blocks
-  `*.pin`, `targets.json`, and build artifacts.
+- The **network auth token** (also the TLS pre-shared key) lives in `~/.config/bt_hid/net.token`
+  (`0600`, git-ignored), is provisioned onto the board over USB only, and is never logged.
+- No tokens, credentials, captures, or real host identities are committed. `.gitignore` blocks
+  `*.pin`, `*.token`, `targets.json`, and build artifacts.
 
 ## License
 

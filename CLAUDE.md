@@ -4,10 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`hidbridge` drives a BLE-HID target (iPad / iPhone / any HOG host) from Linux: type text, press keys,
-move/click the pointer, tap at absolute screen coordinates, enter a lock-screen passcode. Two halves
-in one repo because they share a strict contract (the HID report descriptor + the serial wire
-protocol): `python/` (the package + CLI) and `firmware/` (Pico 2 W / ESP32 PlatformIO firmware).
+`hidbridge` drives any BLE-HID (HOG) host from Linux -- phone, tablet, laptop, or desktop: type text,
+press keys, move/click the relative pointer, enter a lock-screen passcode. Two halves in one repo
+because they share a strict contract (the HID report descriptor + the serial wire protocol):
+`python/` (the package + CLI) and `firmware/` (Pico 2 W / ESP32 PlatformIO firmware).
+
+Support is deliberately RELATIVE-ONLY (keyboard report ID 1 + relative mouse ID 2). Absolute-mouse
+and digitizer/touch reports were removed on purpose: they made desktop hosts (GNOME/libinput) treat
+the device as a touchscreen and hide the cursor, and were proven-negative on the tested hosts. The
+code + git history keep the door open to revisit an absolute path later.
 
 `hidbridge` is a **placeholder name pending a rename**. The code predates it: modules, env vars
 (`BT_HID_*`), config paths (`~/.config/bt_hid/`), and docstrings still say `bt_hid`. That mismatch is
@@ -45,7 +50,7 @@ There is no CI yet.
 The suite is offline by default and must stay that way: `pytest` on a box with no hardware runs
 clean. Tests needing real hardware gate on an env var and skip otherwise -- `BT_HID_LOOPBACK=1` (two
 adapters + root), `BT_HID_CENTRAL=1` (built-in adapter + an MCU), `BT_HID_HW_ESP32=1`, and the
-`*_live.py` files (`BT_HID_LIVE_*`, need a real bonded iPad). `BT_HID_PICO_PORT` / `BT_HID_ESP32_PORT`
+`*_live.py` files (`BT_HID_LIVE_*`, need a real bonded host). `BT_HID_PICO_PORT` / `BT_HID_ESP32_PORT`
 point at the boards. New tests for pure logic must not reach for hardware; new hardware tests must
 follow the skip convention.
 
@@ -55,9 +60,9 @@ Layers, top to bottom -- each is injectable at the layer below, which is why the
 connect/act/disconnect lifecycle unit-tests with no hardware:
 
 - **`reports.py`** -- pure stdlib, zero bluetooth deps. `REPORT_DESCRIPTOR` plus the byte builders for
-  keyboard (ID 1), relative mouse (ID 2), absolute mouse (ID 3), digitizer/touch (ID 4). The single
-  source of truth for every byte on the wire. Keep it import-clean (no socket/dbus/gi) -- it must
-  import under both uv's CPython and the system python.
+  keyboard (ID 1) + relative mouse (ID 2) -- the relative-only report set. The single source of truth
+  for every byte on the wire. Keep it import-clean (no socket/dbus/gi) -- it must import under both
+  uv's CPython and the system python.
 - **`controller.py`** -- `HidController` turns actions into `(kind, body)` frames and hands them to a
   pluggable transport. `RecordingTransport` asserts exact frames in tests.
 - **`conn.py`** -- `HidSession`, the backend-agnostic connect-on-demand context manager: enter =
@@ -76,8 +81,8 @@ families:
   exist there) and usually root. A venv sees them only if built with `--system-site-packages`.
 - **mcu** (`pico`, `esp32`) -- the board runs its own BLE stack and owns its bond database, reached
   over USB serial. Needs only pyserial: no dbus, no daemon, no root. This path exists because BlueZ
-  loses the fight with iOS over HID input-report CCCD / Report-Reference subscription; BTstack and
-  NimBLE serve HOG the iOS-compatible way.
+  loses the fight with some hosts over HID input-report CCCD / Report-Reference subscription; BTstack
+  and NimBLE serve HOG the way those hosts expect.
 - **net** -- an Ethernet-equipped ESP32 (`esp32-ethernet-kit` firmware, `-DHIDBRIDGE_NET`) serving the
   same line protocol over TCP 3333 + mDNS. `transport_net`/`link_net` are thin subclasses of the
   esp32 transport/link -- the wire changes (a `socket_link.SocketLine` instead of a tty), the protocol
@@ -91,8 +96,9 @@ The ESP32/Pico firmware can be driven two ways over the same channel; a line is 
 char (`{` = Mode 1, else Mode 2). Both coexist.
 
 - **Mode 2 ("just a radio", the default + original):** the host builds the exact report bytes
-  (`reports.py` + `controller.py`) and the board relays them -- `K/M/A/D<hex>` frame lines. This is
-  what preserves the multi-backend byte-parity and keeps report logic host-side + offline-testable.
+  (`reports.py` + `controller.py`) and the board relays them -- `K`/`M<hex>` frame lines (keyboard +
+  relative mouse). This preserves the multi-backend byte-parity and keeps report logic host-side +
+  offline-testable.
 - **Mode 1 ("tell it WHAT"):** the board owns the report building. The host sends **JSON-RPC 2.0**
   (`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`); the firmware builds the
   reports. The report layer is native C++ in `firmware/shared/hidbridge_mode1.h` (shared by both
@@ -111,28 +117,30 @@ char (`{` = Mode 1, else Mode 2). Both coexist.
   edit the report map on one side alone.
 - **The reset-free serial open in `serial_link.py` is load-bearing, not clever code.** It leaves the
   tty at baud B0 on close so the kernel skips `tty_port_raise_dtr_rts()` on the next open -- otherwise
-  RTS pulses EN, the ESP32 reboots, and its bonded BLE link to the iPad dies. pyserial's documented
+  RTS pulses EN, the ESP32 reboots, and its bonded BLE link to the host dies. pyserial's documented
   `dtr=False; rts=False` does *not* prevent this (the kernel raise happens inside `os.open`). Any
   refactor of the open path must preserve this.
-- **Readiness gate before the first keystroke.** iOS has an activation window where reports are
-  dropped. Wait for `EVT ready` / `subscribed=1` (MCU) or the daemon's `status` subscription reply
-  (dongle) -- that's what `HidSession` does.
+- **Readiness gate before the first keystroke.** Some hosts have a post-connect activation window
+  where reports are dropped. Wait for `EVT ready` / `subscribed=1` (MCU) or the daemon's `status`
+  subscription reply (dongle) -- that's what `HidSession` does.
 - **The passcode is a secret with a hard rule.** Read at run time from `~/.config/bt_hid/idevice.pin`
   (0600, outside the repo), expanded to HID frames locally, never logged, never in a repr, never sent
   as text. `reports.passcode_reports()` keeps no copy. The **network auth token**
   (`~/.config/bt_hid/net.token`, 0600, git-ignored) follows the same rule -- never logged/repr'd, and
   provisioned onto the board over USB only (the firmware refuses `W<token>` over TCP).
-- **The `net` TCP path is remote input-injection and must stay fail-closed.** No token provisioned =>
-  `@` auth can never succeed => the board can't be driven over the LAN. Report bytes (incl. passcode
-  frames) cross the LAN in the clear -- it's a trusted-network interface, not a confidential one. All
-  firmware network code is behind `#ifdef HIDBRIDGE_NET`; the `esp32dev` serial build is unaffected.
+- **The `net` TCP path is remote input-injection and must stay fail-closed.** It is **TLS-PSK
+  encrypted**: the provisioned token is the pre-shared key, so no token => no TLS port opens => the
+  board can't be driven over the LAN, and the report bytes (incl. passcode frames) are encrypted on
+  the wire. Security rests entirely on the token secrecy. The control web page on :80 stays plain HTTP
+  (browsers can't speak TLS-PSK) -- the one cleartext surface. All firmware network code is behind
+  `#ifdef HIDBRIDGE_NET`; the `esp32dev` serial build is unaffected.
 - **Per-adapter naming isn't cosmetic.** `naming.py` derives the socket path, D-Bus object paths, and
   advertised name from the `hciN` slug so multiple daemons coexist. Keying on the BD address would
   break: the TP-Link UB500 dongles here *share* one, non-reprogrammable.
 - **A BlueZ dongle has one BLE identity for all its bonds**, so it can't be steered to "the right
-  iPad" by identity and holds one at a time; `targets.py::resolve()` warns on that collision. MCU
-  boards get per-bond identities ("host slots", `I<n>`/`T<n>`) -- the ESP32 can hold two iPads
-  connected at once.
+  host" by identity and holds one at a time; `targets.py::resolve()` warns on that collision. MCU
+  boards get per-bond identities ("host slots", `I<n>`/`T<n>`) -- the ESP32 remembers up to ten and
+  can hold two connected at once.
 
 ## Conventions
 

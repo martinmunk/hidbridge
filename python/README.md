@@ -1,9 +1,8 @@
 # hidbridge (Python)
 
 The Python side of **hidbridge** -- a Linux toolbox that presents a Bluetooth-LE HID
-keyboard + pointer to a target device (an iPad, iPhone, or any BLE-HID host) and drives it
-programmatically: type text, press keys, move/click the pointer, absolute-position taps, and
-enter a lock-screen passcode.
+keyboard + relative pointer to any BLE-HID (HOG) host and drives it programmatically: type text,
+press keys, move/click the pointer, and enter a lock-screen passcode.
 
 Two backends, one report layer:
 
@@ -12,11 +11,12 @@ Two backends, one report layer:
   Needs `dbus` + `PyGObject` (system python) and usually root.
 - **mcu** -- a **Raspberry Pi Pico 2 W** or an **ESP32** running the firmware in
   `../firmware/`, reached over **USB serial**. The MCU owns its own BLE stack + bond database,
-  so it sidesteps the iOS HID-over-GATT CCCD/Report-Reference quirk that trips BlueZ. Needs only
-  `pyserial`; no dbus, no daemon, no root.
-- **net** -- an **Ethernet-equipped ESP32** running that same firmware, reached over **TCP** (no USB
-  cable): `--backend net --host hidbridge-esp32.local`. Token-authenticated and fails closed; set the
-  token on the board over USB once with `hidbridge net-provision`. Stdlib-only (sockets); no pyserial,
+  so it sidesteps the HID-over-GATT CCCD/Report-Reference subscription quirk that trips BlueZ with
+  some hosts. Needs only `pyserial`; no dbus, no daemon, no root.
+- **net** -- an **Ethernet/WiFi ESP32** running that same firmware, reached over **TCP** (no USB
+  cable): `--backend net --host hidbridge-<nick>.local`. **TLS-PSK encrypted** and fails closed -- the
+  provisioned token is the pre-shared key; set it on the board over USB once with
+  `hidbridge net-provision`. Needs Python 3.13+ (ssl PSK). Stdlib-only (sockets + ssl); no pyserial,
   dbus, daemon, or root. See [`../docs/bt-hid-network-backend.md`](../docs/bt-hid-network-backend.md).
 
 Both backends emit the **exact same report bytes** via `hidbridge.reports` (the single source of
@@ -46,12 +46,12 @@ For a venv that still sees them, create it with `--system-site-packages`
 
 ```bash
 # MCU backend (a Pico on /dev/ttyACM0) -- no root, no daemon
-hidbridge --backend pico type "hello ipad"
+hidbridge --backend pico type "hello world"
 hidbridge --backend pico move 40 0
 hidbridge --backend pico click left
 
 # dongle backend (BlueZ) -- needs the daemon up + root
-sudo hidbridge pair-mode                 # advertise as a keyboard; pair from iPad Bluetooth settings
+sudo hidbridge pair-mode                 # advertise as a keyboard; pair from the host's Bluetooth settings
 sudo hidbridge connect mini5             # (re)connect a bonded target
 sudo hidbridge type "hello"
 sudo hidbridge unlock                    # types the passcode from ~/.config/bt_hid/idevice.pin (never logged)
@@ -105,7 +105,7 @@ pytest                    # offline suite (hardware/live tests skip automaticall
 
 Hardware-gated tests opt in via env vars, e.g. `BT_HID_LOOPBACK=1` (on-host BLE loopback,
 needs two adapters + root) or `BT_HID_CENTRAL=1` (central self-test, needs the built-in adapter
-+ an MCU). `*_live.py` tests need a real bonded iPad.
++ an MCU). `*_live.py` tests need a real bonded host.
 
 ## Lint
 
