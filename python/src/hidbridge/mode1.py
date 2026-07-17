@@ -161,6 +161,15 @@ class Mode1Client:
     def click(self, button: str = "left", *, dry: bool = False) -> dict:
         return self.call("click", {"button": button}, dry=dry)
 
+    def press(self, button: str = "left", *, dry: bool = False) -> dict:
+        """Hold a mouse button DOWN (for click-and-drag). Subsequent move/scroll reports carry it
+        until release()."""
+        return self.call("press", {"button": button}, dry=dry)
+
+    def release(self, button: str = "left", *, dry: bool = False) -> dict:
+        """Release a button held by press()."""
+        return self.call("release", {"button": button}, dry=dry)
+
     def scroll(self, clicks: int, *, dry: bool = False) -> dict:
         return self.call("scroll", {"clicks": int(clicks)}, dry=dry)
 

@@ -115,21 +115,33 @@ inline void emitMouse(ReportSink& s, uint8_t buttons, int dx, int dy, int wheel)
                    (uint8_t)(clampi(dy,-128,127) & 0xFF), (uint8_t)(clampi(wheel,-128,127) & 0xFF) };
   emitReport(s, RID_MOUSE, b, 4);
 }
+// Buttons currently HELD down (a bitmask), for click-and-drag: press() sets a bit, release() clears
+// it, and every move/scroll report carries the held buttons so the drag survives the motion. 0 in the
+// idle state, so a normal move still reports buttons=0 (byte-identical to reports.py -- the drift
+// guard stays green).
+static uint8_t g_heldButtons = 0;
 inline void emitMove(ReportSink& s, int dx, int dy) {
   int xs[80], ys[80], nx = 0, ny = 0, r;
   for (r = dx; r != 0 && nx < 80; ) { int st = clampi(r,-127,127); xs[nx++] = st; r -= st; }
   for (r = dy; r != 0 && ny < 80; ) { int st = clampi(r,-127,127); ys[ny++] = st; r -= st; }
   int n = nx > ny ? nx : ny; if (n < 1) n = 1;
-  for (int i = 0; i < n; i++) emitMouse(s, 0, i < nx ? xs[i] : 0, i < ny ? ys[i] : 0, 0);
+  for (int i = 0; i < n; i++) emitMouse(s, g_heldButtons, i < nx ? xs[i] : 0, i < ny ? ys[i] : 0, 0);
 }
 inline void emitScroll(ReportSink& s, int clicks) {
   bool any = false;
-  for (int r = clicks; r != 0; ) { int st = clampi(r,-127,127); emitMouse(s,0,0,0,st); r -= st; any = true; }
-  if (!any) emitMouse(s, 0, 0, 0, 0);
+  for (int r = clicks; r != 0; ) { int st = clampi(r,-127,127); emitMouse(s,g_heldButtons,0,0,st); r -= st; any = true; }
+  if (!any) emitMouse(s, g_heldButtons, 0, 0, 0);
 }
 inline void emitClick(ReportSink& s, uint8_t button) {
-  emitMouse(s, button, 0, 0, 0);
-  emitMouse(s, 0, 0, 0, 0);
+  emitMouse(s, (uint8_t)(g_heldButtons | button), 0, 0, 0);
+  emitMouse(s, g_heldButtons, 0, 0, 0);
+}
+// A dry run must NOT mutate the held-button state (it only shows the bytes that WOULD be sent).
+inline void emitPress(ReportSink& s, uint8_t button) {
+  uint8_t nb = g_heldButtons | button; if (!s.dry) g_heldButtons = nb; emitMouse(s, nb, 0, 0, 0);
+}
+inline void emitRelease(ReportSink& s, uint8_t button) {
+  uint8_t nb = (uint8_t)(g_heldButtons & ~button); if (!s.dry) g_heldButtons = nb; emitMouse(s, nb, 0, 0, 0);
 }
 
 inline int hexNibble(char c) {
@@ -230,6 +242,12 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
   } else if (!strcmp(method, "click")) {
     int bit = buttonNameToBit(params["button"] | "left");
     if (bit < 0) argErr = "unknown 'button'"; else emitClick(s, (uint8_t)bit);
+  } else if (!strcmp(method, "press")) {       // hold a button DOWN (for click-and-drag)
+    int bit = buttonNameToBit(params["button"] | "left");
+    if (bit < 0) argErr = "unknown 'button'"; else emitPress(s, (uint8_t)bit);
+  } else if (!strcmp(method, "release")) {     // release a held button
+    int bit = buttonNameToBit(params["button"] | "left");
+    if (bit < 0) argErr = "unknown 'button'"; else emitRelease(s, (uint8_t)bit);
   } else if (!strcmp(method, "scroll")) {
     emitScroll(s, params["clicks"] | 0);
   } else if (!strcmp(method, "frames")) {

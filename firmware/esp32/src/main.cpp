@@ -1370,38 +1370,44 @@ try{await rpc('pair',{client:n});$('newclient').value='';refresh()}catch(e){log(
 const type_=()=>rpc('type',{text:$('txt').value}).then(log,e=>log(e.message));
 const key=(name,mod)=>rpc('key',{name,mod:mod||0}).then(log,e=>log(e.message));
 
-// conflation sender: at most one request in flight; discrete events queued in order, motion summed.
-let busy=false,pdx=0,pdy=0,psc=0,q=[];
-function pump(){if(busy||!ready)return;let job=null;
-if(q.length)job=q.shift();
-else if(pdx||pdy){job={m:'move',p:{dx:pdx,dy:pdy}};pdx=pdy=0}
-else if(psc){job={m:'scroll',p:{clicks:psc}};psc=0}
-if(!job)return;busy=true;rpc(job.m,job.p).then(()=>{sent++;if(live)setPadLbl()}).catch(()=>{}).finally(()=>{busy=false;pump()})}
+// Sender: at most one request in flight (ack-gated). Pointer MOTION is coalesced into one queued
+// 'move' and flushed once per animation frame -- this bounds the rate AND combines the axis-separated
+// pointer events the browser delivers, so diagonal motion stays diagonal instead of stair-stepping.
+// Discrete events keep their order + flush at once; holding a button (press..release) makes the board
+// carry it through the moves in between = click-and-drag.
+let busy=false,q=[],rafQ=false;
+function flush(){if(busy||!ready||!q.length)return;const job=q.shift();busy=true;
+rpc(job.m,job.p).then(()=>{sent++;if(live)setPadLbl()}).catch(()=>{}).finally(()=>{busy=false;flush()})}
+function enq(job){q.push(job);flush()}
+function enqMove(dx,dy){const t=q[q.length-1];if(t&&t.m==='move'){t.p.dx+=dx;t.p.dy+=dy}else q.push({m:'move',p:{dx,dy}})}
+const BTN=e=>['left','middle','right'][e.button]||'left';
 const NAMED={Enter:'enter',Backspace:'backspace',Tab:'tab',Delete:'delete',' ':'space',
 ArrowRight:'right',ArrowLeft:'left',ArrowUp:'up',ArrowDown:'down',Home:'home',End:'end',PageUp:'pageup',PageDown:'pagedown'};
-// Esc is NOT forwarded: the browser reserves it to exit pointer lock (that is how you release live
-// control). Use the on-screen 'esc' button to actually send Escape to the device.
+// Esc is NOT forwarded: the browser reserves it to exit pointer lock. Use the on-screen 'esc' button.
 function onKey(e){if(!live)return;if(e.key==='Escape')return;e.preventDefault();
-const mod=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0);
-const nm=NAMED[e.key];
-if(nm)q.push({m:'key',p:{name:nm,mod}});
-else if(e.key.length===1){if(mod&13)q.push({m:'key',p:{name:e.key.toLowerCase(),mod}});
-else q.push({m:'type',p:{text:e.key}})}else return;pump()}
-function onMove(e){if(!live)return;pdx+=e.movementX;pdy+=e.movementY;pump()}
-function onBtn(e){if(!live)return;e.preventDefault();q.push({m:'click',p:{button:['left','middle','right'][e.button]||'left'}});pump()}
-function onWheel(e){if(!live)return;e.preventDefault();psc+=e.deltaY>0?-1:1;pump()}
+const mod=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0);const nm=NAMED[e.key];
+if(nm)enq({m:'key',p:{name:nm,mod}});
+else if(e.key.length===1){if(mod&13)enq({m:'key',p:{name:e.key.toLowerCase(),mod}});else enq({m:'type',p:{text:e.key}})}}
+function onMove(e){if(!live)return;enqMove(e.movementX,e.movementY);
+if(!rafQ){rafQ=true;requestAnimationFrame(()=>{rafQ=false;flush()})}}
+function onDown(e){if(!live)return;e.preventDefault();enq({m:'press',p:{button:BTN(e)}})}
+function onUp(e){if(!live)return;e.preventDefault();enq({m:'release',p:{button:BTN(e)}})}
+function onWheel(e){if(!live)return;e.preventDefault();const t=q[q.length-1],c=e.deltaY>0?-1:1;
+if(t&&t.m==='scroll')t.p.clicks+=c;else enq({m:'scroll',p:{clicks:c}})}
 const pad=$('pad');let sent=0;
 // LIVE is tied STRICTLY to the pointer-lock state, so the box can never claim LIVE while the cursor
 // is actually free. Clicking the pad requests the lock; goLive/release fire only from
 // pointerlockchange (locked -> goLive, unlocked -> release). Handlers sit on the DOCUMENT so a locked
 // mouse is captured no matter where the OS thinks the pointer is.
 function setPadLbl(){$('padlbl').textContent=live?('LIVE -- '+sent+' sent -- Esc to release'):'Click to take live control'}
-function goLive(){live=true;sent=0;pad.classList.add('live');setPadLbl();
-document.addEventListener('mousemove',onMove);document.addEventListener('mousedown',onBtn);
+function goLive(){live=true;sent=0;q=[];pad.classList.add('live');setPadLbl();
+document.addEventListener('mousemove',onMove);document.addEventListener('mousedown',onDown);
+document.addEventListener('mouseup',onUp);
 document.addEventListener('wheel',onWheel,{passive:false});document.addEventListener('keydown',onKey)}
 function release(){live=false;pad.classList.remove('live');setPadLbl();
 if(document.pointerLockElement===pad)document.exitPointerLock();
-document.removeEventListener('mousemove',onMove);document.removeEventListener('mousedown',onBtn);
+document.removeEventListener('mousemove',onMove);document.removeEventListener('mousedown',onDown);
+document.removeEventListener('mouseup',onUp);
 document.removeEventListener('wheel',onWheel);document.removeEventListener('keydown',onKey)}
 pad.addEventListener('click',()=>{if(!live&&ready){const p=pad.requestPointerLock();if(p&&p.catch)p.catch(()=>{})}});
 document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;

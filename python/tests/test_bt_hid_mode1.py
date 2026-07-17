@@ -70,6 +70,8 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
     c.wake()
     c.move(3, -4)
     c.click("back")
+    c.press("left")
+    c.release("left")
     c.scroll(-2)
 
     # every request is well-formed JSON-RPC 2.0 with an increasing id
@@ -81,6 +83,8 @@ def test_requests_are_valid_jsonrpc_with_expected_method_params():
         ("wake", {}),
         ("move", {"dx": 3, "dy": -4}),
         ("click", {"button": "back"}),
+        ("press", {"button": "left"}),
+        ("release", {"button": "left"}),
         ("scroll", {"clicks": -2}),
     ]
 
