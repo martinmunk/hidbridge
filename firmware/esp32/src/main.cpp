@@ -1377,7 +1377,8 @@ align-items:center;justify-content:center;text-align:center;user-select:none;cur
 
 <section id=login>
 <p>Enter the board token to unlock control.</p>
-<div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off>
+<div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off
+onkeydown="if(event.key=='Enter')unlock()">
 <button onclick=unlock()>Unlock</button></div>
 <p><small>This page is plain HTTP on your LAN -- keystrokes here are NOT encrypted (unlike the TLS
 client path). Use it only on a network you trust.</small></p></section>
@@ -1385,12 +1386,14 @@ client path). Use it only on a network you trust.</small></p></section>
 <section id=app class=hide>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
 <button onclick=lock()>Lock</button></div>
-<div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off>
+<div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off
+onkeydown="if(event.key=='Enter')setNick()">
 <button onclick=setNick()>Rename</button>
 <small>advertised name is HIDBRIDGE-&lt;nickname&gt;[-&lt;device&gt;] -- keep it short (BLE name budget)</small></div>
 
 <fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table>
-<div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off>
+<div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off
+onkeydown="if(event.key=='Enter')pairNew()">
 <button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
 <small>Pair advertises a free slot so an iPad can bond (accept on the iPad). Connect brings a paired
 identity back up and targets it. A filled star marks the current target.</small></fieldset>
