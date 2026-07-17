@@ -657,7 +657,10 @@ void setup() {
   loadSlotClients();                           // NVS per-slot client labels (survive reboot/reflash)
   buildMdnsHost();                             // hidbridge-<nick> (unique per board)
   for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
-  selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
+  // Boot PARKED: advertise NOTHING until a customer explicitly asks for a device (connect/pair). This
+  // enforces "no connection without an active customer" -- on power-on the board talks to no one, so
+  // no bonded host auto-reconnects behind your back. (Previously it auto-advertised slot 0.)
+  parked = true;
   Serial.println("OK HIDBRIDGE-esp32 ready");
 
 #ifdef HIDBRIDGE_NET
