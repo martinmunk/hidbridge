@@ -1306,7 +1306,8 @@ identity back up and targets it. A filled star marks the current target.</small>
 
 <fieldset id=controls disabled><legend>Keyboard &amp; pointer</legend>
 <div class=row><input id=txt size=20 placeholder="text to type"><button onclick=type_()>type</button>
-<button onclick="key('enter')">enter</button><button onclick="key('backspace')">bksp</button></div>
+<button onclick="key('enter')">enter</button><button onclick="key('backspace')">bksp</button>
+<button onclick="key('tab')">tab</button><button onclick="key('esc')">esc</button></div>
 <div class=row>tap x<input id=tx type=number step=.01 min=0 max=1 value=.5 style=width:4.2em>
 y<input id=ty type=number step=.01 min=0 max=1 value=.5 style=width:4.2em><button onclick=tap()>tap</button>
 <small>0..1 fraction of the screen (.5,.5 = centre)</small></div>
@@ -1327,10 +1328,11 @@ const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
 
 async function unlock(){TOK=$('tok').value;try{
 const info=await rpc('hello');await rpc('identities');
+sessionStorage.setItem('hbtok',TOK);          // survive a reload in THIS tab (cleared on Lock / close)
 $('board').textContent=info.name||info.device||'hidbridge';
 show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
 catch(e){TOK=null;log('unlock failed: '+e.message)}}
-function lock(){TOK=null;stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
+function lock(){TOK=null;sessionStorage.removeItem('hbtok');stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
@@ -1338,7 +1340,7 @@ function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false;
 (r.slots||[]).forEach(s=>{const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
 const st=s.conn?(s.sub?'ready':'connecting'):'idle',cls=s.conn?(s.sub?'on':'warn'):'';
 if(isTgt&&s.conn)tgtConn=true;
-tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client:'<i>(empty)</i>')+
+tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client:'<i>(free slot)</i>')+
 (isTgt?' &#9733;':'')+'</td><td><small>'+st+'</small></td><td class=row></td>';
 const acts=tr.lastElementChild;if(s.client){
 const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',s.client);
@@ -1360,10 +1362,12 @@ function pump(){if(busy||!ready)return;let job=null;
 if(q.length)job=q.shift();
 else if(pdx||pdy){job={m:'move',p:{dx:pdx,dy:pdy}};pdx=pdy=0}
 else if(psc){job={m:'scroll',p:{clicks:psc}};psc=0}
-if(!job)return;busy=true;rpc(job.m,job.p).catch(()=>{}).finally(()=>{busy=false;pump()})}
-const NAMED={Enter:'enter',Backspace:'backspace',Tab:'tab',Escape:'esc',Delete:'delete',' ':'space',
+if(!job)return;busy=true;rpc(job.m,job.p).then(()=>{sent++;if(live)setPadLbl()}).catch(()=>{}).finally(()=>{busy=false;pump()})}
+const NAMED={Enter:'enter',Backspace:'backspace',Tab:'tab',Delete:'delete',' ':'space',
 ArrowRight:'right',ArrowLeft:'left',ArrowUp:'up',ArrowDown:'down',Home:'home',End:'end',PageUp:'pageup',PageDown:'pagedown'};
-function onKey(e){if(!live)return;if(e.key==='Escape'){release();return}e.preventDefault();
+// Esc is NOT forwarded: the browser reserves it to exit pointer lock (that is how you release live
+// control). Use the on-screen 'esc' button to actually send Escape to the device.
+function onKey(e){if(!live)return;if(e.key==='Escape')return;e.preventDefault();
 const mod=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0);
 const nm=NAMED[e.key];
 if(nm)q.push({m:'key',p:{name:nm,mod}});
@@ -1372,18 +1376,24 @@ else q.push({m:'type',p:{text:e.key}})}else return;pump()}
 function onMove(e){if(!live)return;pdx+=e.movementX;pdy+=e.movementY;pump()}
 function onBtn(e){if(!live)return;e.preventDefault();q.push({m:'click',p:{button:['left','middle','right'][e.button]||'left'}});pump()}
 function onWheel(e){if(!live)return;e.preventDefault();psc+=e.deltaY>0?-1:1;pump()}
-const pad=$('pad');
-function engage(){if(!ready)return;live=true;pad.classList.add('live');$('padlbl').textContent='LIVE -- Esc to release';
-try{pad.requestPointerLock&&pad.requestPointerLock()}catch(e){}
-document.addEventListener('keydown',onKey);pad.addEventListener('mousemove',onMove);
-pad.addEventListener('mousedown',onBtn);pad.addEventListener('wheel',onWheel,{passive:false})}
-function release(){live=false;pad.classList.remove('live');$('padlbl').textContent='Click to take live control';
+const pad=$('pad');let sent=0;
+// LIVE is tied STRICTLY to the pointer-lock state, so the box can never claim LIVE while the cursor
+// is actually free. Clicking the pad requests the lock; goLive/release fire only from
+// pointerlockchange (locked -> goLive, unlocked -> release). Handlers sit on the DOCUMENT so a locked
+// mouse is captured no matter where the OS thinks the pointer is.
+function setPadLbl(){$('padlbl').textContent=live?('LIVE -- '+sent+' sent -- Esc to release'):'Click to take live control'}
+function goLive(){live=true;sent=0;pad.classList.add('live');setPadLbl();
+document.addEventListener('mousemove',onMove);document.addEventListener('mousedown',onBtn);
+document.addEventListener('wheel',onWheel,{passive:false});document.addEventListener('keydown',onKey)}
+function release(){live=false;pad.classList.remove('live');setPadLbl();
 if(document.pointerLockElement===pad)document.exitPointerLock();
-document.removeEventListener('keydown',onKey);pad.removeEventListener('mousemove',onMove);
-pad.removeEventListener('mousedown',onBtn);pad.removeEventListener('wheel',onWheel)}
-pad.addEventListener('click',()=>{if(!live)engage()});
-document.addEventListener('pointerlockchange',()=>{if(live&&document.pointerLockElement!==pad&&document.pointerLockElement)release()});
-document.addEventListener('pointerlockerror',()=>log('pointer lock blocked; hover the box to move (bounded by its edges)'));
+document.removeEventListener('mousemove',onMove);document.removeEventListener('mousedown',onBtn);
+document.removeEventListener('wheel',onWheel);document.removeEventListener('keydown',onKey)}
+pad.addEventListener('click',()=>{if(!live&&ready){const p=pad.requestPointerLock();if(p&&p.catch)p.catch(()=>{})}});
+document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;
+if(lk&&!live)goLive();else if(!lk&&live)release()});
+document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + tap/click buttons still work.'));
+{const t=sessionStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}}   // auto-unlock a reload
 </script></body></html>)HTML";
 
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
