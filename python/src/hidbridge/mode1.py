@@ -206,6 +206,14 @@ class Mode1Client:
         self.require_cap("connect")
         return self.call("disconnect", {"client": client} if client else {})
 
+    def unpair(self, client: str) -> dict:
+        """Forget <client>: drop the link, DELETE the BLE bond, clear the slot label (persisted).
+
+        Unlike disconnect (keeps the bond so the iPad silently reconnects), unpair frees the slot --
+        the device must pair again."""
+        self.require_cap("connect")
+        return self.call("unpair", {"client": client})
+
     def close(self) -> None:
         if hasattr(self._ch, "close"):
             self._ch.close()

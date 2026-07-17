@@ -113,6 +113,7 @@ def test_connection_and_frames_methods():
     c.connect("mini5")
     c.disconnect("mini5")
     c.disconnect()
+    c.unpair("mini5")
     c.frames(["0100001e0000000000", "010000000000000000"])
     # a capability-gated call fetches hello ONCE (cached), then issues the method
     assert seen == [
@@ -124,6 +125,7 @@ def test_connection_and_frames_methods():
         ("connect", {"client": "mini5"}),
         ("disconnect", {"client": "mini5"}),
         ("disconnect", {}),
+        ("unpair", {"client": "mini5"}),
         ("frames", {"frames": ["0100001e0000000000", "010000000000000000"]}),
     ]
 

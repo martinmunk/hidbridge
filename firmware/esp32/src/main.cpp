@@ -428,6 +428,26 @@ static void loadNickname() {
   snprintf(g_advName, sizeof(g_advName), "HIDBRIDGE-%s", g_nick);
 }
 
+// Per-slot CLIENT labels persist in NVS ("cli<slot>") so a reboot/reflash keeps them in step with the
+// BLE bonds (which NimBLE already persists). Without this a reflash wiped the RAM-only labels while
+// the bonds survived, leaving a paired iPad reconnecting to a "(free slot)" with no name.
+static void persistSlotClient(int slot) {
+  char key[8]; snprintf(key, sizeof(key), "cli%d", slot);
+  Preferences pr; pr.begin("hidbridge", false);
+  if (slotClient[slot][0]) pr.putString(key, slotClient[slot]);
+  else                     pr.remove(key);
+  pr.end();
+}
+static void loadSlotClients() {
+  Preferences pr; pr.begin("hidbridge", true);
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    char key[8]; snprintf(key, sizeof(key), "cli%d", i);
+    String v = pr.getString(key, "");
+    snprintf(slotClient[i], sizeof(slotClient[i]), "%s", v.c_str());
+  }
+  pr.end();
+}
+
 // Build the mDNS hostname "hidbridge-<nick>" from g_nick, sanitised to hostname-safe chars
 // ([a-z0-9-], others -> '-'). Unique per board, so two boards on the LAN don't collide.
 static void buildMdnsHost() {
@@ -687,6 +707,7 @@ void setup() {
   server->start();                             // starts the HID + battery + devinfo services
   deriveSlotAddresses();                       // needs init() done (public address available)
   loadNickname();                              // NVS nick, or a unique esp32-<mac> default
+  loadSlotClients();                           // NVS per-slot client labels (survive reboot/reflash)
   buildMdnsHost();                             // hidbridge-<nick> (unique per board)
   for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
   selectSlotAdvertise(0, nullptr);             // advertise slot 0 (native identity) by default
@@ -898,6 +919,7 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
       if (slot < 0) { *errCode = -32000; *errMsg = "no free identity slot"; return; }
       snprintf(slotClient[slot], sizeof(slotClient[slot]), "%s", client);
       buildSlotName(slot);
+      persistSlotClient(slot);                // survive a reboot/reflash, like the bond does
     } else {
       slot = findSlotForClient(client);
       if (slot < 0) { *errCode = -32000; *errMsg = "unknown client (pair it first)"; return; }
@@ -918,6 +940,27 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     NimBLEDevice::stopAdvertising();
     result["slot"] = slot;
     result["disconnected"] = (h != BLE_HS_CONN_HANDLE_NONE);
+    return;
+  }
+  if (!strcmp(method, "unpair")) {
+    // Forget a device: drop any live link, DELETE the BLE bond, and clear+persist the empty label.
+    // Unlike disconnect (which parks but keeps the bond so the iPad silently reconnects), unpair
+    // makes the iPad have to pair again -- so the slot is genuinely free to hand to another device.
+    *handled = true;
+    const char* client = params["client"] | (const char*)nullptr;
+    if (!client || !client[0]) { *errCode = -32602; *errMsg = "missing 'client'"; return; }
+    int slot = findSlotForClient(client);
+    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client"; return; }
+    uint16_t h = slotConn[slot];
+    parked = true;                           // onDisconnect must NOT auto-re-advertise
+    if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
+    NimBLEDevice::deleteBond(slotAddr[slot]);
+    slotClient[slot][0] = 0;
+    buildSlotName(slot);
+    persistSlotClient(slot);                 // removes the NVS label key
+    if (advSlot == slot) NimBLEDevice::stopAdvertising();
+    result["slot"] = slot;
+    result["unpaired"] = true;
     return;
   }
 #ifdef HIDBRIDGE_WIFI
@@ -1328,11 +1371,11 @@ const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
 
 async function unlock(){TOK=$('tok').value;try{
 const info=await rpc('hello');await rpc('identities');
-sessionStorage.setItem('hbtok',TOK);          // survive a reload in THIS tab (cleared on Lock / close)
+localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
 $('board').textContent=info.name||info.device||'hidbridge';
 show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
 catch(e){TOK=null;log('unlock failed: '+e.message)}}
-function lock(){TOK=null;sessionStorage.removeItem('hbtok');stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
+function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
@@ -1345,7 +1388,9 @@ tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client
 const acts=tr.lastElementChild;if(s.client){
 const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',s.client);
 const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',s.client);
-acts.append(c,d)}tb.append(tr)});
+const u=document.createElement('button');u.textContent='unpair';
+u.onclick=()=>{if(confirm('Unpair '+s.client+'? This deletes the BLE bond -- the device must pair again.'))act('unpair',s.client)};
+acts.append(c,d,u)}tb.append(tr)});
 setReady(tgtConn)}
 function setReady(on){ready=on;$('controls').disabled=!on;show($('notready'),!on);if(!on&&live)release()}
 async function act(m,client){try{await rpc(m,{client});refresh()}catch(e){log(e.message)}}
@@ -1393,7 +1438,7 @@ pad.addEventListener('click',()=>{if(!live&&ready){const p=pad.requestPointerLoc
 document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;
 if(lk&&!live)goLive();else if(!lk&&live)release()});
 document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + tap/click buttons still work.'));
-{const t=sessionStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}}   // auto-unlock a reload
+{const t=localStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}}   // auto-unlock if remembered
 </script></body></html>)HTML";
 
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
