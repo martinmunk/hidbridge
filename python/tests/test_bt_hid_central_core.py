@@ -427,3 +427,28 @@ def test_not_retryable_real_mismatches():
         "notifications": {"expected": {"1": "0000040000000000"},
                           "received": {"1": "0000ff0000000000"}},
     })
+
+
+# --------------------------------------------------------------------------- #
+# advertised-name matching -- PREFIX, not exact (boards append -<nick>[-<client>])
+# --------------------------------------------------------------------------- #
+def test_advert_name_matches_prefix_family():
+    # a real board's name is the profile prefix + -<nick>[-<client>]
+    assert C.advert_name_matches("HIDBRIDGE-esp32-ee03", "HIDBRIDGE-esp32")
+    assert C.advert_name_matches("HIDBRIDGE-esp32-ee03-desk", "HIDBRIDGE-esp32")
+    assert C.advert_name_matches("HIDBRIDGE-esp32", "HIDBRIDGE-esp32")          # bare (no nick yet)
+    assert C.advert_name_matches("HIDBRIDGE-pico-a1b2", "HIDBRIDGE-pico")
+
+
+def test_advert_name_does_not_cross_family_or_match_empty():
+    assert not C.advert_name_matches("HIDBRIDGE-pico-a1b2", "HIDBRIDGE-esp32")
+    assert not C.advert_name_matches("SOMETHINGELSE", "HIDBRIDGE-esp32")
+    assert not C.advert_name_matches("", "HIDBRIDGE-esp32")
+
+
+def test_advert_name_matches_real_profiles():
+    # against the shipped profiles: each family's nick-suffixed name matches its own profile only
+    esp = C.BACKEND_PROFILES["esp32"].advert_name
+    pico = C.BACKEND_PROFILES["pico"].advert_name
+    assert C.advert_name_matches(esp + "-9216", esp)
+    assert not C.advert_name_matches(esp + "-9216", pico)

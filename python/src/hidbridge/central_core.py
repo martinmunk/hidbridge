@@ -89,6 +89,17 @@ def connectdevice_properties(address: str, address_type: str | None) -> dict:
     return props
 
 
+def advert_name_matches(observed: str, profile_advert_name: str) -> bool:
+    """True if an observed BLE Complete Local Name belongs to this backend FAMILY.
+
+    A profile's `advert_name` ("HIDBRIDGE-esp32" / "HIDBRIDGE-pico" / ...) is the stable PREFIX; a
+    real board appends "-<nick>[-<client>]" (e.g. "HIDBRIDGE-esp32-ee03-desk"), so an exact compare
+    stopped matching once nicknames landed. Match by PREFIX. This identifies only the family -- the
+    SPECIFIC board is pinned by BLE address in central._matches (multiple boards share the prefix).
+    """
+    return bool(observed) and observed.startswith(profile_advert_name)
+
+
 # --------------------------------------------------------------------------- #
 # GATT UUIDs (HID-over-GATT / HOG)
 # --------------------------------------------------------------------------- #

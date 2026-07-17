@@ -339,7 +339,6 @@ class CentralSelfTest:
         except dbus.DBusException:
             pass
         # If the MCU is already bonded/known from a prior run, start from connect.
-        want = self.profile.advert_name
         for path, ifaces in self._managed().items():
             if DEVICE not in ifaces or not path.startswith(self.central_path + "/dev_"):
                 continue
@@ -378,11 +377,13 @@ class CentralSelfTest:
     def _matches(self, props) -> bool:
         """Is this device the board we drive? Prefer the DRIVEN board's exact BLE address (set when
         the transport can report it -- see _board_ble_address); otherwise fall back to the advertised
-        LocalName. Address wins because multiple boards can share the name."""
+        LocalName by PREFIX (the board appends -<nick>[-<client>] to the profile name, so an exact
+        compare stopped matching once nicknames landed). Address wins because multiple boards share
+        the name prefix."""
         if self.target_address:
             return str(props.get("Address", "")).upper() == self.target_address
         name = str(props.get("Name", props.get("Alias", "")))
-        return name == self.profile.advert_name
+        return CC.advert_name_matches(name, self.profile.advert_name)
 
     def _look_for_device(self, objs):
         for path, ifaces in objs.items():
