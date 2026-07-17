@@ -1361,7 +1361,7 @@ client path). Use it only on a network you trust.</small></p></section>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
 <button onclick=lock()>Lock</button></div>
 
-<fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table><small id=cap></small>
+<fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table>
 <div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off>
 <button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
 <small>Pair advertises a free slot so an iPad can bond (accept on the iPad). Connect brings a paired
@@ -1401,8 +1401,8 @@ function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)rel
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
-function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false,used=0;const all=r.slots||[];
-all.forEach(s=>{if(!(s.client||s.bonded||s.conn))return;used++;   // hide empty capacity rows
+function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false;
+(r.slots||[]).forEach(s=>{if(!(s.client||s.bonded||s.conn))return;   // only set-up slots; else empty
 const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
 const st=s.conn?(s.sub?'ready':'connecting'):(s.bonded?'bonded (idle)':'idle'),cls=s.conn?(s.sub?'on':'warn'):'';
 if(isTgt&&s.conn)tgtConn=true;
@@ -1412,9 +1412,8 @@ const acts=tr.lastElementChild;   // act BY SLOT so an unnamed-but-bonded slot c
 const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',{slot:s.slot});
 const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',{slot:s.slot});
 const u=document.createElement('button');u.textContent='unpair';
-u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- you must ALSO Forget it in the device's own Bluetooth settings.'))act('unpair',{slot:s.slot})};
+u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- also Forget it in its own Bluetooth settings afterwards.'))act('unpair',{slot:s.slot})};
 acts.append(c,d,u);tb.append(tr)});
-$('cap').textContent='using '+used+' of '+all.length+' remembered slots';
 setReady(tgtConn)}
 function setReady(on){ready=on;$('controls').disabled=!on;show($('notready'),!on);if(!on&&live)release()}
 async function act(m,p){try{await rpc(m,p);refresh()}catch(e){log(e.message)}}
