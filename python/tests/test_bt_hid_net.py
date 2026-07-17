@@ -135,6 +135,37 @@ def test_encode_set_token_rejects_bad(bad):
         encode_set_token(bad)
 
 
+# The TLS firmware answers `W<token>` with an ack that varies by whether the TLS port could be brought
+# up right then: "OK token set (TLS enabled)" on a fresh board provisioned live, "(reboot to apply as
+# the new TLS key)" when a key is already baked in, "(reboot to enable TLS)" if bring-up failed, or a
+# bare "OK token set" from older firmware. set_net_token must treat EVERY "OK..." as success (so
+# `net-provision` does not falsely report failure) and must NEVER surface the token in the ack.
+@pytest.mark.parametrize("ack", [
+    b"OK token set (TLS enabled)\n",
+    b"OK token set (reboot to apply as the new TLS key)\n",
+    b"OK token set (reboot to enable TLS)\n",
+    b"OK token set\n",
+])
+def test_set_net_token_accepts_all_tls_acks_without_leaking(ack):
+    from hidbridge.transport_esp32 import Esp32Transport
+    t = Esp32Transport(port=None, open_now=False)
+    t._ser = FakeChannel([ack])
+    res = t.set_net_token("supersecrettoken")
+    assert res["ok"] is True                       # every OK-ack is provisioning success
+    assert "supersecrettoken" not in res["resp"]   # the board never echoes the token
+    assert t._ser.written[0] == b"Wsupersecrettoken\n"   # W<token> framing went out
+
+
+def test_set_net_token_board_rejection_is_not_ok():
+    # a board that rejects the token (e.g. too short for its own guard) must read as failure so
+    # `net-provision` exits non-zero rather than claiming success.
+    from hidbridge.transport_esp32 import Esp32Transport
+    t = Esp32Transport(port=None, open_now=False)
+    t._ser = FakeChannel([b"ERR shorttoken\n"])
+    res = t.set_net_token("abcdefgh")
+    assert res["ok"] is False
+
+
 # --------------------------------------------------------------------------- #
 # token resolution precedence (explicit > env > file), never opens a socket
 # --------------------------------------------------------------------------- #

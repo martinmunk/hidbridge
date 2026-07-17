@@ -393,6 +393,7 @@ static void selectSlotAdvertise(int n, const char* name);
 static void startAdvertisingSlot();
 #ifdef HIDBRIDGE_NET
 static void netSetup();                        // Ethernet + TCP line server; called from setup()
+static bool netTlsSetup();                      // build the PSK config + open the TLS port (def. below)
 #endif
 
 static int slotOfHandle(uint16_t h) {
@@ -1035,7 +1036,13 @@ static void handleLine(String line, Print& out, NetSession* sess) {
     prefs.begin("hidbridge", false);
     prefs.putString("token", arg);
     prefs.end();
-    out.println("OK token set");
+    // The TLS PSK is built ONCE at boot (netTlsSetup), so a token set on a board that booted WITHOUT
+    // one leaves the TLS port closed until it is opened. Bring it up right now so provisioning "just
+    // works" without a reboot (the common fresh-board case). A token CHANGE on an already-listening
+    // board can't hot-swap the baked-in key -- that still needs a reboot; say so.
+    if (!g_tlsReady && netTlsSetup()) out.println("OK token set (TLS enabled)");
+    else if (g_tlsReady)             out.println("OK token set (reboot to apply as the new TLS key)");
+    else                             out.println("OK token set (reboot to enable TLS)");
 #else
     out.println("ERR nonet");
 #endif
