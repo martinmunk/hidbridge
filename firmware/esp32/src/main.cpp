@@ -75,21 +75,22 @@
 // cable at all (`hidbridge --backend net --host hidbridge-esp32.local`). USB serial keeps working
 // exactly as before; the two channels are interchangeable and may be used at the same time.
 //
-// AUTH -- a TCP port that injects keystrokes into a bonded, possibly UNLOCKED iPad (and can type its
-// passcode) is a REMOTE INPUT-INJECTION surface: anyone who can reach the port could type into the
-// target. So the network path is authenticated and FAILS CLOSED:
+// AUTH + ENCRYPTION -- a TCP port that injects keystrokes into a bonded, possibly UNLOCKED iPad (and
+// can type its passcode) is a REMOTE INPUT-INJECTION surface: anyone who can reach the port could type
+// into the target, and anyone who can sniff it could read the passcode. So TCP 3333 is TLS-PSK ONLY
+// (see the TLS note below) and FAILS CLOSED:
 //   * a shared secret is stored in NVS and is settable ONLY over USB serial (`W<token>`) -- never
 //     over TCP, never compiled into the image, never echoed back;
-//   * a fresh TCP session may ONLY ping (P/V/N) and authenticate (@<token>). EVERY report command
-//     (K/M/A/D) and all control (I/T/S/X/O) is refused with "ERR auth" until `@<token>` succeeds;
-//   * if NO token has been provisioned, `@` always fails -- so a board that is merely plugged into
+//   * that same token is the TLS pre-shared KEY, so the report bytes (INCLUDING the passcode frames
+//     `hidbridge unlock` emits) are ENCRYPTED on the wire, AND completing the handshake proves the
+//     peer holds the token without it ever being transmitted -- the handshake is the authentication;
+//   * if NO token has been provisioned, the TLS port is not even opened -- a board merely plugged into
 //     the LAN cannot be driven over it at all;
-//   * the compare is constant-time, and 5 failed attempts drop the session.
-// This does NOT make the link confidential -- the report bytes (INCLUDING the passcode frames that
-// `hidbridge unlock` emits) still cross the LAN in the clear, and the token itself is sent in the
-// clear on `@`. Treat TCP 3333 as a TRUSTED-NETWORK-ONLY interface: put it on a LAN/VLAN/VPN you
-// trust, and prefer the USB path for `unlock` on a hostile network. (A TLS/noise-framed channel is
-// the obvious next step if that is not enough -- see docs/bt-hid-network-backend.md.)
+//   * a `@<token>` line is still accepted (over the encrypted channel) for the existing client flow,
+//     but is redundant now that the handshake authenticates; the compare is constant-time.
+// The one remaining cleartext surface is the OPTIONAL control webpage on :80 (browsers cannot speak
+// TLS-PSK); it is HTTP with an X-Auth-Token header -- LAN-only, and no passcode path uses it. Prefer
+// the USB path for `unlock` if even the LAN is hostile. See docs/bt-hid-network-backend.md.
 
 #include <Arduino.h>
 #include <ArduinoJson.h>       // Mode 1 wire protocol: JSON-RPC 2.0 over newline-delimited JSON
@@ -107,6 +108,17 @@
 #include <Preferences.h>
 #include <WebServer.h>       // Mode 1 control webpage + /rpc endpoint
 #include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
+// The raw JSON-RPC / frame port (3333) is TLS-PSK ONLY -- see the TLS note below. The NVS token is
+// the pre-shared key. arduino-esp32 has no TLS *server* class, and the prebuilt esp_tls has PSK
+// verification compiled out (CONFIG_ESP_TLS_PSK_VERIFICATION unset), so we drive mbedTLS directly:
+// one shared server config with the PSK, and per session a non-blocking handshake + I/O over a raw
+// lwip socket driven from netPoll. mbedTLS itself ships with PSK + AES-GCM + SSL_SRV_C enabled.
+#include <mbedtls/ssl.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <lwip/sockets.h>
+#include <fcntl.h>
 #ifdef HIDBRIDGE_WIFI
 #include <WiFi.h>            // WiFi station (an alternative to Ethernet for the net path)
 #endif
@@ -166,20 +178,45 @@ static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS >= NUM_SLOTS,
 #define HB_MDNS_HOST      "hidbridge-esp32"      // -> hidbridge-esp32.local
 #endif
 #ifndef HB_MAX_NET_CLIENTS
-#define HB_MAX_NET_CLIENTS 4
+// Each live TLS session holds mbedTLS record buffers (~16KB in + ~16KB out with the stock content
+// length), so bound concurrency tightly on top of the BLE + WiFi/ETH stacks: 2 is plenty for the
+// self-test + a control client.
+#define HB_MAX_NET_CLIENTS 2
 #endif
 #define HB_MIN_TOKEN_LEN  8
 #define HB_MAX_AUTH_FAILS 5
 
-// One connected TCP client. `authed` starts FALSE: until `@<token>` succeeds this session may only
-// ping (see netCommandAllowed). `buf` accumulates a line the same way the serial reader does.
+// --------------------------------------------------------------------------- //
+// TLS-PSK on the JSON-RPC / frame port (3333). The port is TLS-ONLY -- there is no plaintext TCP
+// path. The pre-shared key IS the NVS token (the same secret the web `X-Auth-Token` and OTA password
+// reuse), so completing the handshake PROVES the peer holds the token WITHOUT it ever crossing the
+// wire: the handshake is the authentication (`authed` flips true when it finishes, no `@<token>`
+// line needed -- though one is still accepted for the existing Mode 2 client flow). A board with no
+// token provisioned opens no TLS port at all (fail-closed). The control webpage stays plain HTTP on
+// :80 (browsers cannot speak TLS-PSK) -- that is the one remaining cleartext surface, LAN-only.
+// arduino-esp32 ships a TLS *client* but no TLS *server*, so we drive esp_tls's async PSK server
+// over a raw non-blocking lwip socket from netPoll (below).
+// --------------------------------------------------------------------------- //
+// One connected TLS client. A session lives EMPTY (!inUse) -> HANDSHAKING -> READY (`authed`). `buf`
+// accumulates a decrypted line the same way the serial reader does. The mbedTLS ssl/net contexts are
+// mbedtls_ssl_init()'d on accept and mbedtls_ssl_free()'d on close (netCloseSession).
 struct NetSession {
-  NetworkClient client;
-  String        buf;
-  bool          authed = false;
-  uint8_t       fails  = 0;
+  bool                inUse       = false;
+  bool                handshaking = false;
+  bool                authed      = false;    // TRUE once the PSK handshake completes -- handshake == auth
+  bool                wantClose   = false;
+  mbedtls_ssl_context ssl;                    // per-connection TLS state
+  mbedtls_net_context nc;                     // holds the accepted socket fd (mbedtls BIO owns it)
+  String              buf;
+  uint8_t             fails       = 0;
 };
-static NetworkServer tcpServer(HB_NET_PORT);
+static int                      g_listenFd = -1;     // raw TLS listen socket (replaces NetworkServer)
+static mbedtls_ssl_config       g_tlsConf;           // shared server config: PSK, TLS1.2, one cipher
+static mbedtls_ctr_drbg_context g_drbg;              // RNG for the handshake
+static mbedtls_entropy_context  g_entropy;           // seeds g_drbg (ESP32 hardware RNG source)
+static String                   g_pskKey;            // the token bytes, held for conf_psk's lifetime
+static bool                     g_tlsReady = false;  // config built + listen socket open
+static const int g_pskCiphers[] = { MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256, 0 };
 static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
@@ -404,17 +441,66 @@ static void buildMdnsHost() {
   g_mdnsHost[i] = 0;
 }
 
+#ifdef HIDBRIDGE_NET
+// ---- TLS session I/O + teardown --------------------------------------------------------------- //
+// Write `n` bytes through the encrypted channel, looping over partial writes / transient WANT_WRITE.
+// The JSON-RPC reply + EVT lines are small, so a bounded spin is fine; a hard error just gives up
+// (the session is torn down on the next read).
+static bool tlsWrite(mbedtls_ssl_context* ssl, const uint8_t* data, size_t n) {
+  size_t off = 0;
+  int spins = 0;
+  while (off < n) {
+    int w = mbedtls_ssl_write(ssl, data + off, n - off);
+    if (w > 0) { off += w; spins = 0; continue; }
+    if (w == MBEDTLS_ERR_SSL_WANT_WRITE || w == MBEDTLS_ERR_SSL_WANT_READ) {
+      if (++spins > 4000) return false;    // stalled peer -- do not busy-wait forever
+      continue;
+    }
+    return false;                          // real error
+  }
+  return true;
+}
+
+// A Print that funnels handleLine's reply bytes into one TLS session. handleLine writes many small
+// chunks (println of a reply, digit by digit); buffering here would need a flush hook it does not
+// call, so we write straight through -- mbedTLS coalesces into records itself.
+struct TlsPrinter : public Print {
+  mbedtls_ssl_context* ssl;
+  explicit TlsPrinter(mbedtls_ssl_context* s) : ssl(s) {}
+  size_t write(uint8_t c) override { return tlsWrite(ssl, &c, 1) ? 1 : 0; }
+  size_t write(const uint8_t* b, size_t n) override { return tlsWrite(ssl, b, n) ? n : 0; }
+};
+
+// Close a session and release its TLS + socket state. mbedtls_net_free() closes the owned fd.
+static void netCloseSession(NetSession& s) {
+  if (s.inUse) {
+    mbedtls_ssl_free(&s.ssl);
+    mbedtls_net_free(&s.nc);
+  }
+  s.inUse = false;
+  s.handshaking = false;
+  s.authed = false;
+  s.wantClose = false;
+  s.buf = "";
+  s.fails = 0;
+}
+#endif  // HIDBRIDGE_NET
+
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
 // An EVT line ("EVT connected" / "EVT ready" / ...) is UNSOLICITED: it is not a reply to any one
-// channel's command, so it must reach every attached host, not just whoever spoke last. Unauthed TCP
-// sessions are deliberately excluded -- link state is not something an unauthenticated peer may
-// observe (they can still ping, which reports the same facts, only after they identify themselves).
+// channel's command, so it must reach every attached host, not just whoever spoke last. Sessions that
+// have not finished the TLS handshake are excluded -- link state is not something an unauthenticated
+// peer may observe (once the handshake completes, the PSK proved they hold the token).
 static void evt(const char* msg) {
   Serial.println(msg);
 #ifdef HIDBRIDGE_NET
+  size_t len = strlen(msg);
   for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
     NetSession& s = netSessions[i];
-    if (s.authed && s.client.connected()) s.client.println(msg);
+    if (s.authed) {
+      if (!tlsWrite(&s.ssl, (const uint8_t*)msg, len) || !tlsWrite(&s.ssl, (const uint8_t*)"\r\n", 2))
+        s.wantClose = true;                // dead peer -- reap it in the next netPoll
+    }
   }
 #endif
 }
@@ -702,7 +788,7 @@ static void printNetStatus(Print& out) {
 #ifdef HIDBRIDGE_NET
   int clients = 0;
   for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
-    if (netSessions[i].client.connected()) clients++;
+    if (netSessions[i].inUse) clients++;    // a live TLS session (handshaking or ready)
   }
   out.print("OK net eth=");
   out.print(ethUp ? "1" : "0");
@@ -964,7 +1050,7 @@ static void handleLine(String line, Print& out, NetSession* sess) {
       out.println("OK auth");
     } else {
       out.println("ERR auth");
-      if (++sess->fails >= HB_MAX_AUTH_FAILS) sess->client.stop();   // stop online guessing
+      if (++sess->fails >= HB_MAX_AUTH_FAILS) sess->wantClose = true;   // stop online guessing
     }
 #else
     out.println("ERR nonet");
@@ -995,40 +1081,134 @@ static void handleLine(String line, Print& out, NetSession* sess) {
 
 // ---- network service: accept clients + feed their lines through the SAME handleLine ------------ //
 #ifdef HIDBRIDGE_NET
+// Build the shared PSK server config (token = pre-shared key) and open the non-blocking TLS listen
+// socket. No token provisioned -> nothing opened: an unprovisioned board exposes NO network HID
+// surface (fail-closed), matching the OTA gate. Returns true iff the listener is up.
+static bool netTlsSetup() {
+  g_pskKey = getToken();
+  if (g_pskKey.length() < HB_MIN_TOKEN_LEN) {
+    Serial.println("note: net TLS disabled (provision a token to enable encrypted TCP)");
+    return false;
+  }
+  mbedtls_ssl_config_init(&g_tlsConf);
+  mbedtls_ctr_drbg_init(&g_drbg);
+  mbedtls_entropy_init(&g_entropy);
+  static const char* kPers = "hidbridge-tls";
+  int rc = mbedtls_ctr_drbg_seed(&g_drbg, mbedtls_entropy_func, &g_entropy,
+                                 (const unsigned char*)kPers, strlen(kPers));
+  if (rc == 0)
+    rc = mbedtls_ssl_config_defaults(&g_tlsConf, MBEDTLS_SSL_IS_SERVER,
+                                     MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+  if (rc == 0) {
+    // The client (Python) authenticates by proving the SAME token as PSK for identity "hidbridge".
+    rc = mbedtls_ssl_conf_psk(&g_tlsConf,
+                              (const unsigned char*)g_pskKey.c_str(), g_pskKey.length(),
+                              (const unsigned char*)"hidbridge", 9);
+  }
+  if (rc != 0) {
+    Serial.print("ERR tls config "); Serial.println(rc);
+    return false;
+  }
+  mbedtls_ssl_conf_authmode(&g_tlsConf, MBEDTLS_SSL_VERIFY_NONE);  // PSK carries no certificate
+  mbedtls_ssl_conf_rng(&g_tlsConf, mbedtls_ctr_drbg_random, &g_drbg);
+  mbedtls_ssl_conf_ciphersuites(&g_tlsConf, g_pskCiphers);        // TLS_PSK_WITH_AES_128_GCM_SHA256
+  mbedtls_ssl_conf_min_tls_version(&g_tlsConf, MBEDTLS_SSL_VERSION_TLS1_2);
+  mbedtls_ssl_conf_max_tls_version(&g_tlsConf, MBEDTLS_SSL_VERSION_TLS1_2);
+
+  g_listenFd = socket(AF_INET, SOCK_STREAM, 0);
+  if (g_listenFd < 0) { Serial.println("ERR tls socket"); return false; }
+  int one = 1;
+  setsockopt(g_listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(HB_NET_PORT);
+  if (bind(g_listenFd, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+      listen(g_listenFd, HB_MAX_NET_CLIENTS) != 0) {
+    Serial.println("ERR tls bind/listen");
+    close(g_listenFd);
+    g_listenFd = -1;
+    return false;
+  }
+  fcntl(g_listenFd, F_SETFL, fcntl(g_listenFd, F_GETFL, 0) | O_NONBLOCK);
+  g_tlsReady = true;
+  Serial.println("OK net TLS-PSK enabled");
+  return true;
+}
+
 static void netPoll() {
-  NetworkClient incoming = tcpServer.accept();
-  if (incoming) {
+  if (!g_tlsReady) return;                     // no token provisioned -> no TLS port (fail-closed)
+
+  // 1) Accept at most one new connection per poll (non-blocking). Wrap it in a TLS-PSK session in
+  //    the first free slot; if the board is full or we cannot set it up, drop the raw socket.
+  int fd = accept(g_listenFd, nullptr, nullptr);
+  if (fd >= 0) {
     int slot = -1;
-    for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
-      if (!netSessions[i].client.connected()) { slot = i; break; }
-    }
+    for (int i = 0; i < HB_MAX_NET_CLIENTS; i++)
+      if (!netSessions[i].inUse) { slot = i; break; }
     if (slot < 0) {
-      incoming.println("ERR busy");            // all session slots in use
-      incoming.stop();
+      close(fd);                               // all session slots in use
     } else {
+      fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);  // async handshake + reads
+      int one = 1;
+      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));  // tiny latency-sensitive frames
       NetSession& s = netSessions[slot];
-      s.client.stop();                         // reclaim a dead-but-not-stopped slot
-      s.client = incoming;
-      s.client.setNoDelay(true);               // HID frames are tiny + latency-sensitive: no Nagle
+      mbedtls_ssl_init(&s.ssl);
+      mbedtls_net_init(&s.nc);
+      s.nc.fd = fd;
+      s.inUse = true;
+      s.authed = false;
+      s.wantClose = false;
       s.buf = "";
-      s.authed = false;                        // every new session must authenticate
       s.fails = 0;
+      // set_bio drives the socket through mbedtls_net_send/recv, which return WANT_READ/WRITE on a
+      // non-blocking fd -- exactly what makes the handshake + reads below non-blocking.
+      if (mbedtls_ssl_setup(&s.ssl, &g_tlsConf) != 0) {
+        netCloseSession(s);                    // out of memory for the record buffers
+      } else {
+        mbedtls_ssl_set_bio(&s.ssl, &s.nc, mbedtls_net_send, mbedtls_net_recv, nullptr);
+        s.handshaking = true;
+      }
     }
   }
 
+  // 2) Drive each live session: finish its handshake, then read + dispatch decrypted lines.
   for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
     NetSession& s = netSessions[i];
-    if (!s.client.connected()) { s.client.stop(); continue; }
-    while (s.client.available()) {
-      char c = (char)s.client.read();
-      if (c == '\n') {
-        String line = s.buf;
-        s.buf = "";
-        handleLine(line, s.client, &s);
-      } else if (c != '\r') {
-        s.buf += c;
-        if (s.buf.length() > 1024) s.buf = "";  // runaway-input guard (>=JSON-RPC line size)
+    if (!s.inUse) continue;
+    if (s.wantClose) { netCloseSession(s); continue; }
+
+    if (s.handshaking) {
+      int r = mbedtls_ssl_handshake(&s.ssl);
+      if (r == 0) {
+        s.handshaking = false;
+        s.authed = true;                       // the completed PSK handshake IS the authentication
+      } else if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
+        netCloseSession(s);                    // handshake failed (wrong PSK / bad client / reset)
       }
+      continue;                                // no app data until the handshake is done
+    }
+
+    // Ready: pull whatever plaintext is available this poll and accumulate lines.
+    uint8_t chunk[512];
+    for (;;) {
+      int n = mbedtls_ssl_read(&s.ssl, chunk, sizeof(chunk));
+      if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) break;   // drained
+      if (n <= 0) { netCloseSession(s); break; }   // 0 / close-notify / error -> drop the session
+      TlsPrinter out(&s.ssl);
+      for (int k = 0; k < n; k++) {
+        char c = (char)chunk[k];
+        if (c == '\n') {
+          String line = s.buf;
+          s.buf = "";
+          handleLine(line, out, &s);
+        } else if (c != '\r') {
+          s.buf += c;
+          if (s.buf.length() > 1024) s.buf = "";  // runaway-input guard (>=JSON-RPC line size)
+        }
+      }
+      if (s.wantClose) { netCloseSession(s); break; }
     }
   }
 }
@@ -1113,8 +1293,9 @@ function move_(){rpc('move',{dx:+dx.value,dy:+dy.value})}function click_(){rpc('
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
 
 static void handleWebRpc() {
-  // Auth mirrors the TCP path: the X-Auth-Token header must equal the NVS token (fail-closed -- with
-  // no token provisioned, only `hello` works). The report bytes still cross the LAN in the clear.
+  // The X-Auth-Token header must equal the NVS token (fail-closed -- with no token provisioned, only
+  // `hello` works). Unlike the TLS-PSK TCP path, THIS webpage is plain HTTP (browsers cannot do
+  // TLS-PSK), so its report bytes cross the LAN in the clear -- the one remaining cleartext surface.
   bool authed = webServer.hasHeader("X-Auth-Token") && tokenEquals(webServer.header("X-Auth-Token"));
   StringPrinter sp;
   hbmode1::handleJsonRpc(webServer.arg("plain"), sp, authed, esp32Notify, esp32FillHello, esp32Custom);
@@ -1154,8 +1335,7 @@ static void netSetup() {
   }
   ETH.setHostname(g_mdnsHost);
 #endif
-  tcpServer.begin();
-  tcpServer.setNoDelay(true);
+  netTlsSetup();                               // TLS-PSK listener on HB_NET_PORT (or none, unprovisioned)
   static const char* kHdrs[] = { "X-Auth-Token" };
   webServer.collectHeaders(kHdrs, 1);
   webServer.on("/", handleWebRoot);

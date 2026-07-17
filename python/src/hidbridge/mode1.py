@@ -243,10 +243,16 @@ def open_client(target: str | None = None, *, token: str | None = None,
         from . import socket_link
         from . import transport_net as TN
         host, port = TN._split_host_port(arg)
-        cli = Mode1Client(socket_link.open_socket(host, port, timeout))
         tok = TN.load_token(token)
-        if tok:
-            cli.authenticate(tok)
+        if not tok:
+            raise Mode1Error(
+                "the network backend is TLS-encrypted and needs the board token (the TLS pre-shared "
+                "key); provision it with `hidbridge net-provision`, then set BT_HID_NET_TOKEN or "
+                "~/.config/bt_hid/net.token")
+        # token = the TLS-PSK: the handshake authenticates. authenticate() re-sends @token over the
+        # now-encrypted channel for the board's existing gate (redundant but harmless).
+        cli = Mode1Client(socket_link.open_socket(host, port, timeout, token=tok))
+        cli.authenticate(tok)
         return cli
     from . import serial_link
     from .transport_esp32 import detect_port

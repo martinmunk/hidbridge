@@ -15,9 +15,10 @@ The token is NOT in the target string (it is a secret). It is read from ~/.confi
 
 SECURITY: the token authorises input injection into a bonded iPad, so it is treated like the PIN --
 never logged, never placed in a repr, read from a private file. It is provisioned onto the board over
-USB serial (`hidbridge net-provision`), never over this network path. The report bytes themselves
-(including passcode frames) still cross the LAN in the clear -- this is a trusted-network interface;
-see docs/bt-hid-network-backend.md.
+USB serial (`hidbridge net-provision`), never over this network path. The channel is ENCRYPTED: the
+token doubles as the TLS pre-shared key (`socket_link` wraps every connection in TLS-PSK), so the
+report bytes -- including passcode frames -- are confidential on the wire, and a peer that cannot
+complete the handshake never reaches the command layer. See docs/bt-hid-network-backend.md.
 """
 
 from __future__ import annotations
@@ -95,7 +96,14 @@ class NetTransport(Esp32Transport):
         if not self.host:
             raise NetError("no host for the network backend; pass net:<host> (e.g. "
                            "net:hidbridge-esp32.local) or --host")
-        self._ser = socket_link.open_socket(self.host, self.tcp_port, self.timeout)
+        if not self._token:
+            raise NetError("the network backend is now TLS-encrypted and needs the board token (it "
+                           "is the TLS pre-shared key); provision it over USB with `hidbridge "
+                           "net-provision`, then set BT_HID_NET_TOKEN or ~/.config/bt_hid/net.token")
+        # The token is the TLS pre-shared key: the handshake both encrypts the link and proves we
+        # hold it. The `@<token>` line in _authenticate() is then redundant but kept for the board's
+        # existing auth-gate flow (it just replies OK over the already-authenticated channel).
+        self._ser = socket_link.open_socket(self.host, self.tcp_port, self.timeout, token=self._token)
         self.port = self._ser.port                 # "host:port" label for status dicts
         self._authenticate()
 

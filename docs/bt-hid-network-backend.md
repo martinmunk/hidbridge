@@ -30,24 +30,30 @@ are opening a TCP channel (`socket_link.SocketLine`) instead of a tty and doing 
 
 A TCP port that streams HID reports into a bonded, possibly **unlocked** iPad (and can type its
 lock-screen passcode via `unlock`) is a remote **input-injection** surface: anyone who can reach the
-port could type into the target. So the network path is authenticated and **fails closed**:
+port could type into the target, and anyone who can sniff the wire could read the passcode. So TCP
+3333 is **TLS-PSK encrypted** and **fails closed**:
 
 - **Shared secret in NVS, set over USB only.** `W<token>` (serial command; `hidbridge net-provision`)
   stores a token in the board's flash. The firmware **refuses `W` over TCP**, so the secret can only
   be provisioned across the physical cable, and it is never echoed, logged, or readable back.
-- **Every TCP session must authenticate.** A fresh connection may only ping (`P`/`V`/`N`) and send
-  `@<token>`. Every report (`K`/`M`/`A`/`D`) and all control (`I`/`T`/`S`/`X`/`O`) is rejected with
-  `ERR auth` until `@<token>` succeeds. The compare is constant-time; 5 failures drop the session.
-- **Unprovisioned = no network HID.** With no token set, `@` can never succeed, so a board merely
-  plugged into the LAN cannot be driven over it. `hidbridge net-provision` mints a strong random
-  token into `~/.config/bt_hid/net.token` (0600, outside the repo, git-ignored) if you don't supply
-  one, and writes the same token to the board -- so `--backend net` then just works.
+- **The token IS the TLS pre-shared key.** Port 3333 speaks TLS 1.2 with the PSK cipher
+  `PSK-AES128-GCM-SHA256` and no certificates -- the client proves it holds the token by completing
+  the handshake, so **the secret never crosses the wire** and the report bytes (including passcode
+  frames) are **encrypted**. There is no plaintext path: a non-TLS connection gets no reply. Once the
+  handshake completes the session is authenticated; the legacy `@<token>` line is still accepted over
+  the encrypted channel for the existing client flow but is redundant.
+- **Unprovisioned = no network HID.** With no token set the board does not even open the TLS port, so
+  a board merely plugged into the LAN cannot be driven over it. `hidbridge net-provision` mints a
+  strong random token into `~/.config/bt_hid/net.token` (0600, outside the repo, git-ignored) if you
+  don't supply one, and writes the same token to the board -- so `--backend net` then just works.
 
-**What this does NOT do:** the channel is not confidential. The report bytes -- **including the
-passcode frames `unlock` emits** -- and the `@<token>` line itself cross the LAN in the clear. Treat
-TCP 3333 as a **trusted-network-only** interface (a LAN/VLAN/VPN you control), and prefer the USB path
-for `unlock` on an untrusted network. A TLS- or Noise-framed channel is the obvious next step if that
-is not enough; the auth gate and fail-closed behaviour are in place to build on.
+**Scope / caveats:** encryption is TLS-PSK, so security rests entirely on the token secrecy (it is
+both the auth secret and the encryption key) -- provision a strong random one and keep
+`~/.config/bt_hid/net.token` private. The client pins TLS 1.2 (mbedTLS on the ESP32 does PSK over
+1.2; TLS 1.3 external-PSK is a different handshake). The **one** cleartext surface is the optional
+control **webpage on :80** (browsers cannot do TLS-PSK) -- HTTP with an `X-Auth-Token` header,
+LAN-only, and no passcode path uses it; skip the web build (or firewall :80) if that matters. Needs
+Python 3.13+ on the host (`ssl.set_psk_client_callback`).
 
 ## Using it
 
