@@ -126,20 +126,26 @@
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 
-// Number of BLE host slots (distinct identities). Slot 0 = native public address; slots >=1 =
-// derived static-random addresses. Overridable at build time (-DNUM_SLOTS=N). Two iPads need 2.
+// Number of BLE host slots = distinct REMEMBERED identities (each its own address + bond + label).
+// Slot 0 = native public address; slots >=1 = derived static-random addresses. This is how MANY
+// devices the board remembers, NOT how many connect at once -- the two are decoupled (see the
+// connection budget below). Overridable at build time (-DNUM_SLOTS=N). NVS bond/CCCD storage must fit
+// NUM_SLOTS (raised in platformio.ini build_flags).
 #ifndef NUM_SLOTS
-#define NUM_SLOTS 2
+#define NUM_SLOTS 10
 #endif
 
-// The ESP32 must hold >=NUM_SLOTS centrals connected AT ONCE for simultaneous per-bond identities.
-// NimBLE's default connection budget is 3 (nimconfig.h); we also set it via build_flags for clarity.
-// This static_assert fails the BUILD if the budget is ever configured below the slot count.
+// CONCURRENT connections are capped separately by NimBLE's budget (RAM per live link). The board
+// remembers NUM_SLOTS devices but only advertises/holds a few at a time; connecting one advertises
+// THAT slot's identity so exactly its bonded device reconnects. So this can be far below NUM_SLOTS --
+// it only needs to be >= how many you want connected simultaneously (>=1).
 #ifndef CONFIG_BT_NIMBLE_MAX_CONNECTIONS
 #define CONFIG_BT_NIMBLE_MAX_CONNECTIONS 3
 #endif
-static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS >= NUM_SLOTS,
-              "CONFIG_BT_NIMBLE_MAX_CONNECTIONS must be >= NUM_SLOTS to hold all slots at once");
+static_assert(CONFIG_BT_NIMBLE_MAX_CONNECTIONS >= 1,
+              "need at least one concurrent connection");
+static_assert(NUM_SLOTS >= 1 && NUM_SLOTS <= 20,
+              "NUM_SLOTS out of range (each slot needs a distinct derived address + bond/CCCD storage)");
 
 // --------------------------------------------------------------------------- //
 // NETWORK backend (-DHIDBRIDGE_NET) -- Ethernet PHY + TCP line server + mDNS.
@@ -872,6 +878,18 @@ static int allocSlotForClient(const char* client) {
   for (int i = 0; i < NUM_SLOTS; i++) if (!slotClient[i][0]) return i;
   return -1;
 }
+// Resolve a target slot from a request: an explicit "slot" index wins (so the webpage can act on an
+// UNNAMED but bonded slot), else look up "client" by name. `dflt` is returned when neither is given
+// (tgtSlot for disconnect; -1 to force an explicit choice for connect/unpair).
+static int slotFromParams(JsonObjectConst params, int dflt) {
+  if (params["slot"].is<int>()) {
+    int s = params["slot"].as<int>();
+    return (s >= 0 && s < NUM_SLOTS) ? s : -1;
+  }
+  const char* client = params["client"] | (const char*)nullptr;
+  if (client && client[0]) return findSlotForClient(client);
+  return dflt;
+}
 static void fillIdentity(JsonObject o, int i) {
   o["slot"] = i;
   o["client"] = slotClient[i];
@@ -879,6 +897,7 @@ static void fillIdentity(JsonObject o, int i) {
   o["name"] = slotName[i];
   o["conn"] = slotConn[i] != BLE_HS_CONN_HANDLE_NONE;
   o["sub"]  = (bool)slotSub[i];
+  o["bonded"] = NimBLEDevice::isBonded(slotAddr[i]);   // a stored LTK exists for this identity
 }
 
 static void esp32Custom(const char* method, JsonObjectConst params, JsonObject result,
@@ -909,21 +928,24 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     result["adv"] = advSlot; result["tgt"] = tgtSlot;
     return;
   }
-  if (!strcmp(method, "pair") || !strcmp(method, "connect")) {
+  if (!strcmp(method, "pair")) {
     *handled = true;
     const char* client = params["client"] | (const char*)nullptr;
     if (!client || !client[0]) { *errCode = -32602; *errMsg = "missing 'client'"; return; }
-    int slot;
-    if (!strcmp(method, "pair")) {
-      slot = allocSlotForClient(client);
-      if (slot < 0) { *errCode = -32000; *errMsg = "no free identity slot"; return; }
-      snprintf(slotClient[slot], sizeof(slotClient[slot]), "%s", client);
-      buildSlotName(slot);
-      persistSlotClient(slot);                // survive a reboot/reflash, like the bond does
-    } else {
-      slot = findSlotForClient(client);
-      if (slot < 0) { *errCode = -32000; *errMsg = "unknown client (pair it first)"; return; }
-    }
+    int slot = allocSlotForClient(client);
+    if (slot < 0) { *errCode = -32000; *errMsg = "no free identity slot"; return; }
+    snprintf(slotClient[slot], sizeof(slotClient[slot]), "%s", client);
+    buildSlotName(slot);
+    persistSlotClient(slot);                // survive a reboot/reflash, like the bond does
+    selectSlotAdvertise(slot, nullptr);     // bring this identity up + advertise (the iPad (re)connects)
+    tgtSlot = slot;                          // route reports to it
+    fillIdentity(result, slot);
+    return;
+  }
+  if (!strcmp(method, "connect")) {
+    *handled = true;
+    int slot = slotFromParams(params, -1);   // by "slot" index or "client" name
+    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client/slot (pair it first)"; return; }
     selectSlotAdvertise(slot, nullptr);     // bring this identity up + advertise (the iPad (re)connects)
     tgtSlot = slot;                          // route reports to it
     fillIdentity(result, slot);
@@ -931,9 +953,8 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
   }
   if (!strcmp(method, "disconnect")) {
     *handled = true;
-    const char* client = params["client"] | (const char*)nullptr;
-    int slot = (client && client[0]) ? findSlotForClient(client) : tgtSlot;
-    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client"; return; }
+    int slot = slotFromParams(params, tgtSlot);   // default: the current target
+    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client/slot"; return; }
     uint16_t h = slotConn[slot];
     parked = true;                           // onDisconnect must NOT auto-re-advertise
     if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
@@ -946,11 +967,12 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     // Forget a device: drop any live link, DELETE the BLE bond, and clear+persist the empty label.
     // Unlike disconnect (which parks but keeps the bond so the iPad silently reconnects), unpair
     // makes the iPad have to pair again -- so the slot is genuinely free to hand to another device.
+    // Takes a "slot" index OR a "client" name, so an UNNAMED-but-bonded slot can still be forgotten.
+    // NOTE: this only forgets the bond on THIS side; the iPad keeps its own -- see the BLE note in
+    // docs. The peer must ALSO "Forget This Device" or it will keep trying with a stale key.
     *handled = true;
-    const char* client = params["client"] | (const char*)nullptr;
-    if (!client || !client[0]) { *errCode = -32602; *errMsg = "missing 'client'"; return; }
-    int slot = findSlotForClient(client);
-    if (slot < 0) { *errCode = -32000; *errMsg = "unknown client"; return; }
+    int slot = slotFromParams(params, -1);
+    if (slot < 0) { *errCode = -32602; *errMsg = "missing/invalid 'client' or 'slot'"; return; }
     uint16_t h = slotConn[slot];
     parked = true;                           // onDisconnect must NOT auto-re-advertise
     if (h != BLE_HS_CONN_HANDLE_NONE && server != nullptr) server->disconnect(h);
@@ -1339,7 +1361,7 @@ client path). Use it only on a network you trust.</small></p></section>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
 <button onclick=lock()>Lock</button></div>
 
-<fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table>
+<fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table><small id=cap></small>
 <div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off>
 <button onclick=pairNew()>Pair new</button><button onclick=refresh()>Refresh</button></div>
 <small>Pair advertises a free slot so an iPad can bond (accept on the iPad). Connect brings a paired
@@ -1379,21 +1401,23 @@ function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)rel
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
-function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false;
-(r.slots||[]).forEach(s=>{const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
-const st=s.conn?(s.sub?'ready':'connecting'):'idle',cls=s.conn?(s.sub?'on':'warn'):'';
+function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false,used=0;const all=r.slots||[];
+all.forEach(s=>{if(!(s.client||s.bonded||s.conn))return;used++;   // hide empty capacity rows
+const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
+const st=s.conn?(s.sub?'ready':'connecting'):(s.bonded?'bonded (idle)':'idle'),cls=s.conn?(s.sub?'on':'warn'):'';
 if(isTgt&&s.conn)tgtConn=true;
-tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client:'<i>(free slot)</i>')+
+tr.innerHTML='<td><span class="dot '+cls+'"></span></td><td>'+(s.client?s.client:'<i>(unnamed)</i>')+
 (isTgt?' &#9733;':'')+'</td><td><small>'+st+'</small></td><td class=row></td>';
-const acts=tr.lastElementChild;if(s.client){
-const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',s.client);
-const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',s.client);
+const acts=tr.lastElementChild;   // act BY SLOT so an unnamed-but-bonded slot can still be managed
+const c=document.createElement('button');c.textContent='connect';c.onclick=()=>act('connect',{slot:s.slot});
+const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',{slot:s.slot});
 const u=document.createElement('button');u.textContent='unpair';
-u.onclick=()=>{if(confirm('Unpair '+s.client+'? This deletes the BLE bond -- the device must pair again.'))act('unpair',s.client)};
-acts.append(c,d,u)}tb.append(tr)});
+u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- you must ALSO Forget it in the device's own Bluetooth settings.'))act('unpair',{slot:s.slot})};
+acts.append(c,d,u);tb.append(tr)});
+$('cap').textContent='using '+used+' of '+all.length+' remembered slots';
 setReady(tgtConn)}
 function setReady(on){ready=on;$('controls').disabled=!on;show($('notready'),!on);if(!on&&live)release()}
-async function act(m,client){try{await rpc(m,{client});refresh()}catch(e){log(e.message)}}
+async function act(m,p){try{await rpc(m,p);refresh()}catch(e){log(e.message)}}
 async function pairNew(){const n=$('newclient').value.trim();if(!n)return;
 try{await rpc('pair',{client:n});$('newclient').value='';refresh()}catch(e){log(e.message)}}
 
