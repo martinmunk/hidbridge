@@ -1366,6 +1366,9 @@ client path). Use it only on a network you trust.</small></p></section>
 <section id=app class=hide>
 <div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
 <button onclick=lock()>Lock</button></div>
+<div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off>
+<button onclick=setNick()>Rename</button>
+<small>advertised name is HIDBRIDGE-&lt;nickname&gt;[-&lt;device&gt;] -- keep it short (BLE name budget)</small></div>
 
 <fieldset><legend>Devices</legend><table><tbody id=slots></tbody></table>
 <div class=row><input id=newclient size=12 placeholder="new name" autocomplete=off>
@@ -1401,9 +1404,13 @@ async function unlock(){TOK=$('tok').value;try{
 const info=await rpc('hello');await rpc('identities');
 localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
 $('board').textContent=info.name||info.device||'hidbridge';
+$('nick').value=info.nick||'';
 show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
 catch(e){TOK=null;log('unlock failed: '+e.message)}}
 function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)release();show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
+async function setNick(){const n=$('nick').value.trim();if(!n)return;
+try{const r=await rpc('nickname',{name:n});$('board').textContent=r.name||n;$('nick').value=r.nick||n;
+log('renamed to '+(r.nick||n)+' (advertised as '+(r.name||'')+')');refresh()}catch(e){log(e.message)}}
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
