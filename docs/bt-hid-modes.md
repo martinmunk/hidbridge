@@ -35,9 +35,9 @@ Methods:
 | `move`    | `{dx, dy}`                      | `mouse_move_reports`       |
 | `click`   | `{button?}`                     | `mouse_click_reports`      |
 | `scroll`  | `{clicks}`                      | `mouse_scroll_reports`     |
-| `moveabs` | `{x, y}` (fractions 0..1)       | `abs_move_reports`         |
-| `tap`     | `{x, y, button?}`               | `abs_click_reports`        |
-| `touch`   | `{x, y}`                        | `digitizer_tap_reports`    |
+
+(Relative-only: the report set is keyboard + relative mouse. Absolute-pointer methods -- `moveabs` /
+`tap` / `touch` -- were removed with the absolute mouse + digitizer reports; see the top-level README.)
 
 - Any method with a `"dry": true` param returns `result.frames` (the built report bytes as
   `<reportID hex><body hex>` strings) WITHOUT notifying -- the verification / no-BLE path.
@@ -53,9 +53,9 @@ capabilities handshake, so the host adapts to older firmware instead of assuming
 
 ```bash
 # CLI: --rpc routes the normal verbs through Mode 1 (the board builds the reports)
-hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 type "hello ipad"
-hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 tap 0.5 0.5
-hidbridge --rpc --backend net --host hidbridge-esp32.local status   # shows the hello handshake
+hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 type "hello world"
+hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 move 40 0
+hidbridge --rpc --backend net --host hidbridge-<nick>.local status   # shows the hello handshake
 ```
 
 ```python
@@ -63,7 +63,7 @@ from hidbridge.mode1 import open_client
 with open_client("esp32:/dev/ttyUSB3") as c:
     print(c.hello())              # {proto, device, name, modes, caps}
     c.type_text("hello")
-    c.tap(0.5, 0.5)
+    c.move(40, 0)
 ```
 
 ## Mode 2 -- "just a radio" (the frame-relay path)
@@ -71,9 +71,8 @@ with open_client("esp32:/dev/ttyUSB3") as c:
 The host builds the exact report bytes (`reports.py` + `controller.py`) and the board relays them as
 BLE notifications -- the board is a dumb pipe. This is the original path and it is unchanged.
 
-- Wire format: compact newline lines. `K<hex>` keyboard, `M<hex>` relative mouse, `A<hex>` absolute
-  mouse, `D<hex>` digitizer; plus management (`I`/`T`/`S`/`X`/`O`/`P`/`V`/`N`/`W`/`@`). See the
-  firmware header comment for the full grammar.
+- Wire format: compact newline lines. `K<hex>` keyboard, `M<hex>` relative mouse; plus management
+  (`I`/`T`/`S`/`X`/`O`/`P`/`V`/`N`/`W`/`@`). See the firmware header comment for the full grammar.
 - This is the right path when the *host* must own the logic -- e.g. so all three backends (BlueZ,
   Pico, ESP32) emit byte-identical reports from one shared report layer, or so a passcode is expanded
   to frames host-side rather than sent as a string.
