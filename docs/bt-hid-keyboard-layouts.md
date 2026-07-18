@@ -34,7 +34,8 @@ arrive as multi-byte UTF-8, so `emitType` UTF-8-decodes each char before mapping
   in NVS (`lay<n>`, alongside the client label `cli<n>`), default `us`. The active layout for
   `type`/`key` is the **current target slot's**. Set it with the `layout` JSON-RPC method
   (`{"method":"layout","params":{"slot":2,"name":"uk"}}` -- address by `slot` index or `client` name,
-  default the current target; `name` is `us`/`da`/`uk`). `identities` reports each slot's `layout`.
+  default the current target; `name` is `us`/`da`/`uk`) or the per-device dropdown on the control web
+  page (its options are the same three). `identities` reports each slot's `layout`.
   So laptop3 can be `da` while a UK host is `uk` and a US host stays `us`, each remembered
   independently. Pico mirrors the header (RAM-only per-slot layout + an optional `L<us|da|uk>` serial
   command).

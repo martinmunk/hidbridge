@@ -1585,7 +1585,7 @@ const u=document.createElement('button');u.textContent='unpair';
 u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- also Forget it in its own Bluetooth settings afterwards.'))act('unpair',{slot:s.slot})};
 // per-device keyboard layout (us/da/uk) -- the char->scancode map for THIS host, persisted per slot
 const ly=document.createElement('select');ly.title='keyboard layout of this device';
-['us','da'].forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
+['us','da','uk'].forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
 ly.onchange=()=>act('layout',{slot:s.slot,name:ly.value});
 acts.append(c,d,u,ly);tb.append(tr)});
 setReady(tgtConn)}
