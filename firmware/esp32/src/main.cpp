@@ -875,6 +875,10 @@ static void esp32FillHello(JsonObject r) {
   r["device"] = DEVICE_NAME;
   r["nick"] = g_nick;
   r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
+  // The REAL radio state (not `parked`): the board advertises only transiently while a connect/pair
+  // brings a slot up, so the page shows "advertising as <advName>" only when this is actually true.
+  r["advertising"] = NimBLEDevice::getAdvertising()->isAdvertising();
+  r["advName"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
   JsonArray caps = r["caps"].to<JsonArray>();
   caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
@@ -1018,7 +1022,9 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     *handled = true;
     JsonArray arr = result["slots"].to<JsonArray>();
     for (int i = 0; i < NUM_SLOTS; i++) fillIdentity(arr.add<JsonObject>(), i);
-    result["adv"] = advSlot;
+    result["adv"] = advSlot;                     // index of the advertising-identity slot (a pointer)
+    result["advertising"] = NimBLEDevice::getAdvertising()->isAdvertising();  // ACTUAL radio state
+    result["advName"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];  // its adv name
     result["tgt"] = g_activeTarget;              // the CALLING session's own claimed slot (per-session)
     return;
   }
@@ -1479,6 +1485,11 @@ align-items:center;justify-content:center;text-align:center;user-select:none;cur
 #pad.live{border-color:#2ecc71;background:#2ecc7122}small{opacity:.7}</style>
 </head><body><h1>hidbridge control</h1>
 
+<!-- Board IDENTITY header, shown on BOTH the login and app screens: #board = the board NICKNAME (its
+persistent name, not a slot), #advind appears ONLY while the radio is actually advertising an identity. -->
+<div class=row style="justify-content:space-between;align-items:baseline"><b id=board>hidbridge</b>
+<span id=advind class=hide title="the board is advertising this identity right now"><small>advertising as <b id=advname></b></small></span></div>
+
 <section id=login>
 <p>Enter the board token to unlock control.</p>
 <div class=row><input id=tok type=password size=26 placeholder="net.token" autocomplete=off
@@ -1488,9 +1499,8 @@ onkeydown="if(event.key=='Enter')unlock()">
 here are NOT encrypted (unlike the TLS client path). Use it only on a network you trust.</small></p></section>
 
 <section id=app class=hide>
-<div class=row style="justify-content:space-between"><b id=board>hidbridge</b>
-<span class=row><span id=wss class=dot title="not connected to the board"></span>
-<button onclick=lock()>Lock</button></span></div>
+<div class=row style="justify-content:flex-end"><span id=wss class=dot title="not connected to the board"></span>
+<button onclick=lock()>Lock</button></div>
 <div class=row><small>nickname</small><input id=nick size=10 placeholder="nickname" autocomplete=off
 onkeydown="if(event.key=='Enter')setNick()">
 <button onclick=setNick()>Rename</button>
@@ -1524,6 +1534,11 @@ under X11.</small>
 let TOK=null,id=0,ready=false,live=false,LAYOUTS=['us'];   // LAYOUTS filled from hello.layouts at unlock
 const $=s=>document.getElementById(s),show=(el,on)=>el.classList.toggle('hide',!on);
 const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
+// Header = the board NICKNAME (persistent identity), shown on login + app. advind = the transient
+// "advertising as <advName>" badge, driven by hello.advertising / identities.advertising (real radio
+// state, not `parked`) -- hidden whenever the board isn't actually advertising.
+function setBoard(i){$('board').textContent=(i&&i.nick)?('HIDBRIDGE-'+i.nick):((i&&i.device)||'hidbridge')}
+function setAdv(i){const on=!!(i&&i.advertising);show($('advind'),on);if(on)$('advname').textContent=i.advName||i.name||''}
 
 // ---- WS DRIVE CHANNEL. While unlocked the page holds ONE WebSocket to :81 open and drives the board
 // over it EXCLUSIVELY (every JSON-RPC goes over the WS, replies id-matched -- there is no HTTP fallback).
@@ -1566,7 +1581,7 @@ if(!await wsConnect())throw new Error('could not open the live link to the board
 const info=await rpc('hello');await rpc('identities');
 LAYOUTS=(info.layouts&&info.layouts.length)?info.layouts:['us'];   // dropdown options come from the board
 localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
-$('board').textContent=info.name||info.device||'hidbridge';
+setBoard(info);setAdv(info);
 $('nick').value=info.nick||'';
 show($('login'),false);show($('app'),true);refresh();startPoll();log('unlocked')}
 catch(e){TOK=null;log('unlock failed: '+e.message)}}
@@ -1574,12 +1589,12 @@ function lock(){TOK=null;localStorage.removeItem('hbtok');stopPoll();if(live)rel
 if(WS){try{WS.close()}catch(e){}}WS=null;wsReady=false;setWsState(false);
 show($('app'),false);show($('login'),true);$('tok').value='';log('locked')}
 async function setNick(){const n=$('nick').value.trim();if(!n)return;
-try{const r=await rpc('nickname',{name:n});$('board').textContent=r.name||n;$('nick').value=r.nick||n;
+try{const r=await rpc('nickname',{name:n});setBoard({nick:r.nick||n});$('nick').value=r.nick||n;
 log('renamed to '+(r.nick||n)+' (advertised as '+(r.name||'')+')');refresh()}catch(e){log(e.message)}}
 
 let poll=null;const startPoll=()=>poll=setInterval(refresh,3000),stopPoll=()=>{if(poll)clearInterval(poll);poll=null};
 async function refresh(){try{renderSlots(await rpc('identities'))}catch(e){log(e.message)}}
-function renderSlots(r){const tb=$('slots');tb.innerHTML='';let tgtConn=false;
+function renderSlots(r){setAdv(r);const tb=$('slots');tb.innerHTML='';let tgtConn=false;   // live adv badge from the periodic refresh
 (r.slots||[]).forEach(s=>{if(!(s.client||s.bonded||s.conn))return;   // only set-up slots; else empty
 const tr=document.createElement('tr');const isTgt=s.slot===r.tgt;
 const st=s.conn?(s.sub?'ready':'connecting'):(s.bonded?'bonded (idle)':'idle'),cls=s.conn?(s.sub?'on':'warn'):'';
@@ -1662,7 +1677,13 @@ else if(!p){try{pad.requestPointerLock()}catch(e){}}}});
 document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;
 if(lk&&!live)goLive();else if(!lk&&live)release()});
 document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + click buttons still work.'));
-{const t=localStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}}   // auto-unlock if remembered
+// Pre-auth: `hello` is answered before the token is accepted, so the board NICKNAME (+ adv badge) can
+// show on the LOGIN screen too -- open a throwaway WS, ask hello only, populate, close. No drive access.
+function loadHello(){let s;try{s=new WebSocket('ws://'+location.hostname+':81/')}catch(e){return}
+s.onopen=()=>{try{s.send(JSON.stringify({jsonrpc:'2.0',id:0,method:'hello'}))}catch(e){}};
+s.onmessage=ev=>{let j;try{j=JSON.parse(ev.data)}catch(e){return}
+if(j.result&&j.result.nick!==undefined){setBoard(j.result);setAdv(j.result);try{s.close()}catch(e){}}};}
+{const t=localStorage.getItem('hbtok');if(t){$('tok').value=t;unlock()}else loadHello()}   // auto-unlock if remembered, else just show the board name
 </script></body></html>)HTML";
 
 static void handleWebRoot() { webServer.send_P(200, "text/html", CONTROL_PAGE); }
