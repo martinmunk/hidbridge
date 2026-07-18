@@ -43,6 +43,17 @@ inline int  layoutFromName(const char* n) {
   return LAYOUT_US;
 }
 inline const char* layoutName(int l) { return l == LAYOUT_DA ? "da" : l == LAYOUT_UK ? "uk" : "us"; }
+// The known layout NAMES as an enumerable list -- the SINGLE source for "what layouts exist", so the
+// `layout`-method validation AND the control page's dropdown both read it and cannot drift (the page
+// gets it from hello.layouts; see esp32FillHello). Mirrors reports.LAYOUTS keys -- guarded by
+// test_bt_hid_layouts.py::test_firmware_layout_names_match_reports. Order = the page's display order.
+static const char* const LAYOUT_NAMES[] = { "us", "da", "uk" };
+static const int LAYOUT_COUNT = (int)(sizeof(LAYOUT_NAMES) / sizeof(LAYOUT_NAMES[0]));
+inline bool isKnownLayout(const char* n) {
+  if (!n) return false;
+  for (int i = 0; i < LAYOUT_COUNT; i++) if (!strcasecmp(n, LAYOUT_NAMES[i])) return true;
+  return false;
+}
 
 // Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE (US layer).
 inline int baseUsage(char c) {

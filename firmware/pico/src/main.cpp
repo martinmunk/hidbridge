@@ -293,7 +293,7 @@ static void handle_line(char *line) {
         char *rest = line + 1;
         while (*rest == ' ') rest++;
         if (*rest) {
-            if (!strcasecmp(rest, "us") || !strcasecmp(rest, "da") || !strcasecmp(rest, "uk"))
+            if (hbmode1::isKnownLayout(rest))    // single-sourced list (hbmode1::LAYOUT_NAMES)
                 slot_layout[tgt_slot] = hbmode1::layoutFromName(rest);
             else { Serial.println("ERR badlayout"); return; }
         }

@@ -878,7 +878,11 @@ static void esp32FillHello(JsonObject r) {
   JsonArray caps = r["caps"].to<JsonArray>();
   caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
-  caps.add("layout");                            // per-slot keyboard layout (us/da/uk)
+  caps.add("layout");                            // per-slot keyboard layout (per-device)
+  // The layouts this board accepts -- the control page builds its per-device dropdown from THIS list
+  // (not a hardcoded JS array), so adding a layout in hidbridge_mode1.h is enough. Single-sourced.
+  JsonArray la = r["layouts"].to<JsonArray>();
+  for (int i = 0; i < hbmode1::LAYOUT_COUNT; i++) la.add(hbmode1::LAYOUT_NAMES[i]);
 #ifdef HIDBRIDGE_NET
   caps.add("net");
   r["mdns"] = String(g_mdnsHost) + ".local";     // how to reach this specific board over the network
@@ -1027,8 +1031,8 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "unknown/invalid 'client' or 'slot'"; return; }
     const char* name = params["name"] | (const char*)nullptr;
     if (name && name[0]) {
-      if (strcasecmp(name, "us") && strcasecmp(name, "da") && strcasecmp(name, "uk")) {
-        *errCode = -32602; *errMsg = "layout must be 'us', 'da', or 'uk'"; return;
+      if (!hbmode1::isKnownLayout(name)) {       // validate against the single-sourced list (hello.layouts)
+        *errCode = -32602; *errMsg = "unknown layout (see hello.layouts)"; return;
       }
       slotLayout[slot] = hbmode1::layoutFromName(name);
       persistSlotLayout(slot);                // survive a reboot/reflash, like the client label does
@@ -1514,7 +1518,7 @@ Alt/Cmd + a key sends a shortcut (e.g. Cmd+C); a bare key types. Click = tap (no
 </fieldset></section>
 
 <div id=out></div><script>
-let TOK=null,id=0,ready=false,live=false;
+let TOK=null,id=0,ready=false,live=false,LAYOUTS=['us'];   // LAYOUTS filled from hello.layouts at unlock
 const $=s=>document.getElementById(s),show=(el,on)=>el.classList.toggle('hide',!on);
 const log=x=>$('out').textContent=(typeof x=='string')?x:JSON.stringify(x);
 
@@ -1557,6 +1561,7 @@ setTimeout(()=>{if(pending[mid]){delete pending[mid];rej(new Error('timeout'))}}
 async function unlock(){TOK=$('tok').value;try{
 if(!await wsConnect())throw new Error('could not open the live link to the board (check the token + network)');
 const info=await rpc('hello');await rpc('identities');
+LAYOUTS=(info.layouts&&info.layouts.length)?info.layouts:['us'];   // dropdown options come from the board
 localStorage.setItem('hbtok',TOK);            // remembered for next time (cleared only by Lock)
 $('board').textContent=info.name||info.device||'hidbridge';
 $('nick').value=info.nick||'';
@@ -1583,9 +1588,10 @@ const c=document.createElement('button');c.textContent='connect';c.onclick=()=>a
 const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',{slot:s.slot});
 const u=document.createElement('button');u.textContent='unpair';
 u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- also Forget it in its own Bluetooth settings afterwards.'))act('unpair',{slot:s.slot})};
-// per-device keyboard layout (us/da/uk) -- the char->scancode map for THIS host, persisted per slot
+// per-device keyboard layout -- the char->scancode map for THIS host, persisted per slot. Options come
+// from the board (hello.layouts, stored in LAYOUTS) so this dropdown can't drift from what it accepts.
 const ly=document.createElement('select');ly.title='keyboard layout of this device';
-['us','da','uk'].forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
+LAYOUTS.forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
 ly.onchange=()=>act('layout',{slot:s.slot,name:ly.value});
 acts.append(c,d,u,ly);tb.append(tr)});
 setReady(tgtConn)}

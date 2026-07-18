@@ -31,6 +31,21 @@ def _mod_constants(src: str) -> dict[str, int]:
     return mods
 
 
+def test_firmware_layout_names_match_reports():
+    """The firmware's enumerable LAYOUT_NAMES[] (hidbridge_mode1.h) is the SINGLE source for "which
+    layouts exist" -- it drives both the `layout`-method validation and the control page's dropdown
+    (via hello.layouts). It must list exactly the layouts reports.py knows, or the page would offer a
+    layout the host can't build (or hide one it can). Parse the C array and compare to reports.LAYOUTS."""
+    src = HEADER.read_text()
+    block = src[src.index("LAYOUT_NAMES[]"):]
+    block = block[block.index("{") + 1:block.index("}")]
+    fw_names = re.findall(r'"([^"]+)"', block)
+    assert fw_names, "could not parse LAYOUT_NAMES[] from the firmware header"
+    assert set(fw_names) == set(R.LAYOUTS), (
+        f"layout-name list drift -- firmware LAYOUT_NAMES={sorted(fw_names)} "
+        f"reports.LAYOUTS={sorted(R.LAYOUTS)}")
+
+
 def _c_char_literal(lit: str) -> int:
     """Codepoint of a C char literal token like 'a', '\\n', '\\\\', '\\''  (quotes included)."""
     inner = lit[1:-1]
