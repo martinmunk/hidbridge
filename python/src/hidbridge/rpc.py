@@ -1,15 +1,20 @@
-"""Mode 1 client -- drive a hidbridge board by telling it WHAT to do (JSON-RPC 2.0 over JSON-lines).
+"""RPC client -- drive a hidbridge board by telling it WHAT to do (JSON-RPC 2.0 over JSON-lines).
 
-Mode 1 is the "smart firmware" path: the board owns the HID report descriptor + report building, and
-the host sends high-level INTENT -- `{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`
--- rather than pre-built report bytes. Contrast Mode 2 (`controller.py` + the frame transports), where
-the host builds the exact report bytes and the board is "just a radio".
+The "rpc" drive path is the smart-firmware route: the board owns the HID report descriptor + report
+building, and the host sends high-level INTENT --
+`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}` -- rather than pre-built report
+bytes. Contrast the "raw" path (`controller.py` + the frame transports), where the host builds the
+exact report bytes and the board is "just a radio".
 
-Both modes talk to the SAME firmware over the same channel (serial or TCP); the board routes a line to
-Mode 1 iff it is a JSON object (starts with `{`), else to the Mode 2 single-char frame handler. So a
-network client authenticates once with the Mode 2 `@<token>` line, then sends JSON-RPC.
+Both paths talk to the SAME firmware over the same channel (serial or TCP); the board routes a line to
+the RPC handler iff it is a JSON object (starts with `{`), else to the raw single-char frame handler.
+So a network client authenticates once with the raw `@<token>` line, then sends JSON-RPC.
 
-Wire protocol (see firmware/esp32/src/main.cpp handleJsonRpc):
+This module is also the board driver's device-management channel: `identities`/`pair`/`unpair`/
+`connect`/`disconnect`/`nickname`/`layout` resolve a device by NAME (client label) to a firmware slot,
+so `hidbridge.board.McuBoard` uses it regardless of the drive path.
+
+Wire protocol (see firmware/shared/hidbridge_rpc.h handleJsonRpc):
   request : {"jsonrpc":"2.0","id":<n>,"method":<m>,"params":{...}}
   response: {"jsonrpc":"2.0","id":<n>,"result":{...}} | {..,"error":{"code":..,"message":..}}
   a params `"dry":true` returns result.frames (the built report bytes as hex) WITHOUT notifying.
@@ -33,8 +38,8 @@ DEFAULT_BAUD = 115200
 KNOWN_PROTO = 1
 
 
-class Mode1Error(RuntimeError):
-    """A Mode 1 (JSON-RPC) call failed: transport error, or a JSON-RPC error object was returned."""
+class RpcError(RuntimeError):
+    """An RPC (JSON-RPC) call failed: transport error, or a JSON-RPC error object was returned."""
 
 
 @dataclass
@@ -46,11 +51,12 @@ class ServerInfo:
     device: str = ""
     name: str = ""
     nick: str = ""
+    fw: str = ""
     modes: tuple = ()
     raw: dict = field(default_factory=dict)
 
 
-class Mode1Client:
+class RpcClient:
     """Send JSON-RPC requests to a board over a duck-typed channel (write(bytes)/readline()->bytes).
 
     The channel is a `serial_link` port, a `socket_link.SocketLine`, or a fake in tests.
@@ -64,7 +70,7 @@ class Mode1Client:
 
     # -- JSON-RPC core --
     def call(self, method: str, params: dict | None = None, *, dry: bool = False) -> dict:
-        """Send one request, return its `result` dict (raises Mode1Error on a JSON-RPC error)."""
+        """Send one request, return its `result` dict (raises RpcError on a JSON-RPC error)."""
         self._id += 1
         p = dict(params or {})
         if dry:
@@ -75,10 +81,10 @@ class Mode1Client:
         for _ in range(self._max_reads):
             raw = self._ch.readline()
             if not raw:
-                raise Mode1Error(f"no response to {method!r} (timeout)")
+                raise RpcError(f"no response to {method!r} (timeout)")
             line = raw.decode("ascii", "replace").strip()
             if not line.startswith("{"):
-                continue                      # a Mode-2 banner / boot line -- skip
+                continue                      # a raw-path banner / boot line -- skip
             try:
                 msg = json.loads(line)
             except ValueError:
@@ -89,13 +95,13 @@ class Mode1Client:
                 continue                      # a different (pipelined) reply -- skip
             err = msg.get("error")
             if err:
-                raise Mode1Error(f"{method}: {err.get('message')} (code {err.get('code')})")
+                raise RpcError(f"{method}: {err.get('message')} (code {err.get('code')})")
             return msg.get("result", {}) or {}
-        raise Mode1Error(f"no matching JSON-RPC response to {method!r}")
+        raise RpcError(f"no matching JSON-RPC response to {method!r}")
 
     # -- capabilities handshake + version handling --
     def hello(self) -> dict:
-        """Discover the board: {proto, device, name, nick, modes, caps}. Caches it as `.info`.
+        """Discover the board: {proto, device, name, nick, fw, modes, caps}. Caches it as `.info`.
 
         If the board's protocol is NEWER than this client knows, warn (don't fail) -- we proceed on
         the capabilities we both share. Allowed unauthenticated."""
@@ -103,7 +109,7 @@ class Mode1Client:
         self._info = ServerInfo(
             proto=int(r.get("proto", 0)), caps=frozenset(r.get("caps") or []),
             device=r.get("device", ""), name=r.get("name", ""), nick=r.get("nick", ""),
-            modes=tuple(r.get("modes") or ()), raw=r)
+            fw=r.get("fw", ""), modes=tuple(r.get("modes") or ()), raw=r)
         if self._info.proto > KNOWN_PROTO:
             warnings.warn(
                 f"board speaks protocol {self._info.proto}; this client knows {KNOWN_PROTO} -- using "
@@ -119,7 +125,7 @@ class Mode1Client:
     def supports(self, cap: str) -> bool:
         try:
             return cap in self.info().caps
-        except Mode1Error:
+        except RpcError:
             return False
 
     def require_cap(self, cap: str) -> None:
@@ -127,23 +133,23 @@ class Mode1Client:
         would reject cryptically."""
         info = self.info()
         if cap not in info.caps:
-            raise Mode1Error(
+            raise RpcError(
                 f"board {info.device or '?'} (proto {info.proto}) lacks capability {cap!r}; "
                 f"it advertises {sorted(info.caps)}")
 
-    # -- authentication (network only; serial is trusted). Uses the Mode 2 `@<token>` line. --
+    # -- authentication (network only; serial is trusted). Uses the raw-path `@<token>` line. --
     def authenticate(self, token: str) -> None:
         self._ch.write(("@" + token + "\n").encode("ascii"))
         for _ in range(self._max_reads):
             raw = self._ch.readline()
             if not raw:
-                raise Mode1Error("no response to authenticate (timeout)")
+                raise RpcError("no response to authenticate (timeout)")
             line = raw.decode("ascii", "replace").strip()
             if line.startswith("OK auth"):
                 return
             if line.startswith("ERR"):
-                raise Mode1Error("network auth rejected (bad or unprovisioned token)")
-        raise Mode1Error("no auth acknowledgement")
+                raise RpcError("network auth rejected (bad or unprovisioned token)")
+        raise RpcError("no auth acknowledgement")
 
     # -- high-level actions ("tell it WHAT") --
     def type_text(self, text: str, *, dry: bool = False) -> dict:
@@ -174,12 +180,12 @@ class Mode1Client:
         return self.call("scroll", {"clicks": int(clicks)}, dry=dry)
 
     def frames(self, frames, *, dry: bool = False) -> dict:
-        """Mode 2 semantics via JSON-RPC: relay PRE-BUILT report frames ('<ridHex><bodyHex>' strings,
+        """Raw semantics via JSON-RPC: relay PRE-BUILT report frames ('<ridHex><bodyHex>' strings,
         the shape a dry run returns) -- the board just notifies them."""
         self.require_cap("frames")
         return self.call("frames", {"frames": list(frames)}, dry=dry)
 
-    # -- Mode 1 connection management BY CLIENT NAME (firmware-specific; see caps 'connect'/'nickname').
+    # -- connection management BY CLIENT NAME (firmware-specific; see caps 'connect'/'nickname').
     #    Each capability-gates so an older/minimal board gives a clear error instead of a cryptic one. --
     def nickname(self, name: str | None = None) -> dict:
         """Get (no arg) or set the board's nickname. The advertised name is HIDBRIDGE-<nick>."""
@@ -257,8 +263,8 @@ def _split_target(target: str | None) -> tuple[str, str | None]:
 
 
 def open_client(target: str | None = None, *, token: str | None = None,
-                timeout: float = 3.0) -> Mode1Client:
-    """Open a Mode1Client to a board.
+                timeout: float = 3.0) -> RpcClient:
+    """Open an RpcClient to a board.
 
     target: 'esp32:/dev/ttyUSB3' / 'pico:/dev/ttyACM0' / a bare serial path / None (autodetect the
     ESP32); or 'net:<host>[:port]' for TCP. A network client authenticates with the token
@@ -271,18 +277,18 @@ def open_client(target: str | None = None, *, token: str | None = None,
         host, port = TN._split_host_port(arg)
         tok = TN.load_token(token)
         if not tok:
-            raise Mode1Error(
+            raise RpcError(
                 "the network backend is TLS-encrypted and needs the board token (the TLS pre-shared "
                 "key); provision it with `hidbridge net-provision`, then set BT_HID_NET_TOKEN or "
                 "~/.config/bt_hid/net.token")
         # token = the TLS-PSK: the handshake authenticates. authenticate() re-sends @token over the
         # now-encrypted channel for the board's existing gate (redundant but harmless).
-        cli = Mode1Client(socket_link.open_socket(host, port, timeout, token=tok))
+        cli = RpcClient(socket_link.open_socket(host, port, timeout, token=tok))
         cli.authenticate(tok)
         return cli
     from . import serial_link
     from .transport_esp32 import detect_port
     dev = arg or detect_port()
     if not dev:
-        raise Mode1Error("no serial device; pass esp32:/dev/ttyUSBx or set BT_HID_ESP32_PORT")
-    return Mode1Client(serial_link.open_serial(dev, DEFAULT_BAUD, timeout, prefer_raw=True))
+        raise RpcError("no serial device; pass esp32:/dev/ttyUSBx or set BT_HID_ESP32_PORT")
+    return RpcClient(serial_link.open_serial(dev, DEFAULT_BAUD, timeout, prefer_raw=True))

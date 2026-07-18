@@ -41,7 +41,7 @@ from gi.repository import GLib
 from hidbridge import adapter as A  # noqa: E402
 from hidbridge import central_core as CC  # noqa: E402
 from hidbridge import reports as R  # noqa: E402
-from hidbridge.mode1 import Mode1Error  # noqa: E402
+from hidbridge.rpc import RpcError  # noqa: E402
 
 BLUEZ = "org.bluez"
 OM = "org.freedesktop.DBus.ObjectManager"
@@ -294,7 +294,7 @@ class CentralSelfTest:
         # scenario state (unused on the classic self-test path)
         self._seq = []               # ORDERED captured notification bodies on the scenario char
         self._scenario_fw_id = None  # firmware report id we capture on
-        self._scenario_client = None # Mode1Client bound to the transport's open channel
+        self._scenario_client = None # RpcClient bound to the transport's open channel
         self._scenario_teardown = None
 
     # ---- dbus plumbing ----
@@ -780,7 +780,7 @@ class CentralSelfTest:
         GLib.timeout_add_seconds(4, self._settle)
 
     def _rpc_client(self):
-        """A Mode1Client bound to the transport's OWN open channel (transport._ser).
+        """An RpcClient bound to the transport's OWN open channel (transport._ser).
 
         Reusing the ALREADY-open serial/TCP channel is deliberate: opening a second connection to the
         same board would fight the first (a serial port is single-open; the board resets on a fresh
@@ -797,8 +797,8 @@ class CentralSelfTest:
                     break
         if ser is None:
             raise RuntimeError("mode=rpc: transport exposes no open JSON-RPC channel (_ser)")
-        from hidbridge.mode1 import Mode1Client
-        return Mode1Client(ser)
+        from hidbridge.rpc import RpcClient
+        return RpcClient(ser)
 
     def _settle(self):
         self._verdict()
@@ -876,7 +876,7 @@ class CentralSelfTest:
             if setup is not None:
                 setup(client)
             spec["drive"](client)
-        except Mode1Error as e:
+        except RpcError as e:
             # A missing method/capability (e.g. no per-slot `layout`, or no `press`/`release`) means
             # the board is not on the current firmware -- a PRECONDITION miss, so SKIP (never fail): a
             # real byte mismatch is decided later, in the verdict, only on notifications that ARRIVED.

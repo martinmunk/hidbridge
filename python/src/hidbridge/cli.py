@@ -61,7 +61,7 @@ CONTROL_SOCK = N.control_sock("default", env_override=os.environ.get("BT_HID_SOC
 # (e.g. "esp32" = an ESP32 BLE-HID board over USB serial). Non-dongle backends route the report
 # commands through a HidController transport instead of the daemon socket. Set once in main().
 _ALT_TRANSPORT = None      # a controller transport when --backend is non-dongle, else None
-_RPC_CLIENT = None         # a mode1.Mode1Client when --rpc (Mode 1), else None
+_RPC_CLIENT = None         # an rpc.RpcClient when --rpc, else None
 _BACKEND = "dongle"
 
 BLUEZ = "org.bluez"
@@ -103,7 +103,7 @@ def _alt_send(cmd: dict) -> dict:
 def _rpc_send(cmd: dict) -> dict:
     """Route a daemon-style command dict to the Mode 1 (JSON-RPC) client -- the board builds the
     reports. Mirrors _alt_send, but tells the board WHAT to do instead of sending it frames."""
-    from hidbridge.mode1 import Mode1Error
+    from hidbridge.rpc import RpcError
     c = _RPC_CLIENT
     t = cmd.get("cmd")
     try:
@@ -127,7 +127,7 @@ def _rpc_send(cmd: dict) -> dict:
             return {"ok": False, "error": f"cmd {t!r} unsupported in --rpc (Mode 1) mode"}
         # a report method returns {sent, conn}; conn False == accepted but no central (like OK noconn)
         return {"ok": True, "backend": "rpc", "sent": res.get("sent"), "conn": res.get("conn")}
-    except Mode1Error as e:
+    except RpcError as e:
         return {"ok": False, "error": f"rpc: {e}"}
 
 
@@ -735,7 +735,7 @@ def _init_backend(args):
 
     # Mode 1 (--rpc): drive the board over JSON-RPC; it builds the reports. Needs an MCU/net target.
     if getattr(args, "rpc", False):
-        from hidbridge import mode1
+        from hidbridge import rpc
         if _BACKEND == "net":
             host = getattr(args, "host", None) or os.environ.get("BT_HID_NET_HOST")
             target = "net:" + host if host else "net:"
@@ -744,7 +744,7 @@ def _init_backend(args):
             port = getattr(args, "port", None) or getattr(args, "pico_port", None)
             target = f"{fam}:{port}" if port else fam
         try:
-            _RPC_CLIENT = mode1.open_client(target)
+            _RPC_CLIENT = rpc.open_client(target)
         except Exception as e:  # noqa: BLE001
             print(f"error: --rpc (Mode 1) client unavailable: {e}", file=sys.stderr)
             sys.exit(2)

@@ -200,7 +200,7 @@ def session(location, device, *, timeout: float = DEFAULT_CONNECT_TIMEOUT, **opt
 
 
 def _resolve_board(location, *, token=None, mode="raw", **opts):
-    # Real serial/net/dongle board drivers + autodetect land in the CLI-rewire phase; until then the
-    # API core is exercised by injecting `backend=` (see HidBridge).
-    raise NotImplementedError(
-        "resolving a real board from a location is not wired yet -- pass backend= for now")
+    # Lazy-import the real drivers so `import hidbridge` stays free of serial/dbus deps (bridge.py
+    # itself imports only the stdlib-clean controller/reports layers at module load).
+    from .board import resolve_board
+    return resolve_board(location, token=token, mode=mode, **opts)

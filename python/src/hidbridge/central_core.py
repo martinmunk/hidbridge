@@ -570,7 +570,7 @@ def frames_method_hex(report_id: int, body: bytes) -> str:
       * mode=rpc    -- a Mode 1 JSON-RPC `frames` call over the transport's OWN open channel, which
                        RELAYS these pre-built report bytes.
     A `frames` entry is a 2-hex report id followed by the body as hex -- the exact shape a Mode 1
-    dry run returns and `mode1.Mode1Client.frames()` relays. Pure so the offline suite pins the
+    dry run returns and `rpc.RpcClient.frames()` relays. Pure so the offline suite pins the
     encoding both modes share without a board.
     """
     return "%02x" % report_id + bytes(body).hex()
