@@ -4,23 +4,24 @@ Import `bt_hid.reports` for the PURE report layer (stdlib only). The emulator / 
 pull in bluetooth deps (AF_BLUETOOTH sockets, dbus) that only exist under the system python, so
 they are NOT imported here -- import them explicitly when needed.
 
-`hidbridge.open()` is the driving entry point (Bridge -> connect() -> Session). The `bridge` module
-imports only the stdlib-clean controller/reports layers at load time (the real serial/net/dongle
-board drivers are pulled in lazily), so `import hidbridge` stays free of bluetooth/serial deps.
+`HidBridge` is the driving entry point (`with HidBridge(...) as bridge: bridge.connect(...) as s`),
+with `session()` a single-host shorthand. The `bridge` module imports only the stdlib-clean
+controller/reports layers at load time (the real serial/net/dongle board drivers are pulled in
+lazily), so `import hidbridge` stays free of bluetooth/serial deps.
 """
 
 from .bridge import (  # noqa: E402
-    Bridge,
     CapacityError,
     ConnectTimeout,
+    HidBridge,
     HidbridgeError,
+    HidSession,
     NotBonded,
-    Session,
     Unsupported,
-    open,
+    session,
 )
 
 __all__ = [
-    "open", "Bridge", "Session",
+    "HidBridge", "HidSession", "session",
     "HidbridgeError", "NotBonded", "ConnectTimeout", "Unsupported", "CapacityError",
 ]

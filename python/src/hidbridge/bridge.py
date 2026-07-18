@@ -1,13 +1,16 @@
-"""The context-manager driving API: hidbridge.open() -> Bridge -> connect() -> Session.
+"""The context-manager driving API: HidBridge -> connect() -> HidSession.
 
 Two levels, mirroring the hardware:
-  * a **Bridge** is the board channel (a serial/net MCU, or a BlueZ dongle). Opening it probes the
+  * a **HidBridge** is the board channel (a serial/net MCU, or a BlueZ dongle). Opening it probes the
     board so it SELF-IDENTIFIES -- the caller passes a LOCATION ("/dev/ttyUSB3", a host, "hci1", or
     nothing to autodetect), never a board type. Board facts land in `bridge.info` /
-    `bridge.capabilities`. The Bridge also does device management: list_devices / pair / unpair.
-  * a **Session** is one connect-on-demand link to a bonded host. `bridge.connect(name)` advertises
-    that identity, waits until it is ready, and hands back a Session you drive (type/key/move/click/
+    `bridge.capabilities`. The bridge also does device management: list_devices / pair / unpair.
+  * a **HidSession** is one connect-on-demand link to a bonded host. `bridge.connect(name)` advertises
+    that identity, waits until it is ready, and hands back a session you drive (type/key/move/click/
     unlock). Leaving the `with` disconnects it but keeps the bond -- no idle connections.
+
+For the single-host case, `hidbridge.session(location, device)` is a shorthand that opens the bridge,
+connects the one device, and yields the HidSession (tearing both down on exit).
 
 Multiple sessions can be open at once when the board supports it (the ESP32 holds several identities);
 otherwise `connect()` raises. Errors are typed: NotBonded / ConnectTimeout / Unsupported /
@@ -18,6 +21,8 @@ them -- offline byte-parity, the old "Mode 2"); mode="rpc" has the board build t
 """
 
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 from .controller import HidController
 
@@ -49,21 +54,21 @@ class CapacityError(HidbridgeError):
 
 
 # --------------------------------------------------------------------------- #
-# Session -- one live link
+# HidSession -- one live link
 # --------------------------------------------------------------------------- #
-class Session:
+class HidSession:
     """One connected host, for the duration of a `with`. Enter = already connected + ready (the work
-    happened in Bridge.connect); exit = disconnect, bond kept. Drive it with type/key/move/click/
+    happened in HidBridge.connect); exit = disconnect, bond kept. Drive it with type/key/move/click/
     scroll/unlock."""
 
-    def __init__(self, bridge: "Bridge", board, name: str):
+    def __init__(self, bridge: "HidBridge", board, name: str):
         self._bridge = bridge
         self._board = board
         self.name = name
         self._ctl = HidController(board.transport(name))
         self._closed = False
 
-    def __enter__(self) -> "Session":
+    def __enter__(self) -> "HidSession":
         return self
 
     def __exit__(self, *exc):
@@ -96,21 +101,30 @@ class Session:
 
 
 # --------------------------------------------------------------------------- #
-# Bridge -- the board channel
+# HidBridge -- the board channel
 # --------------------------------------------------------------------------- #
-class Bridge:
-    """A board channel + its device management. Yields Sessions from connect(). Use as a context
-    manager: __enter__ opens + probes the channel, __exit__ closes it (and any open sessions)."""
+class HidBridge:
+    """A board channel + its device management. Yields HidSessions from connect(). Use as a context
+    manager: __enter__ opens + probes the channel, __exit__ closes it (and any open sessions).
 
-    def __init__(self, board, *, location=None, mode: str = "raw"):
-        self._board = board
+    location: "/dev/ttyUSB3" or a bare device path (serial; the board self-identifies), a host/IP
+    (network, TLS -- needs `token`), "hci1" (dongle), or None to autodetect a plugged-in board. The
+    board TYPE is never passed here -- it is discovered from a probe (`bridge.info`).
+
+    backend: inject a board object (tests / advanced use); when omitted, `location` is resolved to a
+    real board driver. Construction is cheap -- all I/O happens on `with` (prepare + probe).
+    """
+
+    def __init__(self, location=None, *, backend=None, mode: str = "raw", token=None, **opts):
         self.location = location
         self.mode = mode
+        self._board = (backend if backend is not None
+                       else _resolve_board(location, token=token, mode=mode, **opts))
         self.info: dict = {}
-        self._sessions: list[Session] = []
+        self._sessions: list[HidSession] = []
 
     # ---- lifecycle ----
-    def __enter__(self) -> "Bridge":
+    def __enter__(self) -> "HidBridge":
         self._board.prepare()
         self.info = dict(self._board.board_info())
         return self
@@ -139,7 +153,7 @@ class Bridge:
         return self._board.rename(nick)
 
     # ---- connect on demand ----
-    def connect(self, name: str, *, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> Session:
+    def connect(self, name: str, *, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> HidSession:
         bonded = {d.name for d in self.list_devices() if getattr(d, "bonded", True)}
         if name not in bonded:
             raise NotBonded(f"{name!r} is not paired to this board -- pair it first")
@@ -160,35 +174,33 @@ class Bridge:
         if waiter is not None:
             waiter(name, timeout)
 
-        sess = Session(self, self._board, name)
+        sess = HidSession(self, self._board, name)
         self._sessions.append(sess)
         return sess
 
-    def _release(self, sess: Session):
+    def _release(self, sess: HidSession):
         if sess in self._sessions:
             self._board.disconnect(sess.name)
             self._sessions.remove(sess)
 
 
 # --------------------------------------------------------------------------- #
-# Entry point
+# Shorthand: one host, one line
 # --------------------------------------------------------------------------- #
-def open(location=None, *, backend=None, mode: str = "raw", token=None, **opts) -> Bridge:
-    """Open a board and return a Bridge (a context manager).
+@contextmanager
+def session(location, device, *, timeout: float = DEFAULT_CONNECT_TIMEOUT, **opts):
+    """Open a board, connect ONE bonded `device`, and yield the HidSession; tear both down on exit.
 
-    location: "/dev/ttyUSB3" or a bare device path (serial; the board self-identifies), a host/IP
-    (network, TLS -- needs `token`), "hci1" (dongle), or None to autodetect a plugged-in board. The
-    board TYPE is never passed here -- it is discovered from a probe (`bridge.info`).
-
-    backend: inject a board object (tests / advanced use); when omitted, `location` is resolved to a
-    real board driver.
+    For the single-host case where you do not need the bridge itself (list_devices / pair / multi).
+    `opts` pass through to HidBridge (backend=, mode=, token=, ...).
     """
-    board = backend if backend is not None else _resolve_board(location, token=token, mode=mode, **opts)
-    return Bridge(board, location=location, mode=mode)
+    with HidBridge(location, **opts) as bridge:
+        with bridge.connect(device, timeout=timeout) as sess:
+            yield sess
 
 
 def _resolve_board(location, *, token=None, mode="raw", **opts):
     # Real serial/net/dongle board drivers + autodetect land in the CLI-rewire phase; until then the
-    # API core is exercised by injecting `backend=` (see open()).
+    # API core is exercised by injecting `backend=` (see HidBridge).
     raise NotImplementedError(
         "resolving a real board from a location is not wired yet -- pass backend= for now")
