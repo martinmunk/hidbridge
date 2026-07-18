@@ -1515,6 +1515,9 @@ marks the device this page is driving.</small></fieldset>
 <small>Live control sends RELATIVE moves (what the paired device acts on). Movement is conflated:
 one request in flight, deltas summed meanwhile, so the total motion is the same at any latency. Ctrl/
 Alt/Cmd + a key sends a shortcut (e.g. Cmd+C); a bare key types. Click = tap (no drag).</small>
+<small>If diagonal motion comes out only horizontal/vertical, you are on <b>Firefox under Wayland</b> --
+its Pointer Lock drops one axis (a Firefox bug, not this tool). Use <b>Chromium</b>, or run Firefox
+under X11.</small>
 </fieldset></section>
 
 <div id=out></div><script>
@@ -1608,11 +1611,18 @@ const key=(name,mod)=>rpc('key',{name,mod:mod||0}).then(log,e=>log(e.message));
 // pointer events the browser delivers, so diagonal motion stays diagonal instead of stair-stepping.
 // Discrete events keep their order + flush at once; holding a button (press..release) makes the board
 // carry it through the moves in between = click-and-drag.
-let busy=false,q=[],rafQ=false;
+let busy=false,q=[],pendX=0,pendY=0,moveT=null;
+// Ack-gated sender (one request in flight). MOTION is accumulated over a fixed WINDOW then sent as ONE
+// combined (dx,dy) -- the PiKVM "squash": under Pointer Lock the browser can deliver single-axis deltas,
+// so summing a window's worth turns an interleaved X/Y stream into a true diagonal report AND caps the
+// BLE report rate. NOTE: Firefox on a WAYLAND session mangles the X axis before JS sees it (no web-side
+// fix -- use Chromium); this squash still helps every other browser/input. See the note by the pad.
+const MOVE_WINDOW=16;
 function flush(){if(busy||!ready||!q.length)return;const job=q.shift();busy=true;
 rpc(job.m,job.p).then(()=>{sent++;if(live)setPadLbl()}).catch(()=>{}).finally(()=>{busy=false;flush()})}
-function enq(job){q.push(job);flush()}
-function enqMove(dx,dy){const t=q[q.length-1];if(t&&t.m==='move'){t.p.dx+=dx;t.p.dy+=dy}else q.push({m:'move',p:{dx,dy}})}
+function pushMove(dx,dy){const t=q[q.length-1];if(t&&t.m==='move'){t.p.dx+=dx;t.p.dy+=dy}else q.push({m:'move',p:{dx,dy}})}
+function flushMotion(){moveT=null;if(pendX||pendY){pushMove(pendX,pendY);pendX=pendY=0;flush()}}
+function enq(job){flushMotion();q.push(job);flush()}   // a discrete event flushes pending motion first (keeps drag order)
 const BTN=e=>['left','middle','right'][e.button]||'left';
 const NAMED={Enter:'enter',Backspace:'backspace',Tab:'tab',Delete:'delete',' ':'space',
 ArrowRight:'right',ArrowLeft:'left',ArrowUp:'up',ArrowDown:'down',Home:'home',End:'end',PageUp:'pageup',PageDown:'pagedown'};
@@ -1621,8 +1631,8 @@ function onKey(e){if(!live)return;if(e.key==='Escape')return;e.preventDefault();
 const mod=(e.ctrlKey?1:0)|(e.shiftKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0);const nm=NAMED[e.key];
 if(nm)enq({m:'key',p:{name:nm,mod}});
 else if(e.key.length===1){if(mod&13)enq({m:'key',p:{name:e.key.toLowerCase(),mod}});else enq({m:'type',p:{text:e.key}})}}
-function onMove(e){if(!live)return;enqMove(e.movementX,e.movementY);
-if(!rafQ){rafQ=true;requestAnimationFrame(()=>{rafQ=false;flush()})}}
+function onMove(e){if(!live)return;pendX+=e.movementX;pendY+=e.movementY;
+if(!moveT)moveT=setTimeout(flushMotion,MOVE_WINDOW)}
 function onDown(e){if(!live)return;e.preventDefault();enq({m:'press',p:{button:BTN(e)}})}
 function onUp(e){if(!live)return;e.preventDefault();enq({m:'release',p:{button:BTN(e)}})}
 function onWheel(e){if(!live)return;e.preventDefault();const t=q[q.length-1],c=e.deltaY>0?-1:1;
@@ -1633,16 +1643,22 @@ const pad=$('pad');let sent=0;
 // pointerlockchange (locked -> goLive, unlocked -> release). Handlers sit on the DOCUMENT so a locked
 // mouse is captured no matter where the OS thinks the pointer is.
 function setPadLbl(){$('padlbl').textContent=live?('LIVE -- '+sent+' sent -- Esc to release'):'Click to take live control'}
-function goLive(){live=true;sent=0;q=[];pad.classList.add('live');setPadLbl();
+function goLive(){live=true;sent=0;q=[];pendX=pendY=0;if(moveT){clearTimeout(moveT);moveT=null}pad.classList.add('live');setPadLbl();
 document.addEventListener('mousemove',onMove);document.addEventListener('mousedown',onDown);
 document.addEventListener('mouseup',onUp);
 document.addEventListener('wheel',onWheel,{passive:false});document.addEventListener('keydown',onKey)}
-function release(){live=false;pad.classList.remove('live');setPadLbl();
+function release(){live=false;if(moveT){clearTimeout(moveT);moveT=null}pendX=pendY=0;pad.classList.remove('live');setPadLbl();
 if(document.pointerLockElement===pad)document.exitPointerLock();
 document.removeEventListener('mousemove',onMove);document.removeEventListener('mousedown',onDown);
 document.removeEventListener('mouseup',onUp);
 document.removeEventListener('wheel',onWheel);document.removeEventListener('keydown',onKey)}
-pad.addEventListener('click',()=>{if(!live&&ready){const p=pad.requestPointerLock();if(p&&p.catch)p.catch(()=>{})}});
+// Prefer RAW deltas (unadjustedMovement) -- bypasses OS/browser pointer acceleration for 1:1 control on
+// browsers that support the options form (Chromium). Firefox uses the old void-returning API and ignores
+// the option (harmless). Fall back to a plain lock if the options form is rejected.
+pad.addEventListener('click',()=>{if(!live&&ready){
+let p=null;try{p=pad.requestPointerLock({unadjustedMovement:true})}catch(e){}
+if(p&&p.catch){p.catch(()=>{try{pad.requestPointerLock()}catch(e){}})}
+else if(!p){try{pad.requestPointerLock()}catch(e){}}}});
 document.addEventListener('pointerlockchange',()=>{const lk=document.pointerLockElement===pad;
 if(lk&&!live)goLive();else if(!lk&&live)release()});
 document.addEventListener('pointerlockerror',()=>log('pointer lock was blocked by the browser -- live mouse control needs it. Keyboard + click buttons still work.'));
