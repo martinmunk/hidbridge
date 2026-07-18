@@ -122,6 +122,14 @@
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 
+// Compile-time firmware build tag, surfaced in `hello` as `fw`. Defaults to "dev"; a build can stamp
+// a distinct value with -DHB_FW_TAG='"<tag>"' (nested quotes: the flag must pass a C string literal).
+// The OTA live test (test_bt_hid_ota_live.py) uses this to prove an over-the-air flash actually
+// swapped the running image -- it reads hello.fw before and after each espota push.
+#ifndef HB_FW_TAG
+#define HB_FW_TAG "dev"
+#endif
+
 // Number of BLE host slots = distinct REMEMBERED identities (each its own address + bond + label).
 // Slot 0 = native public address; slots >=1 = derived static-random addresses. This is how MANY
 // devices the board remembers, NOT how many connect at once -- the two are decoupled (see the
@@ -873,6 +881,7 @@ static bool esp32Notify(uint8_t rid, const uint8_t* body, size_t len) {
 }
 static void esp32FillHello(JsonObject r) {
   r["device"] = DEVICE_NAME;
+  r["fw"] = HB_FW_TAG;                            // compile-time build tag (OTA-swap verification)
   r["nick"] = g_nick;
   r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
   // The REAL radio state (not `parked`): the board advertises only transiently while a connect/pair
