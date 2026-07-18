@@ -73,9 +73,9 @@ def _espota_path():
 
 def _read_fw(token, timeout=6.0):
     """Read hello.fw over the net (None if the board is not answering yet)."""
-    from hidbridge import mode1
+    from hidbridge import rpc
     try:
-        cli = mode1.open_client(f"net:{_HOST}", token=token, timeout=timeout)
+        cli = rpc.open_client(f"net:{_HOST}", token=token, timeout=timeout)
     except Exception:
         return None
     try:

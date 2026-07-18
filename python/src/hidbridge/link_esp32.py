@@ -3,8 +3,8 @@
 Plugs the ESP32 NimBLE HID board in BEHIND the shared, backend-agnostic `HidSession(target,
 ios_device)` context manager, so it is INTERCHANGEABLE with the BlueZ dongle:
 
-    from hidbridge.conn import HidSession
-    with HidSession("esp32:/dev/ttyUSB1", "My iPad") as hid:
+    from hidbridge import HidBridge
+    with HidBridge("/dev/ttyUSB1") as b, b.connect("My iPad") as hid:
         hid.type_text("hello"); hid.send_key("enter")
 
 `conn.make_link_backend("esp32:...")` auto-loads this module and calls `make_link_backend(arg)`.

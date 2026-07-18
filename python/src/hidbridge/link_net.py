@@ -6,8 +6,8 @@ reached over the LAN instead of USB. It subclasses Esp32LinkBackend and swaps on
 apply to a socket -- the connect / disconnect / readiness / host-slot lifecycle is identical, because
 it is the same board speaking the same protocol.
 
-    from hidbridge.conn import HidSession
-    with HidSession("net:hidbridge-esp32.local", "My iPad") as hid:
+    from hidbridge import HidBridge
+    with HidBridge("hidbridge-esp32.local") as b, b.connect("My iPad") as hid:
         hid.type_text("hello"); hid.send_key("enter")
 
 `conn.make_link_backend("net:...")` auto-loads this module. The auth token is NOT in the target

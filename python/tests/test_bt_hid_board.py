@@ -185,6 +185,16 @@ def test_connect_calls_rpc_connect_and_waits_ready():
     assert b.wait_ready("mini5", timeout=1.0) is True
 
 
+def test_wait_ready_blocks_until_subscribed_then_times_out():
+    # not subscribed yet -> wait_ready returns False at the timeout (best-effort readiness gate)
+    slots = [{"slot": 0, "client": "mini5", "bonded": True, "conn": True, "sub": False}]
+    b, rpc, _ = _mcu(slots)
+    assert b.wait_ready("mini5", timeout=0.05) is False
+    # flip subscribed -> wait_ready resolves True
+    rpc._slots[0]["sub"] = True
+    assert b.wait_ready("mini5", timeout=1.0) is True
+
+
 def test_connect_unknown_device_raises_not_bonded():
     b, _, _ = _mcu([{"slot": 0, "client": "mini5", "bonded": True, "conn": False, "sub": False}])
     with pytest.raises(NotBonded):

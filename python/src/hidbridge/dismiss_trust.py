@@ -225,7 +225,8 @@ def dismiss(target: str, bond: str, *, method: str = "dialog",
       "trust"         -> ARROW toward "Trust" + activate (+ passcode) -- the working path (2026-07-14).
       "decline"       -> Tab + activate (the Tab-focused button is "Don't Trust" on the Trust alert).
     """
-    from hidbridge.conn import HidSession
+    from hidbridge import HidBridge
+    from hidbridge.conn import _parse_target
 
     if method in ("dialog", "decline"):
         plan = build_dialog_dismiss_plan(activate_key=activate_key, focus_tabs=focus_tabs)
@@ -237,11 +238,15 @@ def dismiss(target: str, bond: str, *, method: str = "dialog",
 
     result = {"target": target, "bond": bond, "method": method,
               "plan": plan_summary(plan), "ran": None, "connected": False}
-    with HidSession(target, bond, ready_timeout=ready_timeout,
-                    connect_timeout=connect_timeout) as hid:
-        result["connected"] = True
-        result["ready"] = hid.ready_state
-        result["ran"] = run_plan(hid.controller, plan, pin=pin)
+    # The registry target ("esp32:/dev/ttyUSB1" / "net:host" / "hci1") maps to a HidBridge LOCATION
+    # (the board self-identifies -- no type prefix): strip the backend prefix to the bare arg.
+    _backend, arg = _parse_target(target)
+    location = arg or target
+    with HidBridge(location) as bridge:
+        with bridge.connect(bond, timeout=connect_timeout) as hid:
+            result["connected"] = True
+            result["ready"] = None
+            result["ran"] = run_plan(hid.controller, plan, pin=pin)
     return result
 
 

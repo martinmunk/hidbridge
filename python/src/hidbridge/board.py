@@ -126,7 +126,18 @@ class McuBoard:
         self._probe()
 
     def _probe(self):
-        h = self._rpc.hello()
+        from .rpc import RpcError
+        try:
+            h = self._rpc.hello()
+        except RpcError:
+            # A board that cannot answer `hello` (older/minimal firmware) still relays raw frames;
+            # degrade device management but keep the raw drive path usable.
+            self._info = {"board": "?", "fw": "", "device": "", "nick": "", "proto": None,
+                          "layouts": []}
+            self.capabilities = {"max_sessions": 1, "per_device_identity": False, "layouts": False,
+                                 "rpc_frames": False, "medium": getattr(self._tp, "BACKEND", "mcu"),
+                                 "caps": []}
+            return
         board = _board_from_device_name(h.get("device", ""))
         self._info = {"board": board, "fw": h.get("fw", ""), "device": h.get("device", ""),
                       "nick": h.get("nick", ""), "proto": h.get("proto"),

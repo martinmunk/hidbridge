@@ -3,8 +3,8 @@
 Plugs the Raspberry Pi Pico 2 W (BTstack HOG) in BEHIND the shared `HidSession(target, ios_device)`
 context manager, interchangeable with the dongle + ESP32:
 
-    from hidbridge.conn import HidSession
-    with HidSession("pico:/dev/ttyACM0", "My iPad") as hid:
+    from hidbridge import HidBridge
+    with HidBridge("/dev/ttyACM0") as b, b.connect("My iPad") as hid:
         hid.type_text("hello")
 
 NO-RESET NOTE: the Pico's USB-CDC is native to the RP2350 (USB vendor 2e8a); opening the port does

@@ -1,44 +1,30 @@
-"""bt_hid connect-on-demand context manager -- HidSession (BACKEND-AGNOSTIC).
+"""bt_hid dongle LINK layer -- BlueZ connect/disconnect + the LinkBackend interface (BACKEND-AGNOSTIC).
 
-Requirement (the maintainer): selectively use ONE dongle (or ONE MCU) with MULTIPLE bonded iOS devices, but
-only CONNECT the one in use and DISCONNECT it when done:
+The connect-on-demand CONTEXT MANAGER lives in `hidbridge.bridge` (HidBridge -> connect() -> session);
+this module holds the pieces the DONGLE board driver reuses: `BluezLinkManager` (the only thing that
+touches BlueZ D-Bus, scoped per-adapter to `/org/bluez/hciN`) and the `LinkBackend` family with
+`DongleLinkBackend`. `board.DongleBoard` adapts DongleLinkBackend into the board protocol HidBridge
+drives; the MCU boards (`board.McuBoard`) drive their own firmware over serial/TCP instead.
 
-    from hidbridge.conn import HidSession
-    with HidSession("hci1", "My iPad") as hid:      # dongle on hci1
-        hid.unlock("1234"); hid.type_text("hello"); hid.send_key("enter")
-    # on exit the iPad is DISCONNECTED again (the bond stays intact)
-
-    with HidSession("pico:/dev/ttyACM0", "My iPad") as hid:   # MCU backend, SAME API
-        ...
-
-`target` selects a BACKEND + its device, mirroring the report-layer `make_transport("dongle"/
-"pico"/"esp32")` pattern:
+`make_link_backend(target)` still dispatches a target string to a backend, mirroring the report-layer
+`make_transport("dongle"/"pico"/"esp32")` pattern (kept for the targets registry + link_* factories):
   * "hci1" / a MAC / a USB-path / None ......... the BlueZ dongle backend (auto-picks if None)
   * "dongle:hci1" ............................. explicit dongle backend
   * "pico:/dev/ttyACM0" / "esp32:/dev/ttyUSB1" . an MCU backend (its own BLE stack, over serial)
-  * "<name>:<arg>" ............................. any future bt_hid.link_<name> backend
+  * "<name>:<arg>" ............................. any bt_hid.link_<name> backend
 
-The connect-on-demand SEMANTICS (enter=connect that iOS device, exit=disconnect, bond kept) are
-expressed by a small `LinkBackend` interface that BOTH a BlueZ dongle and an MCU implement. The MCU
-work (branch bt-hid-mcu-robust) supplies `bt_hid.link_pico` / `link_esp32` conforming to this
-interface; until then a generic serial fallback wraps the existing `transport_<name>` modules.
+ARCHITECTURE (see docs/bt-hid-multi-device.md): the DONGLE backend uses the HOST bluetoothd via D-Bus,
+scoping EVERY operation to `/org/bluez/hciN`. The per-adapter `ble_hid` daemon serves the GATT HID
+profile + advertises; the backend drives the LE LINK (connect target, disconnect others) and relays
+report frames to that daemon's per-adapter control socket.
 
-ARCHITECTURE (decision, see docs/bt-hid-multi-device.md): the DONGLE backend uses the HOST
-bluetoothd via D-Bus, scoping EVERY operation to `/org/bluez/hciN`. It does NOT run its own bluez
-instance -- a second system bluetoothd cannot own the `org.bluez` bus name, and the D-Bus API is
-already fully per-adapter, so host-daemon-scoped is both simpler and the only clean option. The
-per-adapter `ble_hid` daemon serves the GATT HID profile + advertises; HidSession drives the LE LINK
-(connect target, disconnect others + on exit) and relays report frames to that daemon's per-adapter
-control socket. An MCU backend serves HID from its own firmware; HidSession drives it over serial.
-
-DISTINCT BLE IDENTITY PER iPad is exposed as a per-backend CAPABILITY (`capabilities`), not a
-dongle-only feature: the dongle backend reports `per_device_identity=False` (BlueZ gives one
-adapter one identity -- see the feasibility verdict in the doc), while an MCU backend whose firmware
-picks the advertising address per bond can report `True`.
+DISTINCT BLE IDENTITY PER iPad is a per-backend CAPABILITY (`capabilities`): the dongle reports
+`per_device_identity=False` (BlueZ gives one adapter one identity), an MCU firmware that picks the
+advertising address per bond reports `True`.
 
 Testability: all BlueZ access goes through an injectable `link_manager` (default `BluezLinkManager`,
-lazy dbus import). Backends + transports are injectable, so the whole connect/act/disconnect
-lifecycle is exercised offline with a fake backend + a RecordingTransport, no hardware.
+lazy dbus import). Backends + transports are injectable, so the connect/act/disconnect lifecycle is
+exercised offline with a fake link manager + a RecordingTransport, no hardware.
 """
 
 from __future__ import annotations
@@ -49,7 +35,7 @@ import time
 
 from . import adapter as _adapter
 from . import naming as _naming
-from .controller import HidController, SocketTransport, make_transport
+from .controller import SocketTransport, make_transport
 
 DEVICE_IFACE = "org.bluez.Device1"
 
@@ -99,6 +85,12 @@ class BluezLinkManager:
             if t == addr or t in name or path.lower().endswith(t.replace(":", "_")):
                 return path, props
         return None, None
+
+    def all_devices(self, adapter_path: str):
+        """[(path, props)] for every known (bonded/paired or seen) device on this adapter."""
+        return [(path, ifaces[DEVICE_IFACE])
+                for path, ifaces in self._managed().items()
+                if DEVICE_IFACE in ifaces and path.startswith(adapter_path + "/")]
 
     def connected_devices(self, adapter_path: str):
         """[(path, props)] for currently-connected devices on this adapter."""
@@ -386,177 +378,3 @@ def make_link_backend(target: str | None = None, **opts) -> LinkBackend:
     except ImportError:
         return SerialMcuLinkBackend(backend, arg, **opts)
     return mod.make_link_backend(arg, **opts)
-
-
-# --------------------------------------------------------------------------- #
-# The context manager
-# --------------------------------------------------------------------------- #
-class HidSession:
-    """Connect a specific bonded iOS device on a specific backend for the duration of a `with`.
-
-    Enter: resolve the backend (dongle/MCU), ensure it is ready, disconnect any other central,
-    connect the target, and return a driver (type_text/send_key/unlock/move/click/... via the
-    backend's transport). Exit: disconnect the target (bond intact).
-
-    READINESS: enter() does NOT return on a bare "connected" -- it BLOCKS until the link is genuinely
-    READY TO USE (iOS has subscribed to / enabled the HID reports), so a keystroke sent immediately
-    after the `with` LANDS instead of being dropped in the ~1-3s post-reconnect activation window
-    (which used to force a manual `time.sleep(3.3)`). It prefers the backend's REAL subscribe signal
-    (dongle: the daemon's StartNotify; MCU: a firmware `subscribed=` ack) and, when that is not
-    observable, falls back to a bounded `settle` delay.
-
-    Params:
-      target          backend selector: hciN / MAC / USB-path / None (dongle), or "pico:PORT",
-                      "esp32:PORT", "dongle:hciN", "<name>:<arg>" (see make_link_backend).
-      ios_device      MAC / name substring / object-path suffix of the bonded iPad/iPhone.
-      connect_timeout seconds to wait for the (re)connect.
-      exclusive       if True (default) disconnect any OTHER connected central first.
-      require_connect if True (default) raise if the device never connects.
-      ready_timeout   seconds to wait for the REAL readiness signal (iOS subscribed). Default 8.0.
-      settle          minimum settle (s) applied around readiness. None (default) = auto: 0 once the
-                      real signal fires, else the backend's READY_SETTLE fallback. A number forces
-                      exactly that many seconds (a fixed post-enter delay, like the old manual sleep).
-      require_ready   if True, raise when the backend CAN observe readiness but iOS never subscribes
-                      within ready_timeout. Default False (best-effort: fall back to the settle).
-      backend         inject a ready-made LinkBackend (tests/advanced); overrides `target`.
-      **backend_opts  forwarded to make_link_backend (allow_builtin=, link_manager=, transport=,
-                      port=, ...).
-    """
-
-    def __init__(self, target: str | None, ios_device: str, *,
-                 connect_timeout: float = 20.0, exclusive: bool = True,
-                 require_connect: bool = True, ready_timeout: float = 8.0,
-                 settle: float | None = None, require_ready: bool = False,
-                 backend: LinkBackend | None = None, **backend_opts):
-        self.target = target
-        self.ios_device = ios_device
-        self.connect_timeout = connect_timeout
-        self.exclusive = exclusive
-        self.require_connect = require_connect
-        self.ready_timeout = ready_timeout
-        self.settle = settle
-        self.require_ready = require_ready
-        self.backend = backend if backend is not None else make_link_backend(target, **backend_opts)
-        self.controller = None
-        self.ready_state = None   # set by _await_ready: "ready" | "settle" | None
-
-    # ---- introspection ----
-    @property
-    def capabilities(self) -> dict:
-        return dict(self.backend.capabilities)
-
-    def supports(self, cap: str) -> bool:
-        return bool(self.backend.capabilities.get(cap))
-
-    # ---- lifecycle ----
-    def __enter__(self) -> "HidSession":
-        self.backend.prepare()
-        connected = self.backend.connect(self.ios_device, self.connect_timeout, self.exclusive)
-        if not connected and self.require_connect:
-            raise BtHidError(
-                f"{self.ios_device!r} did not connect via {self.backend.describe()} within "
-                f"{self.connect_timeout:.0f}s (is the iPad awake + in range? bond present?)")
-        self._await_ready()
-        self.controller = HidController(self.backend.transport())
-        return self
-
-    def _await_ready(self):
-        """Block until the link is READY (iOS enabled the HID reports), or settle as a fallback.
-
-        Prefers the backend's real subscribe signal (bounded by ready_timeout); when that signal
-        is unobservable, or times out with require_ready=False, waits a settle delay so callers do
-        not need their own post-enter sleep. Sets self.ready_state to "ready" or "settle".
-        """
-        b = self.backend
-        supported = b.readiness_supported()
-        got = b.wait_ready(self.ready_timeout) if supported else False
-        if got:
-            self.ready_state = "ready"
-            settle = 0.0 if self.settle is None else self.settle
-        elif supported and self.require_ready:
-            raise BtHidError(
-                f"{self.ios_device!r} connected but iOS did not enable the HID reports within "
-                f"{self.ready_timeout:.0f}s via {b.describe()} (readiness gate; the link is up but "
-                f"the central has not subscribed -- wake the screen / retry)")
-        else:
-            self.ready_state = "settle"
-            settle = getattr(b, "READY_SETTLE", 0.0) if self.settle is None else self.settle
-        if settle and settle > 0:
-            time.sleep(settle)
-
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            self.backend.disconnect()
-        except Exception:  # noqa: BLE001  (best-effort teardown; never mask the body's error)
-            pass
-        return False
-
-    # ---- report passthrough (delegate to the controller so reports.py stays the single source) ----
-    def __getattr__(self, item):
-        # Forward action methods (type_text/send_key/unlock/wake/move/click/scroll/play) to the
-        # controller once inside the `with`.
-        controller = self.__dict__.get("controller")
-        if controller is not None and hasattr(controller, item):
-            return getattr(controller, item)
-        raise AttributeError(item)
-
-
-# --------------------------------------------------------------------------- #
-# Async context manager
-# --------------------------------------------------------------------------- #
-class AsyncHidSession:
-    """`async with` wrapper over HidSession -- the same connect + READINESS gate, awaitable.
-
-    WHY it exists (and its honest scope): the expensive part of a session is the connect + readiness
-    WAIT (poll BlueZ Connected / poll a serial `subscribed=` ack / a settle sleep) -- all I/O-bound.
-    The underlying libs (dbus-python, pyserial) are BLOCKING C bindings with no native-async API, so
-    this does not turn them async; it offloads enter()/exit() to a worker thread via
-    `asyncio.to_thread`. That is exactly enough to make the readiness wait awaitable, so a caller can
-    bring up SEVERAL iPads concurrently:
-
-        async with AsyncHidSession("esp32:/dev/ttyUSB1", "iPad A") as a, \\
-                   AsyncHidSession("hci1", "iPad B") as b:
-            ...                                 # both readiness waits overlapped, not serialized
-        # or: await asyncio.gather(drive(sess_a), drive(sess_b))
-
-    Report calls (type_text/send_key/...) delegate to the underlying sync controller: they are
-    sub-millisecond serial/socket writes, so wrapping each in a thread hop would add latency for no
-    real gain. Await the long waits (enter/exit); the keystrokes stay synchronous. If a future
-    backend grows a genuinely non-blocking transport, this class is where an await-per-report path
-    would slot in. (Design verdict recorded in docs/bt-hid-mcu-approach.md.)
-    """
-
-    def __init__(self, *args, **kwargs):
-        self._sess = HidSession(*args, **kwargs)
-
-    @property
-    def capabilities(self) -> dict:
-        return self._sess.capabilities
-
-    def supports(self, cap: str) -> bool:
-        return self._sess.supports(cap)
-
-    @property
-    def ready_state(self):
-        return self._sess.ready_state
-
-    async def __aenter__(self) -> "AsyncHidSession":
-        import asyncio
-        await asyncio.to_thread(self._sess.__enter__)
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        import asyncio
-        return await asyncio.to_thread(self._sess.__exit__, exc_type, exc, tb)
-
-    def __getattr__(self, item):
-        # Delegate action methods (type_text/send_key/unlock/move/click/...) to the sync session.
-        # Guard against recursion before _sess is set.
-        sess = self.__dict__.get("_sess")
-        if sess is not None and hasattr(sess, item):
-            return getattr(sess, item)
-        raise AttributeError(item)
-
-
-# Backwards-compat alias for the original placeholder name used in the task brief.
-BtHidConn = HidSession

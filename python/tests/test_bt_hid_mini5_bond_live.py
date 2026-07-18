@@ -72,13 +72,14 @@ def test_mini5_route_resolves_per_board(name, backend, bond):
                                       "mini5) to run the live bond/drive/switch checks")
 @pytest.mark.parametrize("name,backend,bond", MINI5_ROUTES)
 def test_board_bonds_and_drives_mini5(name, backend, bond):
-    """Open a HidSession on the board's mini5 route: it must CONNECT (bond present + mini5 awake)
+    """Open a session on the board's mini5 route: it must CONNECT (bond present + mini5 awake)
     and accept a benign pointer nudge without raising."""
-    from hidbridge.conn import HidSession
+    from hidbridge import session
+    from hidbridge.conn import _parse_target
 
     r = TG.TargetRegistry.load().resolve(name)
-    with HidSession(r.target, r.bond, require_connect=True, require_ready=False) as hid:
-        assert hid.backend.is_connected(), f"{name}: mini5 did not connect via {r.backend}"
+    loc = _parse_target(r.target)[1] or r.target      # strip the backend prefix -> a bridge LOCATION
+    with session(loc, r.bond, timeout=20.0) as hid:    # connect() raises if mini5 never attaches
         hid.move(0, -3)   # benign 3px pointer nudge -- proves the link carries HID to mini5
         hid.move(0, 3)    # nudge back
 
@@ -88,13 +89,14 @@ def test_board_bonds_and_drives_mini5(name, backend, bond):
 def test_board_switches_mini5_and_mini6(backend, mini5_name, mini6_name):
     """The SAME board drives mini5 then mini6 (time-sliced) with NO re-pairing -- the multi-bond
     switch. Each route is opened in turn; both must connect + accept a nudge."""
-    from hidbridge.conn import HidSession
+    from hidbridge import session
+    from hidbridge.conn import _parse_target
 
     reg = TG.TargetRegistry.load()
     for name in (mini5_name, mini6_name):
         r = reg.resolve(name)
         assert r.backend == backend, f"{name} should be on {backend}, got {r.backend}"
-        with HidSession(r.target, r.bond, require_connect=True, require_ready=False) as hid:
-            assert hid.backend.is_connected(), f"{name}: no connect via {backend} (bonded+awake?)"
+        loc = _parse_target(r.target)[1] or r.target
+        with session(loc, r.bond, timeout=20.0) as hid:   # connect() raises if it never attaches
             hid.move(0, -3)
             hid.move(0, 3)

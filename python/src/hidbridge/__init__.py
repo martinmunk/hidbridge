@@ -21,7 +21,17 @@ from .bridge import (  # noqa: E402
     session,
 )
 
+
+def discover():
+    """List plugged-in hidbridge boards: [{port, board, fw, device}] (vendor-gated + handshake).
+
+    Lazy-imports the serial drivers so `import hidbridge` stays free of serial/dbus deps.
+    """
+    from .board import discover as _discover
+    return _discover()
+
+
 __all__ = [
-    "HidBridge", "HidSession", "session",
+    "HidBridge", "HidSession", "session", "discover",
     "HidbridgeError", "NotBonded", "ConnectTimeout", "Unsupported", "CapacityError",
 ]

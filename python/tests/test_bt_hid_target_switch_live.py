@@ -35,14 +35,16 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("device", [_A, _B])
 def test_switch_backend_to_registered_device(device):
     """Resolve `device` via the registry and drive it -- run for BOTH A and B to prove switching."""
+    from hidbridge import session
     from hidbridge import targets as TG
-    from hidbridge.conn import HidSession
+    from hidbridge.conn import _parse_target
 
     reg = TG.TargetRegistry.load()
     r = reg.resolve(device)                       # KeyError here => device not registered
     marker = f"bt_hid switch -> {device}\n"
-    with HidSession(r.target, r.bond) as hid:
-        hid.type_text(marker)                     # lands on THIS device only
+    loc = _parse_target(r.target)[1] or r.target
+    with session(loc, r.bond) as hid:
+        hid.type(marker)                          # lands on THIS device only
     # No assert on pixels here (that is the human/webcam check); reaching here means the resolved
     # backend connected the right bond, became ready, and accepted input without raising.
 

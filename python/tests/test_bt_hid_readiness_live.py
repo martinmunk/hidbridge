@@ -39,29 +39,23 @@ FTDI = "0403"
                     reason="set BT_HID_HW_ESP32_LIVE=1 + BT_HID_IPAD=<device> (+ a flashed ESP32, "
                            "coordinate iPad via 'main') to run")
 def test_keystroke_lands_immediately_after_enter():
-    from hidbridge.conn import HidSession
+    from hidbridge import HidBridge
     from hidbridge.transport_esp32 import _tty_usb_vendor
 
     # GUARDRAIL: never the KVM CH340 (vendor 1a86) -- only a genuine ESP32 bridge.
     vid = _tty_usb_vendor(_PORT)
     assert vid in (CP2102, FTDI), f"{_PORT} vendor {vid!r} is not an ESP32 bridge; refusing"
 
-    # No manual settle: the readiness gate must make __enter__ return only when iOS is subscribed.
-    with HidSession(f"esp32:{_PORT}", _IPAD, connect_timeout=30.0, ready_timeout=15.0,
-                    require_ready=True) as hid:
-        # __enter__ returned -> the firmware reported iOS enabled the keyboard report (real signal).
-        assert hid.ready_state == "ready", (
-            f"expected a real subscribe signal, got {hid.ready_state!r} (settle fallback means the "
-            f"firmware did not report subscribed= -- reflash the ESP32 with the readiness firmware)")
-
-        # Fire IMMEDIATELY -- no sleep. Under the old behavior these were dropped.
-        marker = "hidready"
-        res = hid.type_text(marker)
-        assert res.get("ok"), f"immediate keystroke rejected: {res!r}"
-
-        # Cross-check the link is genuinely subscribed right now (belt-and-suspenders).
-        st = hid.backend.transport().ping()
-        assert st.get("subscribed") is True and st.get("connected") is True, st
+    # No manual settle: bridge.connect() runs the readiness gate (board.wait_ready), so it returns a
+    # ready session -- the first keystroke must LAND, not drop in the iOS activation window.
+    marker = "hidready"
+    with HidBridge(_PORT) as bridge:                 # serial ESP32; board self-identifies
+        with bridge.connect(_IPAD, timeout=30.0) as hid:
+            # Fire IMMEDIATELY -- no sleep. Under the old behavior these were dropped.
+            res = hid.type(marker)
+            assert res.get("ok"), f"immediate keystroke rejected: {res!r}"
+            # Cross-check the link is genuinely subscribed right now (belt-and-suspenders).
+            assert bridge._board.wait_ready(_IPAD, 1.0) is True, "board reports not subscribed"
 
     print(f"\n[readiness-live] typed {marker!r} immediately after enter with NO manual sleep; "
           f"confirm it appears on {_IPAD} (webcam/glass).")

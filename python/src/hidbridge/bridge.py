@@ -80,6 +80,11 @@ class HidSession:
             self._closed = True
             self._bridge._release(self)
 
+    @property
+    def controller(self) -> HidController:
+        """The underlying HidController (for scripted timelines / dismiss_trust plans)."""
+        return self._ctl
+
     # ---- drive (thin, well-named wrappers over HidController) ----
     def type(self, text: str):
         return self._ctl.type_text(text)

@@ -38,13 +38,13 @@ SCAN_SECONDS = float(os.environ.get("BT_HID_NAMING_SCAN_SECONDS", "12"))
 
 
 def _open_client():
-    from hidbridge import mode1
+    from hidbridge import rpc
     host = os.environ.get("BT_HID_NET_HOST")
     if host:
-        return mode1.open_client("net:" + host)
+        return rpc.open_client("net:" + host)
     port = os.environ.get("BT_HID_ESP32_PORT")
     if port:
-        return mode1.open_client("esp32:" + port)
+        return rpc.open_client("esp32:" + port)
     pytest.skip("no board: set BT_HID_NET_HOST or BT_HID_ESP32_PORT")
 
 
@@ -121,9 +121,9 @@ def test_advertised_name_tracks_naming_state():
         _assert_advertised(c, res["name"])
 
         # 3) an OVER-BUDGET label is rejected (would exceed the 31-byte advert), not silently mis-advertised
-        from hidbridge import mode1
+        from hidbridge import rpc
         c.call("unpair", {"slot": res["slot"]})
-        with pytest.raises(mode1.Mode1Error) as ei:
+        with pytest.raises(rpc.RpcError) as ei:
             c.pair("thislabeliswaytoolongforble")
         assert "too long" in str(ei.value).lower()
 
