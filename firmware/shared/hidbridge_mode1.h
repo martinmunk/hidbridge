@@ -30,14 +30,19 @@ static const uint8_t  RID_MOUSE       = 2;
 // A BLE HID keyboard sends physical-key USAGES; the HOST maps them to characters via ITS layout. So
 // to type the right char on a non-US host we send the usage + modifier(s) that land on it under that
 // host's layout. LAYOUT_US is the original US-QWERTY map (default, byte-for-byte unchanged);
-// LAYOUT_DA is Danish (ISO). The ACTIVE layout is a global the firmware sets per dispatch from the
-// TARGET slot's layout (see setActiveLayout); type/key consult it. Mirrors reports.LAYOUTS.
-enum { LAYOUT_US = 0, LAYOUT_DA = 1 };
+// LAYOUT_DA is Danish (ISO); LAYOUT_UK is British (ISO). The ACTIVE layout is a global the firmware
+// sets per dispatch from the TARGET slot's layout (see setActiveLayout); type/key consult it. Mirrors
+// reports.LAYOUTS.
+enum { LAYOUT_US = 0, LAYOUT_DA = 1, LAYOUT_UK = 2 };
 static int g_activeLayout = LAYOUT_US;
-inline void setActiveLayout(int l) { g_activeLayout = (l == LAYOUT_DA) ? LAYOUT_DA : LAYOUT_US; }
+inline void setActiveLayout(int l) { g_activeLayout = (l == LAYOUT_DA || l == LAYOUT_UK) ? l : LAYOUT_US; }
 inline int  activeLayout() { return g_activeLayout; }
-inline int  layoutFromName(const char* n) { return (n && !strcasecmp(n, "da")) ? LAYOUT_DA : LAYOUT_US; }
-inline const char* layoutName(int l) { return l == LAYOUT_DA ? "da" : "us"; }
+inline int  layoutFromName(const char* n) {
+  if (n && !strcasecmp(n, "da")) return LAYOUT_DA;
+  if (n && !strcasecmp(n, "uk")) return LAYOUT_UK;
+  return LAYOUT_US;
+}
+inline const char* layoutName(int l) { return l == LAYOUT_DA ? "da" : l == LAYOUT_UK ? "uk" : "us"; }
 
 // Unshifted printable char -> HID usage (page 0x07), or -1. Mirrors reports._BASE_USAGE (US layer).
 inline int baseUsage(char c) {
@@ -100,9 +105,47 @@ inline bool daUsage(uint32_t cp, uint8_t* usage, uint8_t* mod) {
   return false;
 }
 
+// British (ISO) layer: codepoint -> (usage, mod). Mirrors reports._uk_char_to_usage. Letters/digits
+// share the US usages (UK is QWERTY); this table is the punctuation layer. UK differs from US only at
+// " (Shift+2), GBP (Shift+3), @ (Shift+'), # ~ on the ISO 0x32 key, \ | on the ISO 0x64 key, and
+// not-sign on Shift+grave. UK has NO dead keys (` is a real backtick), so every printable ASCII char
+// is one keystroke. GBP (U+00A3), euro (U+20AC), not-sign (U+00AC) arrive as multi-byte UTF-8, so we
+// key on the Unicode CODEPOINT.
+inline bool ukUsage(uint32_t cp, uint8_t* usage, uint8_t* mod) {
+  if (cp >= 'a' && cp <= 'z') { *usage = 0x04 + (cp - 'a'); *mod = 0; return true; }
+  if (cp >= 'A' && cp <= 'Z') { *usage = 0x04 + (cp - 'A'); *mod = MOD_LSHIFT_BIT; return true; }
+  if (cp >= '1' && cp <= '9') { *usage = 0x1E + (cp - '1'); *mod = 0; return true; }
+  if (cp == '0')              { *usage = 0x27; *mod = 0; return true; }
+  struct E { uint32_t cp; uint8_t u; uint8_t m; };
+  static const E tbl[] = {
+    {' ', 0x2C, 0}, {'\n', 0x28, 0}, {'\t', 0x2B, 0},
+    {'!', 0x1E, MOD_LSHIFT_BIT}, {'"', 0x1F, MOD_LSHIFT_BIT}, {0xA3, 0x20, MOD_LSHIFT_BIT},  // ! " GBP
+    {'$', 0x21, MOD_LSHIFT_BIT}, {'%', 0x22, MOD_LSHIFT_BIT}, {'^', 0x23, MOD_LSHIFT_BIT},
+    {'&', 0x24, MOD_LSHIFT_BIT}, {'*', 0x25, MOD_LSHIFT_BIT}, {'(', 0x26, MOD_LSHIFT_BIT},
+    {')', 0x27, MOD_LSHIFT_BIT},
+    {0x20AC, 0x21, MOD_ALTGR_BIT},                   // euro = AltGr + '4'
+    {'-', 0x2D, 0}, {'_', 0x2D, MOD_LSHIFT_BIT},
+    {'=', 0x2E, 0}, {'+', 0x2E, MOD_LSHIFT_BIT},
+    {'[', 0x2F, 0}, {'{', 0x2F, MOD_LSHIFT_BIT},
+    {']', 0x30, 0}, {'}', 0x30, MOD_LSHIFT_BIT},
+    {'#', 0x32, 0}, {'~', 0x32, MOD_LSHIFT_BIT},     // ISO '# ~' key
+    {';', 0x33, 0}, {':', 0x33, MOD_LSHIFT_BIT},
+    {'\'', 0x34, 0}, {'@', 0x34, MOD_LSHIFT_BIT},    // ' base, @ shifted (UK)
+    {'`', 0x35, 0}, {0xAC, 0x35, MOD_LSHIFT_BIT},    // ` real (not dead), not-sign shifted
+    {'\\', 0x64, 0}, {'|', 0x64, MOD_LSHIFT_BIT},    // ISO '\ |' key left of Z
+    {',', 0x36, 0}, {'<', 0x36, MOD_LSHIFT_BIT},
+    {'.', 0x37, 0}, {'>', 0x37, MOD_LSHIFT_BIT},
+    {'/', 0x38, 0}, {'?', 0x38, MOD_LSHIFT_BIT},
+  };
+  for (auto& e : tbl) if (cp == e.cp) { *usage = e.u; *mod = e.m; return true; }
+  return false;
+}
+
 // codepoint -> (usage, mod) under `layout`. Mirrors reports.char_to_usage. Returns false if unmapped.
 inline bool charToUsage(uint32_t cp, uint8_t* usage, uint8_t* mod, int layout) {
-  return (layout == LAYOUT_DA) ? daUsage(cp, usage, mod) : usUsage(cp, usage, mod);
+  if (layout == LAYOUT_DA) return daUsage(cp, usage, mod);
+  if (layout == LAYOUT_UK) return ukUsage(cp, usage, mod);
+  return usUsage(cp, usage, mod);
 }
 
 // Decode one UTF-8 codepoint at *p and advance *p past it. On a malformed byte, consumes 1 byte and

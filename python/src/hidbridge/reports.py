@@ -233,10 +233,63 @@ def _da_char_to_usage(ch: str) -> tuple[int, int]:
                      f"(note: ` ^ ~ are dead keys on the Danish layout and are not supported)")
 
 
+# British (ISO) layout. Letters + digits share the US usages (UK is QWERTY, z/y NOT swapped), so they
+# are handled programmatically; this table is the punctuation layer. UK differs from US only at a few
+# keys: " (Shift+2), GBP (Shift+3), @ (Shift+'), # ~ on the ISO key (usage 0x32), \ | on the ISO key
+# left of Z (usage 0x64), and not-sign on Shift+grave. UNLIKE Danish there are NO dead keys -- ` is a
+# real backtick -- so every printable ASCII char is a single self-contained keystroke. Verified against
+# the on-disk X11 keymap (/usr/share/X11/xkb/symbols/gb), the Windows KBDUK reference
+# (kbdlayout.info/KBDUK), and the USB HID usage tables -- see docs/bt-hid-keyboard-layouts.md.
+_UK_SYMBOLS: dict[str, tuple[int, int]] = {
+    " ": (0x2C, 0), "\n": (0x28, 0), "\t": (0x2B, 0),
+    # number-row Shift layer (differs from US only at '2' -> " and '3' -> GBP)
+    "!": (0x1E, MOD_LSHIFT), '"': (0x1F, MOD_LSHIFT), "£": (0x20, MOD_LSHIFT),
+    "$": (0x21, MOD_LSHIFT), "%": (0x22, MOD_LSHIFT), "^": (0x23, MOD_LSHIFT),
+    "&": (0x24, MOD_LSHIFT), "*": (0x25, MOD_LSHIFT), "(": (0x26, MOD_LSHIFT),
+    ")": (0x27, MOD_LSHIFT),
+    # number-row AltGr layer (euro on the '4' key)
+    "€": (0x21, MOD_ALTGR),
+    # right-of-alpha punctuation (same usages as US)
+    "-": (0x2D, 0), "_": (0x2D, MOD_LSHIFT),
+    "=": (0x2E, 0), "+": (0x2E, MOD_LSHIFT),
+    "[": (0x2F, 0), "{": (0x2F, MOD_LSHIFT),
+    "]": (0x30, 0), "}": (0x30, MOD_LSHIFT),
+    # ISO '# ~' key (usage 0x32) -- UK-specific position for # and ~
+    "#": (0x32, 0), "~": (0x32, MOD_LSHIFT),
+    ";": (0x33, 0), ":": (0x33, MOD_LSHIFT),
+    # "' @" key (US "'" position) -- UK: apostrophe base, @ shifted (US has " here)
+    "'": (0x34, 0), "@": (0x34, MOD_LSHIFT),
+    # grave key -- ` is a REAL char (not dead), not-sign shifted
+    "`": (0x35, 0), "¬": (0x35, MOD_LSHIFT),
+    # ISO '\ |' key left of Z (usage 0x64)
+    "\\": (0x64, 0), "|": (0x64, MOD_LSHIFT),
+    # bottom-row punctuation (same usages as US)
+    ",": (0x36, 0), "<": (0x36, MOD_LSHIFT),
+    ".": (0x37, 0), ">": (0x37, MOD_LSHIFT),
+    "/": (0x38, 0), "?": (0x38, MOD_LSHIFT),
+}
+
+
+def _uk_char_to_usage(ch: str) -> tuple[int, int]:
+    if "a" <= ch <= "z":
+        return 0x04 + (ord(ch) - ord("a")), 0
+    if "A" <= ch <= "Z":
+        return 0x04 + (ord(ch) - ord("A")), MOD_LSHIFT
+    if "1" <= ch <= "9":
+        return 0x1E + (ord(ch) - ord("1")), 0
+    if ch == "0":
+        return 0x27, 0
+    if ch in _UK_SYMBOLS:
+        return _UK_SYMBOLS[ch]
+    raise ValueError(f"no British HID scancode for character {ch!r}")
+
+
 # The layout registry. Add a layout by dropping a `char -> (usage, mod)` resolver here; the whole
 # type/key path threads a `layout=` name through to it. (A future per-target layout just passes the
 # target's layout name per call.)
-LAYOUTS: dict[str, "callable"] = {"us": _us_char_to_usage, "da": _da_char_to_usage}
+LAYOUTS: dict[str, "callable"] = {
+    "us": _us_char_to_usage, "da": _da_char_to_usage, "uk": _uk_char_to_usage,
+}
 DEFAULT_LAYOUT = "us"
 
 
@@ -301,8 +354,9 @@ def _char_reports(ch: str, layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
 def type_text(text: str, layout: str = DEFAULT_LAYOUT) -> list[HidReport]:
     """Expand a string into the down/up keyboard report sequence that types it.
 
-    `layout` selects the target host's keyboard layout ("us" default, "da" Danish); it decides which
-    usage + modifier(s) each character maps to. With the default it is byte-identical to before.
+    `layout` selects the target host's keyboard layout ("us" default, "da" Danish, "uk" British); it
+    decides which usage + modifier(s) each character maps to. With the default it is byte-identical to
+    before.
     """
     seq: list[HidReport] = []
     for ch in text:

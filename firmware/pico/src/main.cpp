@@ -289,11 +289,11 @@ static void handle_line(char *line) {
         return;
     }
     if (kind == 'L' || kind == 'l') {
-        // L<us|da> -- set the TARGET slot's keyboard layout (RAM-only on Pico); bare L reports it.
+        // L<us|da|uk> -- set the TARGET slot's keyboard layout (RAM-only on Pico); bare L reports it.
         char *rest = line + 1;
         while (*rest == ' ') rest++;
         if (*rest) {
-            if (!strcasecmp(rest, "us") || !strcasecmp(rest, "da"))
+            if (!strcasecmp(rest, "us") || !strcasecmp(rest, "da") || !strcasecmp(rest, "uk"))
                 slot_layout[tgt_slot] = hbmode1::layoutFromName(rest);
             else { Serial.println("ERR badlayout"); return; }
         }

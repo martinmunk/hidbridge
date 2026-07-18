@@ -628,7 +628,7 @@ def build_parser():
                         "--host hidbridge-esp32.local")
     p.add_argument("--layout", default=os.environ.get("BT_HID_LAYOUT", R.DEFAULT_LAYOUT),
                    choices=sorted(R.LAYOUTS),
-                   help="keyboard layout the TARGET host uses ('us' default, 'da' Danish). Decides "
+                   help="keyboard layout the TARGET host uses ('us' default, 'da' Danish, 'uk' British). Decides "
                         "which scancode+modifier each character maps to for type/key/unlock (Mode 2). "
                         "For --rpc/Mode 1 the board owns the layout, set PER DEVICE with its `layout` "
                         "method / web UI.")

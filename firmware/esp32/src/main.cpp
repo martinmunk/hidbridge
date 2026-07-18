@@ -728,7 +728,7 @@ void setup() {
   deriveSlotAddresses();                       // needs init() done (public address available)
   loadNickname();                              // NVS nick, or a unique esp32-<mac> default
   loadSlotClients();                           // NVS per-slot client labels (survive reboot/reflash)
-  loadSlotLayouts();                           // NVS per-slot keyboard layout (us/da), same lifetime
+  loadSlotLayouts();                           // NVS per-slot keyboard layout (us/da/uk), same lifetime
   buildMdnsHost();                             // hidbridge-<nick> (unique per board)
   for (int i = 0; i < NUM_SLOTS; i++) buildSlotName(i);   // advertised names from the nickname
   // Boot PARKED: advertise NOTHING until a customer explicitly asks for a device (connect/pair). This
@@ -878,7 +878,7 @@ static void esp32FillHello(JsonObject r) {
   JsonArray caps = r["caps"].to<JsonArray>();
   caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
-  caps.add("layout");                            // per-slot keyboard layout (us/da)
+  caps.add("layout");                            // per-slot keyboard layout (us/da/uk)
 #ifdef HIDBRIDGE_NET
   caps.add("net");
   r["mdns"] = String(g_mdnsHost) + ".local";     // how to reach this specific board over the network
@@ -917,7 +917,7 @@ static void fillIdentity(JsonObject o, int i) {
   o["conn"] = slotConn[i] != BLE_HS_CONN_HANDLE_NONE;
   o["sub"]  = (bool)slotSub[i];
   o["bonded"] = NimBLEDevice::isBonded(slotAddr[i]);   // a stored LTK exists for this identity
-  o["layout"] = hbmode1::layoutName(slotLayout[i]);    // this device's keyboard layout (us/da)
+  o["layout"] = hbmode1::layoutName(slotLayout[i]);    // this device's keyboard layout (us/da/uk)
 }
 
 // Park ONE slot: drop its central (keep the bond), stop advertising, and mark the board parked so
@@ -1021,14 +1021,14 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
   if (!strcmp(method, "layout")) {
     // Get or set a SLOT's keyboard layout (per device). Addressed like connect/unpair: an explicit
     // "slot" index or a "client" name, else the caller's current target (g_activeTarget). With a "name"
-    // ("us"/"da") it sets + persists; without, it just reports. Changeable any time (not only at pair).
+    // ("us"/"da"/"uk") it sets + persists; without, it just reports. Changeable any time (not only at pair).
     *handled = true;
     int slot = slotFromParams(params, g_activeTarget);
     if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "unknown/invalid 'client' or 'slot'"; return; }
     const char* name = params["name"] | (const char*)nullptr;
     if (name && name[0]) {
-      if (strcasecmp(name, "us") && strcasecmp(name, "da")) {
-        *errCode = -32602; *errMsg = "layout must be 'us' or 'da'"; return;
+      if (strcasecmp(name, "us") && strcasecmp(name, "da") && strcasecmp(name, "uk")) {
+        *errCode = -32602; *errMsg = "layout must be 'us', 'da', or 'uk'"; return;
       }
       slotLayout[slot] = hbmode1::layoutFromName(name);
       persistSlotLayout(slot);                // survive a reboot/reflash, like the client label does
@@ -1583,7 +1583,7 @@ const c=document.createElement('button');c.textContent='connect';c.onclick=()=>a
 const d=document.createElement('button');d.textContent='disconnect';d.onclick=()=>act('disconnect',{slot:s.slot});
 const u=document.createElement('button');u.textContent='unpair';
 u.onclick=()=>{if(confirm('Unpair '+(s.client||'this device')+'? Deletes the bond on THIS side only -- also Forget it in its own Bluetooth settings afterwards.'))act('unpair',{slot:s.slot})};
-// per-device keyboard layout (us/da) -- the char->scancode map for THIS host, persisted per slot
+// per-device keyboard layout (us/da/uk) -- the char->scancode map for THIS host, persisted per slot
 const ly=document.createElement('select');ly.title='keyboard layout of this device';
 ['us','da'].forEach(n=>{const o=document.createElement('option');o.value=n;o.textContent=n;if((s.layout||'us')===n)o.selected=true;ly.append(o)});
 ly.onchange=()=>act('layout',{slot:s.slot,name:ly.value});
