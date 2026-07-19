@@ -13,6 +13,7 @@ import json
 import pytest
 
 from hidbridge import board as B
+from hidbridge import rpc
 from hidbridge.bridge import (
     HidBridge,
     IncompatibleFirmware,
@@ -515,3 +516,113 @@ def test_hidbridge_unreachable_board_raises_probe_error_on_enter():
     with pytest.raises(ProbeError):
         with HidBridge("/dev/ttyACM9", backend=board):
             pass
+
+
+# --------------------------------------------------------------------------- #
+# END-TO-END through the REAL rpc.RpcClient: HidBridge -> McuBoard -> RpcClient over a FAKE CHANNEL.
+#
+# Every other MCU test above injects `FakeRpc`, which REPLACES rpc.RpcClient and so bypasses the real
+# demux + proto gating. Here the board is driven by a genuine `rpc.RpcClient` over a scriptable
+# write/readline channel, so the ACTUAL response demux (proto-1 plain-text `EVT` skip vs proto>=2 id-less
+# `event` notification capture) + the `hello` version handling run INSIDE the full stack. Parametrized
+# over proto {1, 2, 3=newer-than-KNOWN} the channel simulates a board at that proto and interleaves a
+# proto-appropriate async readiness event before its replies; we then run the whole
+# connect/type/move/disconnect lifecycle and assert the drive verbs still reached the board unbroken.
+# --------------------------------------------------------------------------- #
+class FakeBoardChannel:
+    """A REAL write/readline JSON-RPC channel simulating a board at `proto`. Stateful: `connect` flips
+    the one slot conn+sub, so wait_ready/_slot_connected pass without hardware. Before EVERY reply it
+    interleaves a proto-appropriate async readiness event -- plain-text `EVT ...` bytes on proto 1, an
+    id-less JSON `event` notification on proto>=2 -- exactly the post-connect burst the demux must
+    tolerate. Records (method, params) of each request so the test can assert the drive verbs arrived."""
+
+    _CAPS = ["keyboard", "mouse", "connect", "nickname", "frames", "layout"]
+
+    def __init__(self, proto, name="mini5"):
+        self.proto = proto
+        self.name = name
+        self.requests = []          # (method, params) for every JSON-RPC request seen
+        self.raw_writes = []        # non-JSON lines (e.g. a proto-1 @token) -- unused on this path
+        self._queue = []
+        self._slot = {"slot": 0, "client": name, "bonded": True, "conn": False, "sub": False,
+                      "layout": "us"}
+
+    def _events(self):
+        # proto 1: unsolicited plain-text EVT lines (bytes); proto>=2: id-less JSON event notifications
+        if self.proto == 1:
+            return [b"EVT connected\n", b"EVT ready\n"]
+        return [{"jsonrpc": "2.0", "method": "event", "params": {"event": "ready", "slot": 0}}]
+
+    def _reply(self, method, params):
+        if method == "hello":
+            return {"proto": self.proto, "caps": list(self._CAPS), "device": "HIDBRIDGE-esp32",
+                    "fw": "fakefw", "nick": "espeth", "layouts": ["us", "da"]}
+        if method == "identities":
+            return {"slots": [dict(self._slot)], "adv": 0, "tgt": 0}
+        if method == "connect":
+            self._slot.update(conn=True, sub=True)     # the iPad reattached + enabled the reports
+        if method == "ping":
+            return {"device": self.name, "subscribed": self._slot["sub"], "conn": self._slot["conn"]}
+        return {"ok": True, **params}
+
+    def write(self, b):
+        try:
+            req = json.loads(b.decode())
+        except ValueError:
+            self.raw_writes.append(b)
+            return len(b)
+        m, p = req["method"], req.get("params", {})
+        self.requests.append((m, p))
+        for ev in self._events():                       # async event burst BEFORE the matching reply
+            self._queue.append(ev)
+        self._queue.append({"jsonrpc": "2.0", "id": req["id"], "result": self._reply(m, p)})
+        return len(b)
+
+    def readline(self):
+        if not self._queue:
+            return b""
+        item = self._queue.pop(0)
+        if isinstance(item, bytes):
+            return item
+        if isinstance(item, str):
+            return (item + "\n").encode()
+        return (json.dumps(item) + "\n").encode()
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("proto", [1, 2, 3])
+def test_hidbridge_real_rpcclient_drives_and_tolerates_proto_events(proto):
+    ch = FakeBoardChannel(proto)
+    rpc_client = rpc.RpcClient(ch)                       # the REAL client -- real demux + proto gating
+    board = B.McuBoard(transport=FakeTransport(), rpc_client=rpc_client)
+
+    def run():
+        with HidBridge("/dev/ttyUSB3", backend=board) as bridge:
+            assert bridge.info["board"] == "esp32" and bridge.info["proto"] == proto
+            assert [d.name for d in bridge.list_devices()] == ["mini5"]
+            with bridge.connect("mini5") as s:          # connect + wait_ready cross the event burst
+                s.type("hi")
+                s.move(3, 4)
+
+    if proto > rpc.KNOWN_PROTO:
+        # a board NEWER than the client understands must WARN on hello (never crash) but still drive
+        with pytest.warns(UserWarning, match=f"protocol {proto}"):
+            run()
+    else:
+        run()
+
+    # the drive verbs REACHED the board through the whole stack (real client built the JSON-RPC requests)
+    assert ("type", {"text": "hi"}) in ch.requests
+    assert ("move", {"dx": 3, "dy": 4}) in ch.requests
+    assert ("connect", {"client": "mini5"}) in ch.requests
+    assert ("disconnect", {"client": "mini5"}) in ch.requests   # session exit disconnected, bond kept
+
+    # the interleaved async events did NOT break the lifecycle -- and on proto>=2 the id-less `event`
+    # notification was captured by the real demux; on proto 1 the plain-text EVT lines are skipped, not
+    # captured (last_event stays None), proving BOTH formats flowed through end-to-end.
+    if proto >= 2:
+        assert rpc_client.last_event == {"event": "ready", "slot": 0}
+    else:
+        assert rpc_client.last_event is None
