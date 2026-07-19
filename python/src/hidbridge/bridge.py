@@ -17,7 +17,8 @@ otherwise `connect()` raises. Errors are typed: NotBonded / ConnectTimeout / Uns
 CapacityError, all under HidbridgeError.
 
 Report mode defaults to "raw" (the host builds the exact bytes via reports.py and the board relays
-them -- offline byte-parity, the old "raw"); mode="rpc" has the board build them (the old "rpc").
+them as K/M frame lines -- offline byte-parity); mode="rpc" relays the same host-built bytes via the
+board's JSON-RPC `frames` method instead. See docs/bt-hid-modes.md.
 """
 
 from __future__ import annotations
