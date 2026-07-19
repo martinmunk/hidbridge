@@ -26,9 +26,9 @@ parity test guards it.
 ```
    Linux host                         serial            MCU (Pico 2W / ESP32)      BLE
   +-------------------+          (USB, 115200)         +--------------------+
-  |  hidbridge CLI    |  ---- K/M report frames ------>|  BTstack / NimBLE  | ~~~ BLE HID ~~> any
-  |  (hidbridge.*)    |  <---- OK / EVT ready ----------|  HOG peripheral    |               BLE-HID
-  |  reports.py       |                                 |  own bond database |                host
+  |  hidbridge CLI    |  ---- JSON-RPC intent -------->|  BTstack / NimBLE  | ~~~ BLE HID ~~> any
+  |  (hidbridge.*)    |  <---- result / EVT ready ------|  HOG peripheral    |               BLE-HID
+  |  board builds     |    (the BOARD builds reports)   |  own bond database |                host
   +---------+---------+                                 +--------------------+
             |
             |  (alternative backend: the host's OWN BlueZ stack)

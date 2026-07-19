@@ -25,17 +25,21 @@ reliably where BlueZ stalls -- for a ~USD 5-6 board and a USB cable.
 
 ## Serial wire protocol (host -> MCU, 115200 baud, newline-terminated ASCII)
 
+A line is routed by its FIRST character: `{` -> **JSON-RPC 2.0** (the board builds every report --
+`type`/`key`/`move`/`click`/`scroll`; see below), anything else -> a single-char DEVICE command:
+
 ```
-K<hex>       keyboard report body      (8 bytes  = 16 hex)  -> BLE notify keyboard input report
-M<hex>       relative-mouse body       (4 bytes  =  8 hex)  -> BLE notify mouse input report
 P            ping                                            -> "OK ... subscribed=<0|1> conn=<0|1>"
 A            (re)start advertising                           -> "OK adv"
 X            disconnect the target's central, keep bond (+park) -> "OK disc" / "OK noconn"
 O            park: stop advertising, keep connections + bonds -> "OK parked"
 I<n>[:name]  select host SLOT n as the advertising identity (+optional per-slot name) + advertise
                                                               -> "OK slot=<n> addr=<12hex> name=.. conn=.."
-T<n>         set the send-target slot (route K/M to that connection) -> "OK tgt=<n>"
+T<n>         set the send-target slot (route reports to that connection) -> "OK tgt=<n>"
 S            slots status              -> "OK slots=<N> adv=<n> tgt=<n> multi=.. c0=.. c1=.. s0=.. s1=.."
+N            network status (net build) -> "OK net eth=.. ip=.. port=.. mdns=.. token=.. clients=.."
+W<token>     provision the network auth token (SERIAL ONLY)  -> "OK token set ..."
+@<token>     authenticate a TCP session                      -> "OK auth" / "ERR auth"
 ```
 
 Async link events arrive unsolicited as `EVT connected` / `EVT disconnected` and, for the HID report
@@ -43,8 +47,10 @@ subscription, `EVT ready` / `EVT unsubscribed` (the host wrote/cleared the repor
 `EVT ready` (or `subscribed=1`) as the **readiness** signal so the first keystroke after (re)connect
 is not dropped.
 
-The ESP32 firmware can also be driven with a higher-level **JSON-RPC 2.0** protocol (rpc) over the
-same channel -- the board owns the report building; the host sends intent. See
+The board builds every HID report from the **JSON-RPC 2.0** report methods (`type`/`key`/`move`/
+`click`/`scroll`, plus device management by client name) over the same channel -- the host sends
+intent, the firmware owns the report descriptor + report building. (An earlier host-built `K<hex>`/
+`M<hex>` frame relay was removed: the board is in charge now.) See
 [`../docs/bt-hid-modes.md`](../docs/bt-hid-modes.md).
 
 ## Per-bond identity ("host slots")

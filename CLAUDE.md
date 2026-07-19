@@ -117,21 +117,24 @@ families:
 
 Both backends emit identical report bytes, so behaviour is transport-independent.
 
-## Two drive modes for the MCU firmware (see `docs/bt-hid-modes.md`)
+## One drive protocol on the MCU wire: JSON-RPC (see `docs/bt-hid-modes.md`)
 
-The ESP32/Pico firmware can be driven two ways over the same channel; a line is routed by its first
-char (`{` = rpc, else raw). Both coexist.
+The ESP32/Pico firmware is driven over one channel; a line is routed by its first char (`{` =
+JSON-RPC, else a single-char DEVICE command -- advertise/select-slot/status/park/provision/auth).
 
-- **raw ("just a radio", the default + original):** the host builds the exact report bytes
-  (`reports.py` + `controller.py`) and the board relays them -- `K`/`M<hex>` frame lines (keyboard +
-  relative mouse). This preserves the multi-backend byte-parity and keeps report logic host-side +
-  offline-testable.
-- **rpc ("tell it WHAT"):** the board owns the report building. The host sends **JSON-RPC 2.0**
-  (`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`); the firmware builds the
-  reports. The report layer is native C++ in `firmware/shared/hidbridge_rpc.h` (shared by both
-  firmwares), a **deliberate duplicate of `reports.py`** -- guarded by `test_bt_hid_rpc.py`, which
-  dry-runs each command (`dry:true` returns built bytes) and asserts equality with `reports.py`. Host
-  side: `mode1.rpcClient` + `hidbridge --rpc`.
+- **rpc ("tell it WHAT"), the ONLY report path:** the board owns the report building. The host sends
+  **JSON-RPC 2.0** (`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`); the firmware
+  builds the reports (the target slot's per-slot keyboard layout applies board-side). The report layer
+  is native C++ in `firmware/shared/hidbridge_rpc.h` (shared by both firmwares), a **deliberate
+  duplicate of `reports.py`** -- guarded by `test_bt_hid_rpc.py`, which dry-runs each command
+  (`dry:true` returns built bytes) and asserts equality with `reports.py`. Host side: `board.McuBoard`
+  drives the high-level verbs over `rpc.py`. (A `frames` JSON-RPC method also exists -- the host
+  supplies pre-built bytes inside JSON-RPC -- used by the central byte-parity self-test, not day to day.)
+- **REMOVED: the old `K`/`M<hex>` raw frame relay ("just a radio", host builds the bytes).** The MCU
+  firmware no longer accepts K/M lines on the wire. The multi-backend byte-parity guarantee now rests
+  on the **dongle** path (which still host-builds via `reports.py` + `controller.py`, over its own
+  daemon socket -- NOT the MCU wire) plus the rpc drift guard above. `reports.py`'s K/M builders stay
+  (the dongle + drift guard use them); the MCU just no longer takes them.
 
 ## Invariants that will bite you
 
