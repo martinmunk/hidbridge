@@ -507,12 +507,13 @@ static void netCloseSession(NetSession& s) {
 }
 #endif  // HIDBRIDGE_NET
 
-// ---- WS event fan-out queue (SPSC) ----------------------------------------------------------- //
-// evt() can run in the NimBLE HOST TASK (onConnect/onDisconnect/onSubscribe callbacks), but the
-// WebSocketsServer is driven from the LOOP task and is not safe to touch cross-task. So evt() only
-// ENQUEUES the (static-storage) EVT string pointer here; loop() drains it to the WS clients after
-// wsServer.loop(). Single producer (evt) / single consumer (loop drain); a full queue drops the event
-// (the page also polls every 3s, so a lost push is self-healing).
+// ---- async event fan-out queue (SPSC) -------------------------------------------------------- //
+// evt() can run in the NimBLE HOST TASK (onConnect/onDisconnect/onSubscribe callbacks), but NEITHER
+// the WebSocketsServer NOR a net session's mbedtls_ssl_context is safe to touch cross-task (both are
+// driven from the LOOP task). So evt() only ENQUEUES the (static-storage) EVT string pointer here;
+// loop() drains it to the WS clients AND the TCP sessions (drainEvts) after wsServer.loop(). Single
+// producer (evt) / single consumer (loop drain); a full queue drops the event (the page also polls
+// every 3s, so a lost push is self-healing).
 #ifdef HIDBRIDGE_NET
 #define WS_EVT_Q 8
 static volatile const char* g_wsEvtQ[WS_EVT_Q];
@@ -530,18 +531,20 @@ static void wsEnqueueEvt(const char* msg) {
 // channel's command, so it must reach every attached host, not just whoever spoke last. Sessions that
 // have not finished the TLS handshake are excluded -- link state is not something an unauthenticated
 // peer may observe (once the handshake completes, the PSK proved they hold the token).
+//
+// CROSS-TASK SAFETY (this is load-bearing, not tidiness): evt() can run in the NimBLE HOST TASK
+// (onConnect/onDisconnect/onSubscribe). A per-session mbedtls_ssl_context is NOT safe to touch from two
+// tasks -- if evt() wrote a net client's TLS record from the host task while netPoll() (loop task)
+// read/wrote the SAME context, the record state corrupted and the peer aborted the connection with an
+// EOF (Python saw ssl.SSLEOFError). That is exactly what killed a net session whenever a slot
+// release/park dropped its BLE central: parkTargetSlot -> server->disconnect() -> onDisconnect (host
+// task) -> evt("EVT disconnected") raced the loop task on that session's ssl. So evt() now ONLY
+// ENQUEUES the (static-storage) string; loop() drains it to BOTH the WS pages AND the TCP sessions
+// (drainEvts), where every ssl touch is single-threaded. Serial is a raw UART and stays direct.
 static void evt(const char* msg) {
   Serial.println(msg);
 #ifdef HIDBRIDGE_NET
-  size_t len = strlen(msg);
-  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
-    NetSession& s = netSessions[i];
-    if (s.authed) {
-      if (!tlsWrite(&s.ssl, (const uint8_t*)msg, len) || !tlsWrite(&s.ssl, (const uint8_t*)"\r\n", 2))
-        s.wantClose = true;                // dead peer -- reap it in the next netPoll
-    }
-  }
-  wsEnqueueEvt(msg);                         // push to the WS control page(s) too (drained in loop())
+  wsEnqueueEvt(msg);                         // drained to WS pages + TCP sessions in loop() (drainEvts)
 #endif
 }
 
@@ -1717,12 +1720,21 @@ static void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
   }
 }
 
-// Drain queued EVT pushes to every AUTHENTICATED WS client (called from loop()). Runs in the loop task,
-// so touching wsServer here is safe.
-static void wsDrainEvts() {
+// Drain queued EVT pushes to every AUTHENTICATED client -- WS pages AND TCP sessions (called from
+// loop()). Runs in the LOOP task, so touching wsServer AND each net session's ssl here is safe: this is
+// the single place a net session's TLS record is written for an unsolicited event, so it never races
+// netPoll's read/reply on the same context (the cross-task hazard evt() used to have).
+static void drainEvts() {
   while (g_wsEvtHead != g_wsEvtTail) {
     const char* msg = (const char*)g_wsEvtQ[g_wsEvtHead];
     g_wsEvtHead = (uint8_t)((g_wsEvtHead + 1) & (WS_EVT_Q - 1));
+    size_t len = strlen(msg);
+    for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
+      NetSession& s = netSessions[i];
+      if (s.authed &&
+          (!tlsWrite(&s.ssl, (const uint8_t*)msg, len) || !tlsWrite(&s.ssl, (const uint8_t*)"\r\n", 2)))
+        s.wantClose = true;                  // dead peer -- reap it in the next netPoll
+    }
     for (uint8_t i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
       if (wsAuthed[i]) wsServer.sendTXT(i, msg);
   }
@@ -1815,7 +1827,7 @@ void loop() {
   netPoll();
   webServer.handleClient();
   wsServer.loop();                           // WS drive channel: reads frames + drives ping/pong
-  wsDrainEvts();                             // push queued EVT lines to the WS control page(s)
+  drainEvts();                               // push queued EVT lines to the WS pages + TCP sessions
   ArduinoOTA.handle();
 #endif
   delay(2);
