@@ -83,8 +83,8 @@ Upload is idempotent (`200/201` ok, `409` "already exists" non-fatal).
 ### The wheel (Forgejo PyPI registry)
 
 ```bash
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
 ```
 
 Persist it in a project instead of typing the index each time:
@@ -92,6 +92,7 @@ Persist it in a project instead of typing the index each time:
 `requirements.txt`
 ```
 --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
+--trusted-host forgejo.example.com
 hidbridge[mcu]
 ```
 
@@ -99,6 +100,7 @@ hidbridge[mcu]
 ```ini
 [global]
 extra-index-url = http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
+trusted-host = forgejo.example.com
 ```
 
 `uv` (`pyproject.toml`)

@@ -90,8 +90,8 @@ Released wheels are published to this LAN's Forgejo **PyPI registry**. To use `h
 another Python project, install it from that index:
 
 ```bash
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
 ```
 
 Persist the index in a project rather than typing it each time:
@@ -99,6 +99,7 @@ Persist the index in a project rather than typing it each time:
 ```text
 # requirements.txt
 --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
+--trusted-host forgejo.example.com
 hidbridge[mcu]
 ```
 
@@ -107,6 +108,10 @@ hidbridge[mcu]
 [[tool.uv.index]]
 name = "forgejo"
 url = "http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/"
+
+# plain-HTTP registry -> allow it explicitly
+[tool.uv]
+allow-insecure-host = ["forgejo.example.com"]
 ```
 then `uv add --index forgejo hidbridge`.
 

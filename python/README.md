@@ -27,8 +27,8 @@ truth for the HID report descriptor), so behaviour is identical regardless of tr
 **As a consumer** (released wheels live on this LAN's Forgejo PyPI registry):
 
 ```bash
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
-pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ "hidbridge[mcu]"   # + pyserial for the serial backend
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
+pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the serial backend
 ```
 
 Persist the index with an `--extra-index-url` line in `requirements.txt`, a `pip.conf` entry, or
