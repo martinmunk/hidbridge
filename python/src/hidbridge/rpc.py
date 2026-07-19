@@ -7,10 +7,11 @@ bytes. (The old "raw" K/M frame relay, where the host built the exact bytes and 
 radio", was removed from the firmware; the dongle backend still host-builds via reports.py, but over
 its own daemon socket, not this MCU channel.)
 
-A line reaches the MCU over the SAME channel (serial or TCP); the board routes it to the RPC handler
-iff it is a JSON object (starts with `{`), else to the single-char DEVICE command handler
-(advertise/select-slot/status/park/auth). A network client authenticates once with the `@<token>`
-line, then sends JSON-RPC.
+Everything on the MCU wire is JSON-RPC (proto>=2): requests, replies, JSON-RPC error responses, and
+async link/readiness state as id-less `event` NOTIFICATIONS. A network client is authenticated by the
+TLS-PSK handshake itself (the token IS the pre-shared key), so it sends JSON-RPC immediately -- there
+is no app-layer auth line. (PROTO-1 BACK-COMPAT: an older board emits plain-text `EVT ...`/`ERR ...`
+frames and expects the redundant `@<token>` line; the client tolerates both, gated on `hello.proto`.)
 
 This module is also the board driver's device-management channel: `identities`/`pair`/`unpair`/
 `connect`/`disconnect`/`nickname`/`layout` resolve a device by NAME (client label) to a firmware slot,
@@ -37,7 +38,7 @@ DEFAULT_BAUD = 115200
 # (a board may ship a subset of features) -- we feature-detect on `caps`. The version is used only to
 # WARN when a board is newer than we understand, so we never crash on an unknown version -- we just
 # use the capabilities we both share. (Robustness principle: be liberal in what you accept.)
-KNOWN_PROTO = 1
+KNOWN_PROTO = 2
 
 
 class RpcError(RuntimeError):
@@ -80,6 +81,7 @@ class RpcClient:
         self._id = 0
         self._max_reads = max_reads
         self._info: ServerInfo | None = None
+        self.last_event: dict | None = None   # latest async `event` notification's params (proto>=2)
 
     # -- JSON-RPC core --
     def call(self, method: str, params: dict | None = None, *, dry: bool = False) -> dict:
@@ -92,8 +94,9 @@ class RpcClient:
         self._ch.write((json.dumps(req, separators=(",", ":")) + "\n").encode("ascii"))
         want = self._id
         # Demux robustly. During the post-connect window the board emits a burst of async events
-        # (unsolicited plain-text `EVT ...` lines, and/or id-less JSON notifications) and can briefly
-        # stall (an empty read) BEFORE the real reply, so we must not let any of that starve it:
+        # (id-less JSON-RPC `event` notifications on proto>=2 firmware; unsolicited plain-text
+        # `EVT ...` lines on proto-1 firmware) and can briefly stall (an empty read) BEFORE the real
+        # reply, so we must not let any of that starve it:
         #   * async notifications, mismatched-id (pipelined) replies, and noise lines are SKIPPED and
         #     do NOT consume the response budget the way a fixed loop count did;
         #   * a TRANSIENT stall (a bounded run of empty reads -- each is one full channel-timeout
@@ -121,11 +124,11 @@ class RpcClient:
             empty_run = 0                     # data flowed -- the stall (if any) is over
             line = raw.decode("ascii", "replace").strip()
             if not line.startswith("{"):
-                # `EVT ...` lines (ready/connected/disconnected/unsubscribed/net ...) are UNSOLICITED
-                # async events the firmware broadcasts to serial + net -- skip them: neither a reply
-                # NOR legacy-firmware noise. Recording one as noise wrongly turned a post-connect stall
-                # into RpcProtocolError instead of a transient RpcTimeout. Any OTHER non-JSON line (a
-                # boot banner, a legacy `ERR unknowncmd`) is still noise -> RpcProtocolError.
+                # PROTO-1 BACK-COMPAT SHIM [remove when MIN_FIRMWARE_PROTO >= 2]: proto-1 firmware
+                # broadcasts async events as plain-text `EVT ...` lines (ready/connected/disconnected/
+                # unsubscribed/net ...). Skip them -- neither a reply NOR legacy noise (recording one as
+                # noise wrongly turned a post-connect stall into RpcProtocolError). Any OTHER non-JSON
+                # line (a boot banner, a legacy `ERR unknowncmd`) is still noise -> RpcProtocolError.
                 if line and not line.startswith("EVT "):
                     noise = line
                 continue
@@ -135,7 +138,12 @@ class RpcClient:
                 noise = line
                 continue
             if msg.get("id") is None:
-                continue                      # a notification (async event), not a reply
+                # An id-less JSON-RPC notification (async event), not a reply. On proto>=2 the firmware
+                # sends {"method":"event","params":{"event":..,"slot":N}} for link/readiness state --
+                # expose the latest for observability, then keep waiting for the pending reply.
+                if msg.get("method") == "event":
+                    self.last_event = msg.get("params") or {}
+                continue
             if msg.get("id") != want:
                 continue                      # a different (pipelined) reply -- skip
             err = msg.get("error")
@@ -186,8 +194,19 @@ class RpcClient:
                 f"board {info.device or '?'} (proto {info.proto}) lacks capability {cap!r}; "
                 f"it advertises {sorted(info.caps)}")
 
-    # -- authentication (network only; serial is trusted). Uses the raw-path `@<token>` line. --
+    # -- authentication (network only; serial is trusted) --
     def authenticate(self, token: str) -> None:
+        """Network app-layer auth, PROTO-GATED on the board's `hello`.
+
+        proto>=2: a no-op -- the TLS-PSK handshake (the token IS the pre-shared key) already
+        authenticated the socket, so no @token line goes on the wire (TLS-PSK is the sole net auth).
+
+        proto==1: PROTO-1 BACK-COMPAT SHIM [remove when MIN_FIRMWARE_PROTO >= 2] -- the old firmware's
+        auth gate still expects the raw `@<token>` line and answers `OK auth`/`ERR auth`.
+        """
+        if self.info().proto >= 2:
+            return
+        # -- proto-1 shim --
         self._ch.write(("@" + token + "\n").encode("ascii"))
         for _ in range(self._max_reads):
             raw = self._ch.readline()
@@ -375,8 +394,8 @@ def open_client(target: str | None = None, *, token: str | None = None,
                 "the network backend is TLS-encrypted and needs the board token (the TLS pre-shared "
                 "key); provision it with `hidbridge net-provision`, then set BT_HID_NET_TOKEN or "
                 "~/.config/bt_hid/net.token")
-        # token = the TLS-PSK: the handshake authenticates. authenticate() re-sends @token over the
-        # now-encrypted channel for the board's existing gate (redundant but harmless).
+        # token = the TLS-PSK: the handshake authenticates the socket. authenticate() is a no-op on
+        # proto>=2 boards (nothing on the wire) and the proto-1 @token shim on older ones.
         cli = RpcClient(socket_link.open_socket(host, port, timeout, token=tok))
         cli.authenticate(tok)
         return cli

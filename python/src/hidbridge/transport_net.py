@@ -3,9 +3,10 @@
 Same board, same NimBLE HID stack, same line protocol as `transport_esp32` -- but reached over the
 LAN (TCP 3333) instead of a USB cable. So this is a THIN subclass of `Esp32Transport`: the wire
 becomes a `socket_link.SocketLine` (which duck-types the write/readline surface the transport already
-uses), and the only added behaviour is the TCP session handshake -- send `@<token>` right after
-opening so the firmware's auth gate lets report frames through. Every report/slot/ping method is
-inherited unchanged, so `reports.py` stays the single source of truth over the network too.
+uses). There is NO app-layer handshake -- the TLS-PSK handshake (the token IS the pre-shared key) is
+the authentication, so the session serves report frames immediately once the socket is open. Every
+report/slot/ping method is inherited unchanged, so `reports.py` stays the single source of truth over
+the network too.
 
 TARGET STRINGS (see conn.make_link_backend / cli --backend net):
     net:<host>            e.g. net:hidbridge-esp32.local  or  net:192.0.2.42
@@ -39,8 +40,8 @@ class NetError(Esp32Error):
 def load_token(explicit: str | None = None) -> str | None:
     """Resolve the network auth token: explicit arg > BT_HID_NET_TOKEN > ~/.config/bt_hid/net.token.
 
-    Returns None if none is configured (the caller then connects unauthenticated -- only ping works,
-    and any report frame gets 'ERR auth' from the board). Never logs the value.
+    Returns None if none is configured -- and without it the TLS-PSK port cannot be reached at all
+    (the token is the pre-shared key), so open_socket() refuses rather than connecting. Never logs it.
     """
     if explicit:
         return explicit.strip() or None
@@ -100,27 +101,19 @@ class NetTransport(Esp32Transport):
             raise NetError("the network backend is now TLS-encrypted and needs the board token (it "
                            "is the TLS pre-shared key); provision it over USB with `hidbridge "
                            "net-provision`, then set BT_HID_NET_TOKEN or ~/.config/bt_hid/net.token")
-        # The token is the TLS pre-shared key: the handshake both encrypts the link and proves we
-        # hold it. The `@<token>` line in _authenticate() is then redundant but kept for the board's
-        # existing auth-gate flow (it just replies OK over the already-authenticated channel).
+        # The token is the TLS pre-shared key: completing the handshake both encrypts the link AND
+        # proves we hold the token, so the session is authenticated the moment open_socket() returns.
+        # There is NO app-layer auth line -- the `@<token>` line was dropped with proto 2 (TLS-PSK is
+        # the sole net auth; a wrong/absent token fails the handshake in socket_link, never reaching
+        # here). A proto-1 board also treats the handshake as auth, so no @token is needed for it either.
         self._ser = socket_link.open_socket(self.host, self.tcp_port, self.timeout, token=self._token)
         self.port = self._ser.port                 # "host:port" label for status dicts
         self._authenticate()
 
     def _authenticate(self):
-        """Send `@<token>` so the board's auth gate admits report frames. No token -> ping-only."""
-        if not self._token:
-            self._authed = False
-            return
-        self._ser.write(f"@{self._token}\n".encode("ascii"))
-        resp = self._readline()
-        if not resp.startswith("OK"):
-            # Do NOT leak the token or the raw reply (it echoes our line on some stacks); the board's
-            # own reply is a bare 'ERR auth', safe to surface.
-            self.close()
-            raise NetError("network auth rejected (bad or unprovisioned token); provision it over "
-                           "USB with `hidbridge net-provision`")
-        self._authed = True
+        """Mark the session authed. The TLS-PSK handshake (done in open_socket) IS the authentication;
+        nothing goes on the wire. No token -> unauthed (ping-only, though open_socket already refused)."""
+        self._authed = bool(self._token)
 
     # A socket open never resets a board, so the base class's cold-reset detection is moot here.
     def _settle(self, deadline: float = 1.5):

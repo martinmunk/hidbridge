@@ -25,12 +25,15 @@ class RpcFake:
         self._queue = []
         self._handler = handler
         self._noise = list(noise or [])
+        self.auth_reply = "OK auth"           # what the proto-1 firmware answers to an @token line
 
     def write(self, b):
         try:
             req = json.loads(b.decode())
         except ValueError:
-            self.raw_writes.append(b)         # non-JSON line (e.g. the @token auth line)
+            self.raw_writes.append(b)         # non-JSON line (e.g. the proto-1 @token auth line)
+            if b.startswith(b"@"):
+                self._queue.append(self.auth_reply)   # proto-1 firmware acks the @token line
             return len(b)
         self.requests.append(req)
         for ln in self._noise:
@@ -390,19 +393,38 @@ def test_hello_and_supports():
     assert c.supports("keyboard") and not c.supports("nope")
 
 
-def test_authenticate_sends_token_line_and_accepts():
-    fake = RpcFake()
-    fake._queue.append("OK auth")           # firmware answers the @token line (raw-path auth)
+def test_authenticate_proto1_sends_token_line_and_accepts():
+    # A proto-1 board's auth gate still expects the raw @<token> line (back-compat shim).
+    fake = RpcFake(handler=lambda m, p: {"proto": 1, "caps": []})
     rpc.RpcClient(fake).authenticate("supersecret")
-    assert fake.requests == []              # auth is NOT a JSON-RPC call...
-    assert fake.raw_writes == [b"@supersecret\n"]   # ...it's the @<token> line
+    assert fake.requests == [{"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {}}]  # only hello
+    assert fake.raw_writes == [b"@supersecret\n"]   # ...plus the proto-1 @<token> line
 
 
-def test_authenticate_rejected_raises():
-    fake = RpcFake()
-    fake._queue.append("ERR auth")
+def test_authenticate_proto2_is_a_noop():
+    # proto>=2: the TLS-PSK handshake (the token IS the pre-shared key) already authenticated the
+    # socket -- there is NO @token app-line on the wire.
+    fake = RpcFake(handler=lambda m, p: {"proto": 2, "caps": []})
+    rpc.RpcClient(fake).authenticate("supersecret")
+    assert fake.raw_writes == []
+
+
+def test_authenticate_proto1_rejected_raises():
+    fake = RpcFake(handler=lambda m, p: {"proto": 1, "caps": []})
+    fake.auth_reply = "ERR auth"
     with pytest.raises(rpc.RpcError):
         rpc.RpcClient(fake).authenticate("bad")
+
+
+def test_call_captures_event_notification():
+    # A JSON-RPC `event` notification (id-less) is not a reply -- the demux skips it for the pending
+    # call but exposes the latest one as `last_event` (readiness/link observability).
+    ev = {"jsonrpc": "2.0", "method": "event", "params": {"event": "ready", "slot": 0}}
+    fake = RpcFake(handler=lambda m, p: {"ok": 1}, noise=[ev])
+    c = rpc.RpcClient(fake)
+    assert c.last_event is None
+    c.call("ping")
+    assert c.last_event == {"event": "ready", "slot": 0}
 
 
 @pytest.mark.parametrize("target,expect", [

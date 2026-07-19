@@ -7,17 +7,17 @@ interface `Esp32Transport` already accepts for an injected port -- so the whole 
 frames, ping/readiness, slots, park) is reused verbatim over the network instead of reimplemented.
 
 ENCRYPTION (TLS-PSK): port 3333 is TLS-ONLY -- there is no plaintext path. The pre-shared key IS the
-board's provisioned token (the same secret the `@<token>` line, the web `X-Auth-Token` header, and
-the OTA password reuse). Because the PSK never crosses the wire, completing the handshake both
-encrypts the link AND proves we hold the token -- so a wrong/absent token fails the TLS handshake
-outright rather than reaching the app-level auth gate. We pin TLS 1.2 + a PSK cipher to match the
-board's mbedTLS server (`firmware/esp32/src/main.cpp` netTlsSetup). `set_psk_client_callback` needs
-Python 3.13+; an older interpreter raises a clear error here.
+board's provisioned token (the same secret the web `X-Auth-Token` header and the OTA password reuse).
+Because the PSK never crosses the wire, completing the handshake both encrypts the link AND proves we
+hold the token -- so a wrong/absent token fails the TLS handshake outright, and the session is
+authenticated the moment the handshake lands (there is no app-layer auth line). We pin TLS 1.2 + a PSK
+cipher to match the board's mbedTLS server (`firmware/esp32/src/main.cpp` netTlsSetup).
+`set_psk_client_callback` needs Python 3.13+; an older interpreter raises a clear error here.
 
 WHY A HAND-ROLLED readline(): the firmware answers one line per command and ALSO emits unsolicited
-`EVT ...` lines at any moment, so the reader must be line-buffered across recv() boundaries (a single
-recv can return half a line, or a reply plus a trailing EVT). We keep the partial tail in `_buf` and
-hand back exactly one line at a time.
+async `event` notification lines at any moment, so the reader must be line-buffered across recv()
+boundaries (a single recv can return half a line, or a reply plus a trailing notification). We keep
+the partial tail in `_buf` and hand back exactly one line at a time.
 
 TIMEOUT SEMANTICS mirror pyserial deliberately: on timeout `readline()` returns b"" rather than
 raising, because the callers (`Esp32Transport._readline`, `wait_ready`, `wait_connected`) already

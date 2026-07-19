@@ -37,7 +37,7 @@ class FakeChannel:
 
 def _authed_transport(replies):
     t = TN.NetTransport(host=None, open_now=False, token="supersecret")
-    t._ser = FakeChannel([b"OK auth\n", *replies])
+    t._ser = FakeChannel([*replies])
     t.host, t.port = "board.local", "board.local:3333"
     t._authenticate()
     return t
@@ -64,12 +64,14 @@ def test_target_grammar_routes_to_net_backend():
 
 
 # --------------------------------------------------------------------------- #
-# auth handshake
+# auth: the TLS-PSK handshake IS the authentication -- no @token app-line on the wire
 # --------------------------------------------------------------------------- #
-def test_authenticate_sends_token_and_sets_authed():
+def test_authenticate_sets_authed_without_any_app_line():
+    # The token doubles as the TLS pre-shared key, so a completed handshake already proves we hold
+    # it; the transport sends NO @token line (dropped with proto 2 -- TLS-PSK is the sole net auth).
     t = _authed_transport([])
     assert t._authed is True
-    assert t._ser.written[0] == b"@supersecret\n"
+    assert t._ser.written == []
 
 
 def test_no_token_stays_unauthed_and_sends_nothing():
@@ -81,15 +83,6 @@ def test_no_token_stays_unauthed_and_sends_nothing():
     assert t._ser.written == []
 
 
-def test_bad_token_raises_and_does_not_leak_token():
-    t = TN.NetTransport(host=None, open_now=False, token="hunter2secret")
-    t._ser = FakeChannel([b"ERR auth\n"])
-    t.host, t.port = "board.local", "board.local:3333"
-    with pytest.raises(TN.NetError) as ei:
-        t._authenticate()
-    assert "hunter2secret" not in str(ei.value)
-
-
 # --------------------------------------------------------------------------- #
 # report frames over the network == the serial/report-layer bytes
 # --------------------------------------------------------------------------- #
@@ -98,7 +91,7 @@ def test_network_report_frames_match_reports_layer():
     res = controller.HidController(t).type_text("A")
     assert res["ok"] and res["backend"] == "net" and res["sent"] == 2
     expected = [b"K" + r.data.hex().encode() + b"\n" for r in R.type_text("A")]
-    assert t._ser.written[1:] == expected     # [0] is the @auth line
+    assert t._ser.written == expected     # no @auth line precedes the frames now
 
 
 # NOTE: the net-status (`N`) reply parsing + token-provisioning (`W<token>`) framing tests were
