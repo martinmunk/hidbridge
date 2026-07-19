@@ -23,35 +23,41 @@ subscription (the host won't enable our input reports). BTstack (Pico) and NimBL
 HID-over-GATT the way those hosts expect out of the box, so the MCU backend delivers keystrokes/pointer
 reliably where BlueZ stalls -- for a ~USD 5-6 board and a USB cable.
 
-## Serial wire protocol (host -> MCU, 115200 baud, newline-terminated ASCII)
+## Wire protocol: one versioned JSON-RPC 2.0 protocol (host -> MCU, 115200 baud / TCP, newline ASCII)
 
-A line is routed by its FIRST character: `{` -> **JSON-RPC 2.0** (the board builds every report --
-`type`/`key`/`move`/`click`/`scroll`; see below), anything else -> a single-char DEVICE command:
+The MCU wire is **one JSON-RPC 2.0 protocol** over the same channel (serial or TCP): the board builds
+every HID report AND owns device management, and the host sends **intent**. (The earlier host-built
+`K<hex>`/`M<hex>` frame relay AND the single-char device commands `P/A/I/T/S/N/V/W/X/O` were folded
+into JSON-RPC and **removed** -- the only non-JSON line still accepted is `@<token>`, a TCP session's
+auth line.) The full method vocabulary + params, the `caps` list, the `proto` version, and the
+version-independence policy live in [`../docs/bt-hid-protocol.md`](../docs/bt-hid-protocol.md).
+
+Request `{"jsonrpc":"2.0","id":<n>,"method":<m>,"params":{...}}` -> `{..,"result":{...}}` or
+`{..,"error":{"code":..,"message":..}}`. A params `"dry":true` returns the built report bytes as hex
+WITHOUT notifying. Methods:
 
 ```
-P            ping                                            -> "OK ... subscribed=<0|1> conn=<0|1>"
-A            (re)start advertising                           -> "OK adv"
-X            disconnect the target's central, keep bond (+park) -> "OK disc" / "OK noconn"
-O            park: stop advertising, keep connections + bonds -> "OK parked"
-I<n>[:name]  select host SLOT n as the advertising identity (+optional per-slot name) + advertise
-                                                              -> "OK slot=<n> addr=<12hex> name=.. conn=.."
-T<n>         set the send-target slot (route reports to that connection) -> "OK tgt=<n>"
-S            slots status              -> "OK slots=<N> adv=<n> tgt=<n> multi=.. c0=.. c1=.. s0=.. s1=.."
-N            network status (net build) -> "OK net eth=.. ip=.. port=.. mdns=.. token=.. clients=.."
-W<token>     provision the network auth token (SERIAL ONLY)  -> "OK token set ..."
-@<token>     authenticate a TCP session                      -> "OK auth" / "ERR auth"
+hello                          proto + a COMPREHENSIVE caps list (the host feature-detects on caps)
+type/key/wake/move/click/          the HID report methods -- the board builds the reports
+  press/release/scroll/frames
+identities                     the host-slot table: [{slot,client,addr,name,conn,sub,bonded,layout}]
+connect {slot|client}          bring an identity up + advertise it + claim it (was I<n>)
+target  {slot|client}          claim a slot as the send-target WITHOUT re-advertising (was T<n>)
+disconnect {slot|client}       drop the target's central, keep the bond, park (was X)
+park                           stop advertising, keep connections + bonds (was O)
+advertise                      (re)start advertising the current slot (was A)
+pair {client} / unpair {..}    assign / forget a client's identity slot
+nickname {name}                get/set the board's advertised-name nickname
+layout {name,slot|client}      get/set a slot's per-device keyboard layout (us/da/uk)
+ping                           liveness + readiness: {device, subscribed, conn} (was P)
+net_status                     Ethernet/TCP state: {eth,ip,port,mdns,token,clients} (was N)
+provision {token}              set the network auth token -- SERIAL ONLY, refused over TCP (was W)
 ```
 
 Async link events arrive unsolicited as `EVT connected` / `EVT disconnected` and, for the HID report
 subscription, `EVT ready` / `EVT unsubscribed` (the host wrote/cleared the report CCCDs). The host uses
-`EVT ready` (or `subscribed=1`) as the **readiness** signal so the first keystroke after (re)connect
-is not dropped.
-
-The board builds every HID report from the **JSON-RPC 2.0** report methods (`type`/`key`/`move`/
-`click`/`scroll`, plus device management by client name) over the same channel -- the host sends
-intent, the firmware owns the report descriptor + report building. (An earlier host-built `K<hex>`/
-`M<hex>` frame relay was removed: the board is in charge now.) See
-[`../docs/bt-hid-modes.md`](../docs/bt-hid-modes.md).
+`EVT ready` (or `ping`'s `subscribed`) as the **readiness** signal so the first keystroke after
+(re)connect is not dropped.
 
 ## Per-bond identity ("host slots")
 
@@ -59,7 +65,7 @@ Each board can present a **distinct BLE identity/address and a target-scoped nam
 Slot 0 is the board's native address (an existing bond survives a firmware update); slots 1..N are
 derived static-random addresses. This is what lets one board be bonded to several hosts and switch
 between them deterministically -- the ESP32 remembers up to ten and can hold **two connected
-simultaneously** on distinct addresses (route reports with `T<n>`). See
+simultaneously** on distinct addresses (route reports with the `target` method). See
 [`../docs/bt-hid-mcu-approach.md`](../docs/bt-hid-mcu-approach.md).
 
 ## Build + flash (PlatformIO)

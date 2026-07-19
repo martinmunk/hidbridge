@@ -1,18 +1,17 @@
 # How a board is driven: the MCU speaks JSON-RPC (the board builds the reports)
 
-hidbridge's MCU firmware (ESP32 / Pico) is driven over one channel (USB serial or TCP) with a line
-protocol routed by the FIRST character of each line:
+hidbridge's MCU firmware (ESP32 / Pico) is driven over one channel (USB serial or TCP) by **one
+versioned JSON-RPC 2.0 protocol** (one JSON object per line): the report methods AND device
+management. The full method vocabulary, the `caps` list, the `proto` version, and the
+version-independence policy are in [`bt-hid-protocol.md`](bt-hid-protocol.md).
 
-- `{` -> **JSON-RPC 2.0** (one JSON object per line): the report + device-management methods.
-- anything else -> a **single-char DEVICE command** (`P`/`A`/`V`/`X`/`O`/`I`/`T`/`S`/`N`/`W`/`@`):
-  ping, advertise, park, select-slot, status, provision, auth. See the firmware header for the grammar.
-
-There is ONE report path on the MCU wire: JSON-RPC. The board owns the HID report descriptor and the
-report *building* -- the host sends high-level INTENT and the firmware turns it into HID reports and
-BLE notifications. (History: the firmware also used to accept a host-built `K<hex>`/`M<hex>` frame
-relay -- "just a radio", the host builds the exact bytes. That path was removed; the board is in
-charge now. The BlueZ **dongle** backend still host-builds via `reports.py`, but over its own daemon
-socket -- NOT this MCU channel.)
+The board owns the HID report descriptor and the report *building* -- the host sends high-level INTENT
+and the firmware turns it into HID reports and BLE notifications. (History: the firmware also used to
+accept a host-built `K<hex>`/`M<hex>` frame relay -- "just a radio", the host builds the exact bytes --
+plus a set of single-char DEVICE commands `P A I T S N V W X O`. Both were folded into JSON-RPC and
+**removed**; the board is in charge now, and the only non-JSON line still accepted is `@<token>`, a TCP
+session's auth line. The BlueZ **dongle** backend still host-builds via `reports.py`, but over its own
+daemon socket -- NOT this MCU channel.)
 
 ## rpc -- "tell the board WHAT; it knows HOW"
 

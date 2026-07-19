@@ -117,24 +117,32 @@ families:
 
 Both backends emit identical report bytes, so behaviour is transport-independent.
 
-## One drive protocol on the MCU wire: JSON-RPC (see `docs/bt-hid-modes.md`)
+## One versioned JSON-RPC protocol on the MCU wire (see `docs/bt-hid-protocol.md`)
 
-The ESP32/Pico firmware is driven over one channel; a line is routed by its first char (`{` =
-JSON-RPC, else a single-char DEVICE command -- advertise/select-slot/status/park/provision/auth).
+The ESP32/Pico firmware is driven over one channel by **one JSON-RPC 2.0 protocol**: the board builds
+every report AND owns device management, and the host sends INTENT
+(`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`). The report layer is native C++ in
+`firmware/shared/hidbridge_rpc.h` (shared by both firmwares), a **deliberate duplicate of `reports.py`**
+guarded by `test_bt_hid_rpc.py` (dry-run each command, assert equality with `reports.py`). Host side:
+`board.McuBoard` + `rpc.py`. The slot/identity + network methods are firmware-specific `custom`
+handlers (`esp32Custom` / `picoCustom`).
 
-- **rpc ("tell it WHAT"), the ONLY report path:** the board owns the report building. The host sends
-  **JSON-RPC 2.0** (`{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}`); the firmware
-  builds the reports (the target slot's per-slot keyboard layout applies board-side). The report layer
-  is native C++ in `firmware/shared/hidbridge_rpc.h` (shared by both firmwares), a **deliberate
-  duplicate of `reports.py`** -- guarded by `test_bt_hid_rpc.py`, which dry-runs each command
-  (`dry:true` returns built bytes) and asserts equality with `reports.py`. Host side: `board.McuBoard`
-  drives the high-level verbs over `rpc.py`. (A `frames` JSON-RPC method also exists -- the host
-  supplies pre-built bytes inside JSON-RPC -- used by the central byte-parity self-test, not day to day.)
-- **REMOVED: the old `K`/`M<hex>` raw frame relay ("just a radio", host builds the bytes).** The MCU
-  firmware no longer accepts K/M lines on the wire. The multi-backend byte-parity guarantee now rests
-  on the **dongle** path (which still host-builds via `reports.py` + `controller.py`, over its own
-  daemon socket -- NOT the MCU wire) plus the rpc drift guard above. `reports.py`'s K/M builders stay
-  (the dongle + drift guard use them); the MCU just no longer takes them.
+- **REMOVED: the old `K`/`M<hex>` raw frame relay AND the single-char DEVICE commands
+  (`P A I T S N V W X O`).** All of them were folded into JSON-RPC methods (`ping`/`connect`/`target`/
+  `identities`/`park`/`advertise`/`disconnect`/`net_status`/`provision`/...) and deleted from both
+  firmwares. The ONLY non-JSON line still accepted is `@<token>` (a TCP session's auth line). A removed
+  single-char line now returns `ERR unknown`. Multi-backend byte-parity rests on the **dongle** path
+  (still host-builds via `reports.py`/`controller.py`, over its daemon socket -- NOT the MCU wire) plus
+  the rpc drift guard. `reports.py`'s builders stay (the dongle + drift guard use them).
+- **VERSION-INDEPENDENCE (the wheel and the firmware ship separately).** The contract is negotiated via
+  `hello`, which returns `proto` (an integer) + a COMPREHENSIVE `caps` list. The host FEATURE-DETECTS on
+  `caps` (never branches on `proto`) and gates optional methods on the cap, raising the typed
+  `IncompatibleFirmware` on a missing cap / older `proto` / "method not found" reply -- never a silent
+  no-op. `bridge.MIN_FIRMWARE_PROTO` is the oldest firmware the wheel supports. **Policy: the protocol
+  is ADDITIVE** -- a new optional method adds a cap and leaves `proto` unchanged; `proto`
+  (`hbmode1::PROTO_VERSION`) bumps ONLY on a breaking change. `reports.py` + the report descriptor are
+  firmware<->target internals, NOT part of the host<->MCU contract -- which is why the wheel no longer
+  depends on firmware report internals.
 
 ## Invariants that will bite you
 
@@ -157,7 +165,9 @@ JSON-RPC, else a single-char DEVICE command -- advertise/select-slot/status/park
   (0600, outside the repo), expanded to HID frames locally, never logged, never in a repr, never sent
   as text. `reports.passcode_reports()` keeps no copy. The **network auth token**
   (`~/.config/bt_hid/net.token`, 0600, git-ignored) follows the same rule -- never logged/repr'd, and
-  provisioned onto the board over USB only (the firmware refuses `W<token>` over TCP).
+  provisioned onto the board over USB only (the firmware honors the JSON-RPC `provision` method on the
+  serial channel and REFUSES it over TCP/TLS + the WS channel -- the serial-only gate, same as the old
+  `W<token>`).
 - **The `net` TCP path is remote input-injection and must stay fail-closed.** It is **TLS-PSK
   encrypted**: the provisioned token is the pre-shared key, so no token => no TLS port opens => the
   board can't be driven over the LAN, and the report bytes (incl. passcode frames) are encrypted on
@@ -194,5 +204,7 @@ with backticks/`$()` in the message gets shell-mangled, and a local bash guard t
 
 `docs/` holds the deep dives (MCU approach and host slots, multi-device routing, absolute pointer,
 trust-overlay dismissal, integration notes, and why shared-identity + directed advertising was
-rejected in favour of per-slot identities: `bt-hid-directed-advertising.md`). The serial wire protocol (`K`/`M`/`A`/`D` frames,
-`P`/`X`/`O`/`I`/`T`/`S` commands, `EVT` events) is tabulated in `firmware/README.md`.
+rejected in favour of per-slot identities: `bt-hid-directed-advertising.md`). The MCU wire protocol --
+the JSON-RPC method vocabulary, the `hello` handshake (`proto` + `caps`), the version-independence
+policy, and the `EVT` events -- is documented in `docs/bt-hid-protocol.md` + tabulated in
+`firmware/README.md`.
