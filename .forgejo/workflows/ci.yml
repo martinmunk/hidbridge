@@ -16,6 +16,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:   # manual run button (repo -> Actions -> ci -> Run workflow)
 
 concurrency:
   group: ci-${{ github.ref }}
