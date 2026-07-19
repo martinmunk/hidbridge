@@ -86,6 +86,14 @@ static const uint8_t HID_REPORT_MAP[] = {
 #endif
 
 static const char *BASE_NAME = "HIDBRIDGE-pico";
+
+// Compile-time firmware SemVer, surfaced in `hello` as `fw` (see picoFillHello). Defaults to
+// "1.0.0-dev"; the `fw-v` release build stamps the tag's version with -DHB_FW_VERSION='"<X.Y.Z>"'.
+// This is the firmware RELEASE version, INDEPENDENT of the wheel version and the wire-compat integer
+// `proto` (hbmode1::PROTO_VERSION). See docs/releasing.md.
+#ifndef HB_FW_VERSION
+#define HB_FW_VERSION "1.0.0-dev"
+#endif
 static bd_addr_t slot_addr[NUM_SLOTS];        // BTstack bd_addr_t: big-endian (addr[0] = MSB)
 static char      slot_name[NUM_SLOTS][24];
 static bool      slot_addr_ready = false;     // slot addresses derived (needs HCI up)
@@ -194,6 +202,7 @@ static bool picoNotify(uint8_t rid, const uint8_t *body, size_t len) {
 }
 static void picoFillHello(JsonObject r) {
     r["device"] = BASE_NAME;
+    r["fw"] = HB_FW_VERSION;                      // firmware SemVer (release version)
     r["name"] = slot_name[(adv_slot >= 0 && adv_slot < NUM_SLOTS) ? adv_slot : 0];
     // CAPS = the comprehensive method/feature list the host feature-detects on (it does NOT branch on
     // `proto`). The single-char device commands were folded into JSON-RPC and REMOVED (see handle_line);

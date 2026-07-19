@@ -116,12 +116,14 @@
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 
-// Compile-time firmware build tag, surfaced in `hello` as `fw`. Defaults to "dev"; a build can stamp
-// a distinct value with -DHB_FW_TAG='"<tag>"' (nested quotes: the flag must pass a C string literal).
-// The OTA live test (test_bt_hid_ota_live.py) uses this to prove an over-the-air flash actually
-// swapped the running image -- it reads hello.fw before and after each espota push.
-#ifndef HB_FW_TAG
-#define HB_FW_TAG "dev"
+// Compile-time firmware SemVer, surfaced in `hello` as `fw`. Defaults to "1.0.0-dev"; the `fw-v`
+// release build stamps the tag's version with -DHB_FW_VERSION='"<X.Y.Z>"' (nested quotes: the flag
+// must pass a C string literal). This is the firmware RELEASE version and is INDEPENDENT of both the
+// wheel version and the wire-compat integer `proto` (hbmode1::PROTO_VERSION). The OTA live test
+// (test_bt_hid_ota_live.py) also uses hello.fw to prove an over-the-air flash swapped the running
+// image -- it reads hello.fw before and after each espota push. See docs/releasing.md.
+#ifndef HB_FW_VERSION
+#define HB_FW_VERSION "1.0.0-dev"
 #endif
 
 // Number of BLE host slots = distinct REMEMBERED identities (each its own address + bond + label).
@@ -784,7 +786,7 @@ static bool esp32Notify(uint8_t rid, const uint8_t* body, size_t len) {
 }
 static void esp32FillHello(JsonObject r) {
   r["device"] = DEVICE_NAME;
-  r["fw"] = HB_FW_TAG;                            // compile-time build tag (OTA-swap verification)
+  r["fw"] = HB_FW_VERSION;                        // firmware SemVer (release version + OTA-swap check)
   r["nick"] = g_nick;
   r["name"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
   // The REAL radio state (not `parked`): the board advertises only transiently while a connect/pair

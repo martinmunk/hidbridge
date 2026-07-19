@@ -6,16 +6,16 @@ loop end to end on the bench board, which is the ONLY way to know the board can 
 LAN without a USB cable AND -- critically -- that a freshly OTA-flashed image can ITSELF be OTA-flashed
 again (a firmware that broke its own OTA path would leave you stranded, reachable only over USB).
 
-How the swap is verified: main.cpp carries a compile-time HB_FW_TAG (default "dev"), surfaced in the
+How the swap is verified: main.cpp carries a compile-time HB_FW_VERSION (default "1.0.0-dev"), surfaced in the
 `hello` handshake as `fw`. We build two candidates with DISTINCT tags, OTA-flash each, and read
 `hello.fw` back over the net -- an image that did not actually replace the running firmware would still
 report the old tag, so the assertion is a true swap check, not just "the flash tool exited 0".
 
 Flow (each build is a real `pio run -e esp32-ethernet-kit`, ~1-2 min):
   0. baseline: read hello.fw (whatever is currently flashed).
-  1. build candidate A (HB_FW_TAG="otaA..."), OTA-push it, wait for reboot+reconnect,
+  1. build candidate A (HB_FW_VERSION="otaA..."), OTA-push it, wait for reboot+reconnect,
      assert hello.fw == "otaA..."   -> proves UPGRADE TO a candidate over the air.
-  2. build candidate B (HB_FW_TAG="otaB..."), OTA-push it (this push runs against candidate A, so it
+  2. build candidate B (HB_FW_VERSION="otaB..."), OTA-push it (this push runs against candidate A, so it
      exercises candidate A's OWN OTA path), wait+reconnect, assert hello.fw == "otaB..."
      -> proves OTA UPGRADE FROM the candidate (never stranded).
 
@@ -46,7 +46,7 @@ BUILD_ENV = "esp32-ethernet-kit"
 _OTA = os.environ.get("BT_HID_OTA") == "1"
 _HOST = os.environ.get("BT_HID_ESP32_OTA_HOST") or os.environ.get("BT_HID_NET_HOST")
 
-# Distinct, deterministic tags -- must differ from the default "dev" and from each other. Determinism
+# Distinct, deterministic tags -- must differ from the default "1.0.0-dev" and from each other. Determinism
 # keeps them safe to pass through a build flag (Date.now()/random would complicate the -D quoting) and
 # makes a re-run idempotent.
 TAG_A = "otaAlpha"
@@ -102,11 +102,11 @@ def _wait_for_fw(token, expected, timeout=REBOOT_TIMEOUT):
 
 
 def _build(tag):
-    """`pio run -e esp32-ethernet-kit` with HB_FW_TAG=tag; returns the built firmware.bin path."""
+    """`pio run -e esp32-ethernet-kit` with HB_FW_VERSION=tag; returns the built firmware.bin path."""
     env = dict(os.environ)
-    # Append our tag define to whatever build flags the env already carries. The nested quotes make it
-    # a C string literal after the shell/scons strip one layer.
-    extra = f'-DHB_FW_TAG=\'"{tag}"\''
+    # Append our version define to whatever build flags the env already carries. The nested quotes make
+    # it a C string literal after the shell/scons strip one layer.
+    extra = f'-DHB_FW_VERSION=\'"{tag}"\''
     prev = env.get("PLATFORMIO_BUILD_FLAGS", "")
     env["PLATFORMIO_BUILD_FLAGS"] = (prev + " " + extra).strip()
     r = subprocess.run(["pio", "run", "-e", BUILD_ENV], cwd=str(ESP32_DIR),
