@@ -349,6 +349,10 @@ static int                 g_activeTarget = -1;
 // ref-count-parked on a session-end.
 static int                 g_serialDrivenSlot = -1;
 static bool                parked = false;   // true = intentionally NOT advertising (host parked it)
+// Channel origin of the line CURRENTLY dispatching: true = it arrived over TCP/TLS, false = USB serial.
+// Set by handleLine before each dispatch so esp32Custom can enforce the SERIAL-ONLY provisioning gate
+// (`provision` is refused over the network, exactly like the old `W<token>` single-char command).
+static bool                g_lineFromNet = false;
 
 // The device NICKNAME (rpc). Advertised BLE base name = "HIDBRIDGE-<nick>"; per-slot with a client
 // = "HIDBRIDGE-<nick>-<client>". Persisted in NVS; defaults to a unique "esp32-<mac-suffix>" so two
@@ -780,74 +784,6 @@ static NimBLECharacteristic* charForReportId(uint8_t rid) {
   return nullptr;
 }
 
-static bool anyConnected() {
-  for (int i = 0; i < NUM_SLOTS; i++) {
-    if (slotConn[i] != BLE_HS_CONN_HANDLE_NONE) return true;
-  }
-  return false;
-}
-
-static void printSlotsStatus(Print& out) {
-  out.print("OK slots=");
-  out.print(NUM_SLOTS);
-  out.print(" adv=");
-  out.print(advSlot);
-  out.print(" tgt=");
-  out.print(g_activeTarget);                   // the CALLING session's currently-claimed target slot
-  out.print(" multi=1");                       // NimBLE holds distinct identities simultaneously
-  for (int i = 0; i < NUM_SLOTS; i++) {
-    out.print(" c");
-    out.print(i);
-    out.print("=");
-    out.print(slotConn[i] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
-  }
-  for (int i = 0; i < NUM_SLOTS; i++) {
-    out.print(" s");
-    out.print(i);
-    out.print("=");
-    out.print(slotSub[i] ? "1" : "0");
-  }
-  out.println();
-}
-
-// Network status (`N`). Answers on a non-net build too, so a host can always ask "do you have a
-// network path?" and get a definite no rather than "ERR unknown".
-static void printNetStatus(Print& out) {
-#ifdef HIDBRIDGE_NET
-  int clients = 0;
-  for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) {
-    if (netSessions[i].inUse) clients++;    // a live TLS session (handshaking or ready)
-  }
-  out.print("OK net eth=");
-  out.print(ethUp ? "1" : "0");
-  out.print(" ip=");
-  out.print(ethUp ? hbLocalIP().toString() : String("0.0.0.0"));
-  out.print(" port=");
-  out.print(HB_NET_PORT);
-  out.print(" mdns=");
-  out.print(g_mdnsHost); out.print(".local");
-  out.print(" token=");
-  out.print(hasToken() ? "1" : "0");           // provisioned? (never the token itself)
-  out.print(" clients=");
-  out.println(clients);
-#else
-  out.println("OK net eth=0 ip=0.0.0.0 port=0 mdns= token=0 clients=0");
-#endif
-}
-
-// AUTH GATE. `sess == nullptr` means the line came from USB SERIAL, which is trusted by construction
-// (it requires physical access to the board -- the same access that could just reflash it). A TCP
-// session may ONLY ping (P/V/N) and authenticate (@) until `@<token>` succeeds; everything that can
-// move the pointer, press a key, or reconfigure the BLE identities is refused with "ERR auth".
-#ifdef HIDBRIDGE_NET
-static bool commandAllowed(NetSession* sess, char cmd, Print& out) {
-  if (sess == nullptr) return true;                        // serial: trusted
-  if (cmd == '@' || cmd == 'P' || cmd == 'V' || cmd == 'N') return true;
-  if (!sess->authed) { out.println("ERR auth"); return false; }
-  return true;
-}
-#endif
-
 // ---- rpc (JSON-RPC): the report builders + dispatch live in ../../shared/hidbridge_rpc.h; the
 // ESP32 provides only the BLE-notify sink + its capabilities (net when the Ethernet build is on). ----
 static bool esp32Notify(uint8_t rid, const uint8_t* body, size_t len) {
@@ -862,16 +798,30 @@ static void esp32FillHello(JsonObject r) {
   // brings a slot up, so the page shows "advertising as <advName>" only when this is actually true.
   r["advertising"] = NimBLEDevice::getAdvertising()->isAdvertising();
   r["advName"] = slotName[(advSlot >= 0 && advSlot < NUM_SLOTS) ? advSlot : 0];
+  // CAPS = the COMPREHENSIVE list of methods/features this firmware supports. The host FEATURE-DETECTS
+  // on this (it does not branch on `proto`) and refuses cleanly (IncompatibleFirmware) before calling a
+  // method a cap is missing for. VERSIONING RULE: the JSON-RPC surface is ADDITIVE -- an optional new
+  // method is announced by ADDING a cap here (proto UNCHANGED); `proto` is bumped ONLY on a BREAKING
+  // change (a method/field repurposed or removed). Folding the single-char device commands into
+  // JSON-RPC was additive (new methods + new caps), so proto stays PROTO_VERSION; the host's
+  // MIN_FIRMWARE_PROTO tracks it.
   JsonArray caps = r["caps"].to<JsonArray>();
   caps.add("keyboard"); caps.add("mouse");
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
   caps.add("layout");                            // per-slot keyboard layout (per-device)
+  // consolidated single-char device commands, now JSON-RPC methods (see dispatchLine):
+  caps.add("target");                            // T<n>: claim a slot as the send-target (no advertise)
+  caps.add("advertise");                         // A: (re)start advertising the current slot
+  caps.add("park");                              // O: stop advertising, keep connections + bonds
+  caps.add("net_status");                        // N: Ethernet/TCP state (answered on serial-only too)
+  caps.add("ping");                              // P: liveness + readiness of the session's target slot
   // The layouts this board accepts -- the control page builds its per-device dropdown from THIS list
   // (not a hardcoded JS array), so adding a layout in hidbridge_rpc.h is enough. Single-sourced.
   JsonArray la = r["layouts"].to<JsonArray>();
   for (int i = 0; i < hbmode1::LAYOUT_COUNT; i++) la.add(hbmode1::LAYOUT_NAMES[i]);
 #ifdef HIDBRIDGE_NET
   caps.add("net");
+  caps.add("provision");                         // W<token>: set the net auth token (SERIAL ONLY)
   r["mdns"] = String(g_mdnsHost) + ".local";     // how to reach this specific board over the network
 #endif
 }
@@ -1099,6 +1049,93 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
     result["unpaired"] = true;
     return;
   }
+  if (!strcmp(method, "target")) {
+    // Claim slot n as THIS session's send-target WITHOUT (re)advertising (the old `T<n>`). Assumes an
+    // already-live central; handleLine/finishRoute stores the moved claim + parks the old slot iff last.
+    *handled = true;
+    int slot = slotFromParams(params, -1);
+    if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "missing/invalid 'slot' or 'client'"; return; }
+    g_activeTarget = slot;                    // CLAIM it (finishRoute writes it back into the session)
+    result["tgt"] = slot;
+    return;
+  }
+  if (!strcmp(method, "advertise")) {
+    // (Re)start advertising the current identity slot (the old `A`).
+    *handled = true;
+    parked = false;
+    NimBLEDevice::startAdvertising();
+    result["advertising"] = NimBLEDevice::getAdvertising()->isAdvertising();
+    return;
+  }
+  if (!strcmp(method, "park")) {
+    // Stop advertising but KEEP existing connections + bonds (the old `O`). Resume with connect/advertise.
+    *handled = true;
+    parked = true;
+    NimBLEDevice::stopAdvertising();
+    result["parked"] = true;
+    return;
+  }
+  if (!strcmp(method, "net_status")) {
+    // The board's Ethernet/TCP state (the old `N`). Answered on a serial-only build too (eth=false),
+    // so a host can always ask 'do you have a network path?'. `token` = a secret is PROVISIONED (never
+    // the secret). Keys match rpc.net_status()'s consumers (cli net-status).
+    *handled = true;
+#ifdef HIDBRIDGE_NET
+    int clients = 0;
+    for (int i = 0; i < HB_MAX_NET_CLIENTS; i++) if (netSessions[i].inUse) clients++;
+    result["eth"] = ethUp;
+    result["ip"] = ethUp ? hbLocalIP().toString() : String("0.0.0.0");
+    result["port"] = HB_NET_PORT;
+    result["mdns"] = String(g_mdnsHost) + ".local";
+    result["token"] = hasToken();
+    result["clients"] = clients;
+#else
+    result["eth"] = false;
+    result["ip"] = "0.0.0.0";
+    result["port"] = 0;
+    result["mdns"] = "";
+    result["token"] = false;
+    result["clients"] = 0;
+#endif
+    return;
+  }
+  if (!strcmp(method, "provision")) {
+    // Set the network auth token (the old `W<token>`). SERIAL ONLY -- refused over TCP so the secret
+    // can only be set across the physical cable (g_lineFromNet is the channel-origin gate). The token
+    // is never echoed back. Same >=8-char minimum + hot-enable-TLS behaviour as the old command.
+    *handled = true;
+#ifdef HIDBRIDGE_NET
+    if (g_lineFromNet) { *errCode = -32001; *errMsg = "provision is serial-only (refused over the network)"; return; }
+    const char* token = params["token"] | (const char*)nullptr;
+    if (!token || strlen(token) < HB_MIN_TOKEN_LEN) { *errCode = -32602; *errMsg = "token too short (>= 8 chars)"; return; }
+    prefs.begin("hidbridge", false);
+    prefs.putString("token", token);
+    prefs.end();
+    // A token set on a board that booted WITHOUT one leaves the TLS port closed until opened; bring it
+    // up now so provisioning "just works" without a reboot. A CHANGE on a live board needs a reboot to
+    // re-key TLS -- report which happened.
+    bool enabled = false;
+    if (!g_tlsReady && netTlsSetup()) enabled = true;
+    result["token_set"] = true;
+    result["tls"] = g_tlsReady;
+    result["tls_enabled_now"] = enabled;
+#else
+    *errCode = -32000; *errMsg = "this firmware has no network build";
+#endif
+    return;
+  }
+  if (!strcmp(method, "ping")) {
+    // Liveness + readiness of the CALLING session's target slot (the old `P`). subscribed = iOS enabled
+    // the reports (readiness); conn = link up. -1 target => both false.
+    *handled = true;
+    bool sub = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) && slotSub[g_activeTarget];
+    bool con = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) &&
+               slotConn[g_activeTarget] != BLE_HS_CONN_HANDLE_NONE;
+    result["device"] = DEVICE_NAME;
+    result["subscribed"] = sub;
+    result["conn"] = con;
+    return;
+  }
 #ifdef HIDBRIDGE_WIFI
   if (!strcmp(method, "wifi")) {          // provision WiFi credentials (station mode)
     *handled = true;
@@ -1135,91 +1172,17 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
     hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
-  char cmd = line[0];                                               // single-char device command
-  String arg = line.substring(1);
+  char cmd = line[0];                                               // non-JSON line
 
-#ifdef HIDBRIDGE_NET
-  if (!commandAllowed(sess, cmd, out)) return;
-#else
-  (void)sess;
-#endif
-
-  // Reports are built by the board over JSON-RPC (above); the single-char commands here are device
-  // management (advertise/select-slot/status/park/provision/auth). The old host-builds K/M frame
-  // relay was removed -- an unrecognised command falls through to "ERR unknown".
-  if (cmd == 'P') {
-    // Report the CALLING session's active-target slot state (g_activeTarget; -1 => sub/con both 0).
-    // subscribed= BEFORE conn= so a legacy host's endswith("conn=1") parse still works.
-    bool sub = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) && slotSub[g_activeTarget];
-    bool con = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) &&
-               slotConn[g_activeTarget] != BLE_HS_CONN_HANDLE_NONE;
-    out.print("OK HIDBRIDGE-esp32 subscribed=");
-    out.print(sub ? "1" : "0");
-    out.print(" conn=");
-    out.println(con ? "1" : "0");
-  } else if (cmd == 'A') {
-    // 'A' -> (re)start advertising the current slot.
-    NimBLEDevice::startAdvertising();
-    out.println("OK adv");
-  } else if (cmd == 'I') {
-    // I<n>[:name] -- select host slot n as the advertising identity (+ optional per-slot name) +
-    // advertise it. Adds a distinct identity so a second/other iPad can bond+connect on ITS address
-    // while any already-connected slot stays connected (simultaneous per-bond identities).
-    int sep = arg.indexOf(':');
-    String nStr = (sep >= 0) ? arg.substring(0, sep) : arg;
-    String nm = (sep >= 0) ? arg.substring(sep + 1) : String("");
-    int n = nStr.toInt();
-    if (nStr.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
-    selectSlotAdvertise(n, nm.length() ? nm.c_str() : nullptr);
-    char ah[16];
-    addrHex(slotAddr[n], ah, sizeof(ah));
-    out.print("OK slot=");
-    out.print(n);
-    out.print(" addr=");
-    out.print(ah);
-    out.print(" name=");
-    out.print(slotName[n]);
-    out.print(" conn=");
-    out.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
-  } else if (cmd == 'T') {
-    // T<n> -- CLAIM slot n for THIS session: route its subsequent JSON-RPC reports to slot n's connection.
-    // Unlike connect it does NOT advertise/bring the slot up (it assumes an already-live central); it
-    // just moves this session's single claim (handleLine/finishRoute parks the old slot iff last claimer).
-    int n = arg.toInt();
-    if (arg.length() == 0 || n < 0 || n >= NUM_SLOTS) { out.println("ERR badslot"); return; }
-    g_activeTarget = n;
-    out.print("OK tgt=");
-    out.println(n);
-  } else if (cmd == 'S') {
-    printSlotsStatus(out);
-  } else if (cmd == 'N') {
-    printNetStatus(out);
-  } else if (cmd == 'V') {
-    out.print("OK HIDBRIDGE-esp32 ");
-    out.println(anyConnected() ? "connected" : "advertising");
-  } else if (cmd == 'W') {
-    // W<token> -- provision the network auth secret. SERIAL ONLY: accepting this over TCP would let
-    // an already-authenticated (or, worse, a future unauthenticated) peer ROTATE the secret and lock
-    // the owner out, so the only way in is the physical cable. The token is never echoed back.
-#ifdef HIDBRIDGE_NET
-    if (sess != nullptr) { out.println("ERR auth"); return; }        // never over the network
-    if (arg.length() < HB_MIN_TOKEN_LEN) { out.println("ERR shorttoken"); return; }
-    prefs.begin("hidbridge", false);
-    prefs.putString("token", arg);
-    prefs.end();
-    // The TLS PSK is built ONCE at boot (netTlsSetup), so a token set on a board that booted WITHOUT
-    // one leaves the TLS port closed until it is opened. Bring it up right now so provisioning "just
-    // works" without a reboot (the common fresh-board case). A token CHANGE on an already-listening
-    // board can't hot-swap the baked-in key -- that still needs a reboot; say so.
-    if (!g_tlsReady && netTlsSetup()) out.println("OK token set (TLS enabled)");
-    else if (g_tlsReady)             out.println("OK token set (reboot to apply as the new TLS key)");
-    else                             out.println("OK token set (reboot to enable TLS)");
-#else
-    out.println("ERR nonet");
-#endif
-  } else if (cmd == '@') {
+  // The MCU wire is now ONE versioned JSON-RPC protocol (the board builds every report AND owns device
+  // management -- see esp32Custom: connect/target/advertise/park/net_status/provision/ping/...). The old
+  // single-char device commands were folded into JSON-RPC and REMOVED. The ONLY non-JSON line still
+  // accepted is `@<token>`, the network session's auth line (redundant with the TLS-PSK handshake but
+  // kept for the existing client flow). Anything else is refused.
+  if (cmd == '@') {
     // @<token> -- authenticate THIS TCP session (see the AUTH note in the header).
 #ifdef HIDBRIDGE_NET
+    String arg = line.substring(1);
     if (sess == nullptr) { out.println("OK auth"); return; }         // serial is already trusted
     if (!hasToken()) { out.println("ERR notoken"); return; }         // fail closed: unprovisioned
     if (tokenEquals(arg)) {
@@ -1231,24 +1194,11 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
       if (++sess->fails >= HB_MAX_AUTH_FAILS) sess->wantClose = true;   // stop online guessing
     }
 #else
+    (void)sess;
     out.println("ERR nonet");
 #endif
-  } else if (cmd == 'X') {
-    // Release THIS session's claim on its active-target central + KEEP the bond, then PARK (stop
-    // advertising) so the released iPad is free to attach to ANOTHER board -- but ref-counted, so a slot
-    // that ANOTHER session still drives is NOT yanked (finishRoute parks iff I was the last claimer).
-    // The host brings this board back with I<n>/connect. Other slots' connections are untouched.
-    int slot = g_activeTarget;
-    bool had = (slot >= 0 && slot < NUM_SLOTS && slotConn[slot] != BLE_HS_CONN_HANDLE_NONE);
-    g_activeTarget = -1;                       // drop my claim; finishRoute parks the slot iff last claimer
-    out.println(had ? "OK disc" : "OK noconn");
-  } else if (cmd == 'O') {
-    // Park: stop advertising but KEEP existing connections + bonds. Lets the OTHER board's test run
-    // without this board grabbing an iPad. Resume with I<n>.
-    parked = true;
-    NimBLEDevice::stopAdvertising();
-    out.println("OK parked");
   } else {
+    (void)sess;
     out.println("ERR unknown");
   }
 }
@@ -1265,6 +1215,11 @@ static void handleLine(String line, Print& out, NetSession* sess) {
 #endif
   int old = *store;
   g_activeTarget = old;
+#ifdef HIDBRIDGE_NET
+  g_lineFromNet = (sess != nullptr);            // channel origin: the serial-only provisioning gate
+#else
+  g_lineFromNet = false;                        // no network build -> every line is trusted serial
+#endif
   dispatchLine(line, out, sess);
   finishRoute(store, old);
 }
@@ -1709,6 +1664,8 @@ static void wsOnText(uint8_t num, uint8_t* payload, size_t length) {
   line.trim();
   if (line.length() == 0) return;
   WsPrinter out(num);
+  g_lineFromNet = true;                         // the WS is a network channel: the serial-only
+                                                // provisioning gate must refuse `provision` here too
 
   if (!wsAuthed[num]) {
     if (line[0] == '@') { wsTryAuth(num, line.substring(1), out); return; }

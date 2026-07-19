@@ -184,22 +184,42 @@ def make_transport(profile):
     return None, f"unknown driver {profile.driver!r}"
 
 
+def _rpc_for(transport):
+    """An RpcClient bound to the transport's OWN already-open channel (transport._ser), opening it if
+    needed. Reusing the open channel is deliberate: a SECOND connection to the same board would fight
+    the first (serial is single-open; a fresh USB open resets the board). Returns None for a transport
+    with no such channel (the dongle daemon). This is the ONE place the central self-test speaks the
+    MCU wire, and it is JSON-RPC now -- the single-char device commands were removed from the firmware."""
+    ser = getattr(transport, "_ser", None)
+    if ser is None:
+        for opener in ("_open", "_get"):     # esp32/net expose _open; pico exposes _get
+            fn = getattr(transport, opener, None)
+            if fn is not None:
+                fn()
+                ser = getattr(transport, "_ser", None)
+                break
+    if ser is None:
+        return None
+    from hidbridge.rpc import RpcClient
+    return RpcClient(ser)
+
+
 def _board_ble_address(transport) -> str | None:
     """The BLE address the target board advertises, as 'AA:BB:CC:DD:EE:FF', or None.
 
     CRUCIAL when more than one board runs the same firmware: they all advertise the SAME LocalName
     (`HIDBRIDGE-esp32`), so matching the scan by NAME can connect the central to a DIFFERENT board than
     the one the transport drives -- the central then subscribes to board A while the injected frame
-    goes to board B, so board B has no central to notify (`OK noconn`) and the test spuriously fails.
-    Pinning the central to the DRIVEN board's address removes that ambiguity. Uses the MCU's slot-0
-    query (also (re)asserts slot 0 = the public identity as the advertised one). Best-effort: returns
-    None for a transport that cannot report it (e.g. the dongle daemon), and the caller falls back to
-    name matching."""
-    fn = getattr(transport, "select_slot", None)
-    if fn is None:
+    goes to board B, so board B has no central to notify (conn:false) and the test spuriously fails.
+    Pinning the central to the DRIVEN board's address removes that ambiguity. Uses the JSON-RPC
+    `connect` on slot 0 (brings up + (re)asserts slot 0 = the public identity + returns its addr).
+    Best-effort: None for a transport that cannot report it (the dongle daemon), and the caller falls
+    back to name matching."""
+    cli = _rpc_for(transport)
+    if cli is None:
         return None
     try:
-        a = (fn(0).get("addr") or "").strip()
+        a = (cli.call("connect", {"slot": 0}).get("addr") or "").strip()
     except Exception:  # noqa: BLE001
         return None
     if len(a) == 12 and all(c in "0123456789abcdefABCDEF" for c in a):
@@ -209,42 +229,33 @@ def _board_ble_address(transport) -> str | None:
 
 def _free_board(transport) -> None:
     """Between retries: drop any orphaned central our failed attempt left on the board, and
-    re-advertise so it is connectable again. Best-effort + backend-agnostic (guarded by hasattr):
-    the MCU transports expose disconnect()/select_slot()/advertise(); the daemon backend exposes
-    none, so this is a no-op there. A short settle lets advertising resume before the next attempt.
-    """
-    disc = getattr(transport, "disconnect", None)
-    if disc:
+    re-advertise so it is connectable again. Best-effort + backend-agnostic: the MCU transports expose
+    a JSON-RPC channel (disconnect + connect slot 0); the daemon backend has none, so this is a no-op
+    there. A short settle lets advertising resume before the next attempt."""
+    cli = _rpc_for(transport)
+    if cli is not None:
         try:
-            disc()                       # firmware 'X': drop the target slot's central (keep bond)
+            cli.call("disconnect", {})       # drop the target slot's central (keep bond) + park
         except Exception:  # noqa: BLE001
             pass
-    for meth, a in (("select_slot", (0,)), ("advertise", ())):
-        fn = getattr(transport, meth, None)
-        if fn:
-            try:
-                fn(*a)                   # re-advertise (un-park) so the central can reconnect
-                break
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            cli.call("connect", {"slot": 0})  # re-advertise slot 0 so the central can reconnect
+        except Exception:  # noqa: BLE001
+            pass
     time.sleep(2)
 
 
 def transport_connected(transport, profile) -> bool | None:
-    """Best-effort: is the MCU already connected to a central? True/False, or None if unknown."""
-    ping = getattr(transport, "ping", None)
-    if ping is None:
+    """Best-effort: is the MCU already connected to a central? True/False, or None if unknown.
+
+    JSON-RPC `ping` -> {conn} on every MCU backend (esp32/pico/net); None for the dongle daemon."""
+    cli = _rpc_for(transport)
+    if cli is None:
         return None
     try:
-        res = ping()
+        return bool(cli.ping().get("conn"))
     except Exception:  # noqa: BLE001
         return None
-    if profile.driver == "serial_pico":
-        # PONG name=HIDBRIDGE-pico conn=<0|1>
-        return res.get("reply", "").rstrip().endswith("conn=1")
-    if profile.driver in ("serial_esp32", "net"):
-        return bool(res.get("connected"))
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -787,18 +798,10 @@ class CentralSelfTest:
         USB open). By inject time the frame transports have opened `_ser` (ping/select_slot ran on the
         connect path); nudge it open defensively otherwise. The daemon (dongle) backend has no such
         channel -- it never reaches here (main() skips mode=rpc for it)."""
-        ser = getattr(self.transport, "_ser", None)
-        if ser is None:
-            for opener in ("_open", "_get"):   # esp32/net expose _open; pico exposes _get
-                fn = getattr(self.transport, opener, None)
-                if fn is not None:
-                    fn()
-                    ser = getattr(self.transport, "_ser", None)
-                    break
-        if ser is None:
+        cli = _rpc_for(self.transport)
+        if cli is None:
             raise RuntimeError("mode=rpc: transport exposes no open JSON-RPC channel (_ser)")
-        from hidbridge.rpc import RpcClient
-        return RpcClient(ser)
+        return cli
 
     def _settle(self):
         self._verdict()
@@ -865,13 +868,12 @@ class CentralSelfTest:
             self._scenario_client = client
             self._scenario_teardown = spec.get("teardown")
             # Route reports to slot 0 -- the pinned advertised identity the central connected to (see
-            # _board_ble_address). Best-effort + guarded: keeps type/press notifying OUR central.
-            tgt = getattr(self.transport, "target_slot", None)
-            if tgt is not None:
-                try:
-                    tgt(0)
-                except Exception:  # noqa: BLE001
-                    pass
+            # _board_ble_address). JSON-RPC `target` claims slot 0 for this session without re-advertising.
+            # Best-effort + guarded: keeps type/press notifying OUR central.
+            try:
+                client.target(0)
+            except Exception:  # noqa: BLE001
+                pass
             setup = spec.get("setup")
             if setup is not None:
                 setup(client)

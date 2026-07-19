@@ -314,13 +314,13 @@ def test_firmware_sets_per_slot_name(rel):
 def test_firmware_declares_slot_protocol(rel):
     src = (ROOT / rel).read_text()
     assert "NUM_SLOTS" in src, "firmware must define a host-slot table"
-    # the three new serial commands must be handled
-    for token in ("'I'", "'T'", "'S'"):
-        assert token in src, f"firmware missing slot command {token} handler"
-    assert "slot=" in src and "addr=" in src, "firmware must emit the slot reply fields"
-    # park (O) + disconnect (X) = the deterministic cross-board handoff control
-    assert "'O'" in src and "OK parked" in src, "firmware must implement the O (park) command"
-    assert "'X'" in src, "firmware must implement the X (disconnect) command"
+    # The slot protocol is now JSON-RPC methods (the single-char I/T/S/X/O commands were folded in +
+    # removed). Each must be handled + emit the identity fields the host reads.
+    for method in ('"connect"', '"target"', '"identities"', '"park"', '"disconnect"'):
+        assert method in src, f"firmware missing slot JSON-RPC method {method}"
+    assert '"slot"' in src and '"addr"' in src, "firmware must emit the identity reply fields"
+    # park + disconnect = the deterministic cross-board handoff control
+    assert '"parked"' in src, "firmware must implement the park method"
 
 
 def test_esp32_firmware_supports_multiple_connections():

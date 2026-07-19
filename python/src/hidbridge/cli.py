@@ -87,8 +87,12 @@ def _alt_send(cmd: dict) -> dict:
     b = _BOARD
     t = cmd.get("cmd")
     if t == "ping":
-        if hasattr(_ALT_TRANSPORT, "ping"):
-            return _ALT_TRANSPORT.ping()
+        # JSON-RPC `ping` (the board builds the reply): {device, subscribed, conn}. Normalise to the
+        # daemon-style shape cmd_status reads. The old single-char `P` over the raw transport is gone.
+        if b is not None and hasattr(b, "ping"):
+            r = b.ping()
+            return {"ok": True, "backend": _BACKEND, "connected": bool(r.get("conn")),
+                    "subscribed": r.get("subscribed"), "device": r.get("device")}
         return {"ok": True, "backend": _BACKEND}
     if t == "type":
         return b.type(cmd["text"])
@@ -226,9 +230,9 @@ def cmd_pair_mode(args):
         # print the one-time pairing steps. There is no host daemon. The firmware advertises as
         # HIDBRIDGE-<backend> (e.g. HIDBRIDGE-esp32), a distinct name from the dongle's HIDBRIDGE-dongle.
         name = f"HIDBRIDGE-{_BACKEND}"
-        if hasattr(_ALT_TRANSPORT, "advertise"):
-            resp = _ALT_TRANSPORT.advertise()
-            print(f"advertising: {resp.get('resp') or resp}")
+        if _BOARD is not None and hasattr(_BOARD, "advertise"):
+            resp = _BOARD.advertise()             # JSON-RPC `advertise` (board-side), not single-char `A`
+            print(f"advertising: {resp}")
         print(f"\n{_BACKEND} backend is advertising as {name!r}.\n"
               f"One-time pairing (physical): on the paired device open its Bluetooth settings, tap "
               f"{name!r}\nunder Other Devices, and tap Pair. After that it reconnects on its own.\n"
@@ -425,8 +429,9 @@ def cmd_net_provision(args):
 
     Provisions the SAME token the host will present over TCP, so `--backend net` then just works.
     """
-    from hidbridge.transport_esp32 import Esp32Transport, detect_port
+    from hidbridge.rpc import RpcClient, RpcError
     from hidbridge.serial_link import open_serial
+    from hidbridge.transport_esp32 import detect_port
     token, created = _read_or_create_net_token(args.token)
     dev = args.esp32_port or detect_port()
     if not dev:
@@ -434,43 +439,43 @@ def cmd_net_provision(args):
               "(the board must be connected over USB for provisioning)", file=sys.stderr)
         sys.exit(2)
     try:
-        ser = open_serial(dev, 115200, 2.0, prefer_raw=True)
+        ser = open_serial(dev, 115200, 2.0, prefer_raw=True)   # reset-free open (leaves the tty B0)
     except Exception as e:  # noqa: BLE001
         print(f"error: cannot open {dev}: {e}", file=sys.stderr)
         sys.exit(2)
-    tp = Esp32Transport(port=ser)
+    # JSON-RPC `provision` over the SERIAL channel (the board refuses it over TCP -- the secret can
+    # only be set across the cable). Never logs the token. Replaces the old single-char `W<token>`.
+    cli = RpcClient(ser)
     try:
-        res = tp.set_net_token(token)          # W<token> over serial; never logs the token
-        net = tp.net_status()
+        try:
+            cli.provision(token)               # SERIAL-ONLY method; the token never leaves this call
+        except RpcError as e:
+            print(f"error: board rejected the token: {e}\n"
+                  "(a serial-only firmware has no network build -- reflash env:esp32-ethernet-kit: "
+                  "pio run -e esp32-ethernet-kit -t upload)", file=sys.stderr)
+            sys.exit(1)
+        net = cli.net_status()
     finally:
-        tp.close()
-    if not res.get("ok"):
-        print(f"error: board rejected the token: {res.get('resp')!r}", file=sys.stderr)
-        sys.exit(1)
+        cli.close()
     where = "created" if created else "using existing"
     print(f"provisioned network token on {dev} ({where} ~/.config/bt_hid/net.token).")
-    if net.get("ok"):
-        ip = net.get("ip") or "?"
-        mdns = net.get("mdns") or "?"
-        print(f"board network: eth={'up' if net.get('eth') else 'down'} ip={ip} "
-              f"mdns={mdns} port={net.get('port')}")
-        print(f"drive it with: hidbridge --backend net --host {mdns} type \"hello\"")
-    else:
-        print("note: this firmware has no network build; reflash env:esp32-ethernet-kit "
-              "(pio run -e esp32-ethernet-kit -t upload).")
+    ip = net.get("ip") or "?"
+    mdns = net.get("mdns") or "?"
+    print(f"board network: eth={'up' if net.get('eth') else 'down'} ip={ip} "
+          f"mdns={mdns} port={net.get('port')}")
+    print(f"drive it with: hidbridge --backend net --host {mdns} type \"hello\"")
 
 
 def cmd_net_status(args):
-    """Query the board's Ethernet/TCP state. Over TCP (--backend net) or USB (--backend esp32)."""
-    if _ALT_TRANSPORT is not None and hasattr(_ALT_TRANSPORT, "net_status"):
+    """Query the board's Ethernet/TCP state. Over TCP (--backend net) or USB (--backend esp32).
+
+    JSON-RPC `net_status` (the board builds the reply), not the old single-char `N`."""
+    if _BOARD is not None and hasattr(_BOARD, "net_status"):
         try:
-            net = _ALT_TRANSPORT.net_status()
+            net = _BOARD.net_status()
         except Exception as e:  # noqa: BLE001
             print(f"error: {e}", file=sys.stderr)
             sys.exit(1)
-        if not net.get("ok"):
-            print(f"net-status: {net.get('resp')!r}")
-            return
         print(f"eth={'up' if net.get('eth') else 'down'} ip={net.get('ip')} "
               f"port={net.get('port')} mdns={net.get('mdns')} "
               f"token={'set' if net.get('token') else 'UNSET'} clients={net.get('clients')}")

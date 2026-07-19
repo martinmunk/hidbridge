@@ -128,6 +128,47 @@ def test_connection_and_frames_methods():
     ]
 
 
+_CONSOLIDATED_CAPS = ["keyboard", "mouse", "slots", "nickname", "connect", "frames", "layout",
+                      "target", "advertise", "park", "net_status", "provision"]
+
+
+def test_consolidated_device_methods_shape_json():
+    """The single-char device commands folded into JSON-RPC: target/ping/advertise/park/net_status/
+    provision each produce the right method + params, capability-gated (except the bare ping probe)."""
+    seen = []
+    c = rpc.RpcClient(RpcFake(handler=_cap_handler(_CONSOLIDATED_CAPS, seen)))
+    c.target(2)
+    c.ping()
+    c.advertise()
+    c.park()
+    c.net_status()
+    c.provision("supersecrettoken")
+    assert seen == [
+        ("hello", {}),
+        ("target", {"slot": 2}),
+        ("ping", {}),
+        ("advertise", {}),
+        ("park", {}),
+        ("net_status", {}),
+        ("provision", {"token": "supersecrettoken"}),
+    ]
+
+
+def test_consolidated_methods_gate_on_capability():
+    # an older board missing these caps errors clearly rather than sending a method it would reject
+    c = rpc.RpcClient(RpcFake(handler=_cap_handler(["keyboard", "mouse"])))
+    for call in (lambda: c.advertise(), lambda: c.park(), lambda: c.net_status(),
+                 lambda: c.provision("supersecrettoken"), lambda: c.target(0)):
+        with pytest.raises(rpc.RpcError, match="lacks capability"):
+            call()
+
+
+def test_ping_is_allowed_without_capability():
+    # ping is a bare liveness probe -- not capability-gated (works on any JSON-RPC board)
+    c = rpc.RpcClient(RpcFake(handler=_cap_handler(["keyboard", "mouse"])))
+    assert c.ping() == {"ok": 1}
+
+
 def test_missing_capability_raises_clearly():
     # a board that does NOT advertise 'connect' -> a clear error, not a cryptic firmware reject
     c = rpc.RpcClient(RpcFake(handler=_cap_handler(["keyboard", "mouse"])))

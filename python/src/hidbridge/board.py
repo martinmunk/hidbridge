@@ -250,8 +250,27 @@ class McuBoard:
     def scroll(self, clicks: int):
         return self._rpc.scroll(clicks)
 
-    # ---- raw frame transport: NOT the drive path; kept for the board-level radio ops (the CLI's
-    #      advertise / net-status / ping go straight to the frame transport). ----
+    # ---- board-level radio / management ops (JSON-RPC now, not single-char). The CLI's ping /
+    #      pair-mode advertise / net-status route through these; each is a thin pass to rpc.py, which
+    #      capability-gates so an older/minimal board fails clearly instead of sending a dead command. ----
+    def ping(self) -> dict:
+        return self._rpc.ping()
+
+    def advertise(self) -> dict:
+        return self._rpc.advertise()
+
+    def park(self) -> dict:
+        return self._rpc.park()
+
+    def net_status(self) -> dict:
+        return self._rpc.net_status()
+
+    def provision(self, token: str) -> dict:
+        """Set the network auth token (SERIAL ONLY -- the firmware refuses `provision` over TCP)."""
+        return self._rpc.provision(token)
+
+    # ---- raw frame transport: NOT the drive path; kept for the offline byte-parity tests + the
+    #      central self-test's encodability check. NOT a live MCU drive path (the board builds reports). ----
     def transport(self, name=None):
         return self._tp
 

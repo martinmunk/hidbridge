@@ -200,8 +200,112 @@ static bool picoNotify(uint8_t rid, const uint8_t *body, size_t len) {
 static void picoFillHello(JsonObject r) {
     r["device"] = BASE_NAME;
     r["name"] = slot_name[(adv_slot >= 0 && adv_slot < NUM_SLOTS) ? adv_slot : 0];
+    // CAPS = the comprehensive method/feature list the host feature-detects on (it does NOT branch on
+    // `proto`). The single-char device commands were folded into JSON-RPC and REMOVED (see handle_line);
+    // these caps advertise their JSON replacements. VERSIONING: additive (a new method -> a new cap,
+    // proto UNCHANGED); proto (hbmode1::PROTO_VERSION) bumps only on a breaking change. The Pico holds
+    // ONE central (single-connection wrapper), so `connect`/`target` select a slot by INDEX.
     JsonArray caps = r["caps"].to<JsonArray>();
     caps.add("keyboard"); caps.add("mouse"); caps.add("slots");
+    caps.add("connect"); caps.add("target"); caps.add("advertise"); caps.add("park");
+    caps.add("layout"); caps.add("ping");
+    JsonArray la = r["layouts"].to<JsonArray>();
+    for (int i = 0; i < hbmode1::LAYOUT_COUNT; i++) la.add(hbmode1::LAYOUT_NAMES[i]);
+}
+
+// Resolve a target slot from a request: an explicit "slot" index (the Pico addresses slots by index --
+// its single-connection wrapper has no per-slot client labels), else `dflt`.
+static int picoSlotFromParams(JsonObjectConst params, int dflt) {
+    if (params["slot"].is<int>()) {
+        int s = params["slot"].as<int>();
+        return (s >= 0 && s < NUM_SLOTS) ? s : -1;
+    }
+    return dflt;
+}
+
+static void picoFillIdentity(JsonObject o, int i) {
+    if (!slot_addr_ready) { BluetoothLock l; derive_slot_addresses(); }
+    o["slot"] = i;
+    o["client"] = "";                            // the Pico wrapper tracks no per-slot client labels
+    char ah[16]; addr_hex(slot_addr[i], ah, sizeof(ah)); o["addr"] = ah;
+    o["name"] = slot_name[i];
+    bool up = PicoBluetoothBLEHID.connected();
+    o["conn"] = (up && conn_slot == i);
+    o["sub"]  = (up && conn_slot == i);          // wrapper "connected" == HID input reports enabled
+    o["layout"] = hbmode1::layoutName(slot_layout[i]);
+}
+
+// The Pico's firmware-specific JSON-RPC methods -- the JSON replacements for the removed single-char
+// device commands (I/T/S/L/X/O/P). Single-connection model: connect/target select a slot by INDEX.
+static void picoCustom(const char *method, JsonObjectConst params, JsonObject result,
+                       bool *handled, int *errCode, const char **errMsg) {
+    if (!strcmp(method, "identities")) {         // the old `S`
+        *handled = true;
+        JsonArray arr = result["slots"].to<JsonArray>();
+        for (int i = 0; i < NUM_SLOTS; i++) picoFillIdentity(arr.add<JsonObject>(), i);
+        result["adv"] = adv_slot;
+        result["tgt"] = tgt_slot;
+        result["multi"] = false;                 // single-connection wrapper: one central at a time
+        return;
+    }
+    if (!strcmp(method, "connect")) {            // the old `I<n>`: select slot + advertise
+        *handled = true;
+        int slot = picoSlotFromParams(params, -1);
+        if (slot < 0) { *errCode = -32602; *errMsg = "missing/invalid 'slot'"; return; }
+        select_slot_advertise(slot, nullptr);
+        tgt_slot = slot;
+        picoFillIdentity(result, slot);
+        return;
+    }
+    if (!strcmp(method, "target")) {             // the old `T<n>`: set the send-target slot
+        *handled = true;
+        int slot = picoSlotFromParams(params, -1);
+        if (slot < 0) { *errCode = -32602; *errMsg = "missing/invalid 'slot'"; return; }
+        tgt_slot = slot;
+        result["tgt"] = slot;
+        return;
+    }
+    if (!strcmp(method, "advertise")) {          // the old `A` (esp32) / re-enable advertising
+        *handled = true;
+        { BluetoothLock l; gap_advertisements_enable(1); }
+        result["advertising"] = true;
+        return;
+    }
+    if (!strcmp(method, "disconnect") || !strcmp(method, "park")) {  // the old `X` / `O`
+        *handled = true;
+        bool had = false;
+        { BluetoothLock l;
+          if (!strcmp(method, "disconnect") && pico_con_handle != HCI_CON_HANDLE_INVALID) {
+              gap_disconnect(pico_con_handle); had = true;
+          }
+          gap_advertisements_enable(0);
+        }
+        if (!strcmp(method, "park")) result["parked"] = true;
+        else { result["slot"] = tgt_slot; result["disconnected"] = had; }
+        return;
+    }
+    if (!strcmp(method, "layout")) {             // the old `L`: get/set the target slot's layout (RAM-only)
+        *handled = true;
+        int slot = picoSlotFromParams(params, tgt_slot);
+        if (slot < 0 || slot >= NUM_SLOTS) { *errCode = -32602; *errMsg = "invalid 'slot'"; return; }
+        const char *name = params["name"] | (const char *)nullptr;
+        if (name && name[0]) {
+            if (!hbmode1::isKnownLayout(name)) { *errCode = -32602; *errMsg = "unknown layout (see hello.layouts)"; return; }
+            slot_layout[slot] = hbmode1::layoutFromName(name);
+        }
+        result["slot"] = slot;
+        result["layout"] = hbmode1::layoutName(slot_layout[slot]);
+        return;
+    }
+    if (!strcmp(method, "ping")) {               // the old `P`
+        *handled = true;
+        bool up = PicoBluetoothBLEHID.connected();
+        result["device"] = BASE_NAME;
+        result["conn"] = up;
+        result["subscribed"] = up;               // wrapper "connected" == input reports enabled
+        return;
+    }
+    // not one of ours -> leave *handled=false (dispatcher returns "method not found")
 }
 
 static void handle_line(char *line) {
@@ -212,108 +316,13 @@ static void handle_line(char *line) {
         // The active keyboard layout is the TARGET slot's, so `type`/`key` map to the right chars.
         hbmode1::setActiveLayout((tgt_slot >= 0 && tgt_slot < NUM_SLOTS) ? slot_layout[tgt_slot]
                                                                          : hbmode1::LAYOUT_US);
-        hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello);
-        return;
-    }
-    char kind = line[0];
-    if (kind == 'P' || kind == 'p') {
-        Serial.print("PONG name=HIDBRIDGE-pico conn=");
-        Serial.println(PicoBluetoothBLEHID.connected() ? 1 : 0);
-        return;
-    }
-    if (kind == 'I' || kind == 'i') {
-        // I<n>[:name] -- select host slot n as the advertising identity (+ optional name) + advertise.
-        char *rest = line + 1;
-        char *colon = strchr(rest, ':');
-        const char *nm = nullptr;
-        if (colon) { *colon = 0; nm = colon + 1; }
-        int n = atoi(rest);
-        if (rest[0] == 0 || n < 0 || n >= NUM_SLOTS) { Serial.println("ERR badslot"); return; }
-        select_slot_advertise(n, (nm && *nm) ? nm : nullptr);
-        char ah[16];
-        addr_hex(slot_addr[n], ah, sizeof(ah));
-        Serial.print("OK slot=");
-        Serial.print(n);
-        Serial.print(" addr=");
-        Serial.print(ah);
-        Serial.print(" name=");
-        Serial.print(slot_name[n]);
-        Serial.print(" conn=");
-        Serial.println((conn_slot == n) ? 1 : 0);
-        return;
-    }
-    if (kind == 'T' || kind == 't') {
-        int n = atoi(line + 1);
-        if (line[1] == 0 || n < 0 || n >= NUM_SLOTS) { Serial.println("ERR badslot"); return; }
-        tgt_slot = n;
-        Serial.print("OK tgt=");
-        Serial.println(n);
-        return;
-    }
-    if (kind == 'L' || kind == 'l') {
-        // L<us|da|uk> -- set the TARGET slot's keyboard layout (RAM-only on Pico); bare L reports it.
-        char *rest = line + 1;
-        while (*rest == ' ') rest++;
-        if (*rest) {
-            if (hbmode1::isKnownLayout(rest))    // single-sourced list (hbmode1::LAYOUT_NAMES)
-                slot_layout[tgt_slot] = hbmode1::layoutFromName(rest);
-            else { Serial.println("ERR badlayout"); return; }
-        }
-        Serial.print("OK slot=");
-        Serial.print(tgt_slot);
-        Serial.print(" layout=");
-        Serial.println(hbmode1::layoutName(slot_layout[tgt_slot]));
-        return;
-    }
-    if (kind == 'S' || kind == 's') {
-        // multi=0: the single-connection PicoBluetoothBLEHID wrapper cannot hold two centrals at once.
-        Serial.print("OK slots=");
-        Serial.print(NUM_SLOTS);
-        Serial.print(" adv=");
-        Serial.print(adv_slot);
-        Serial.print(" tgt=");
-        Serial.print(tgt_slot);
-        Serial.print(" multi=0");
-        bool up = PicoBluetoothBLEHID.connected();
-        for (int i = 0; i < NUM_SLOTS; i++) {
-            Serial.print(" c");
-            Serial.print(i);
-            Serial.print("=");
-            Serial.print((up && conn_slot == i) ? 1 : 0);
-        }
-        for (int i = 0; i < NUM_SLOTS; i++) {
-            Serial.print(" s");
-            Serial.print(i);
-            Serial.print("=");
-            Serial.print((up && conn_slot == i) ? 1 : 0);   // wrapper "connected" == input reports enabled
-        }
-        Serial.println();
-        return;
-    }
-    if (kind == 'X' || kind == 'x') {
-        // Disconnect the current central (keep the bond) + PARK (stop advertising), so the released
-        // iPad is free to attach to ANOTHER board. Host brings this board back with I<n>.
-        BluetoothLock l;
-        if (pico_con_handle != HCI_CON_HANDLE_INVALID) {
-            gap_disconnect(pico_con_handle);
-            gap_advertisements_enable(0);
-            Serial.println("OK disc");
-        } else {
-            gap_advertisements_enable(0);
-            Serial.println("OK noconn");
-        }
-        return;
-    }
-    if (kind == 'O' || kind == 'o') {
-        // Park: stop advertising, keep any existing connection + bonds. Resume with I<n>.
-        BluetoothLock l;
-        gap_advertisements_enable(0);
-        Serial.println("OK parked");
+        hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello, picoCustom);
         return;
     }
 
-    // The MCU wire speaks JSON-RPC (the board builds the reports, above) + these single-char device
-    // commands. The old host-builds K/M frame relay was removed -- an unrecognised command is refused.
+    // The MCU wire is now ONE versioned JSON-RPC protocol: the board builds every report AND owns device
+    // management (picoCustom: connect/target/identities/advertise/park/disconnect/layout/ping -- the JSON
+    // replacements for the old single-char commands, which were REMOVED). Any non-JSON line is refused.
     Serial.println("ERR unknowncmd");
 }
 

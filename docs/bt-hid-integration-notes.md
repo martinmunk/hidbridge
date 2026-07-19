@@ -36,7 +36,7 @@ must equal it byte-for-byte (enforced by the guard tests). All resolutions honor
 - Merge base predated the esp32 files, so both sides "added" them -> whole-file add/add conflicts.
   Verified HEAD's copies were byte-identical to the esp32-branch tip, so abs-esp32 = esp32 + the abs
   commit is a strict superset. Took `--theirs` (abs-esp32) for `firmware/esp32/src/main.cpp`,
-  `transport_esp32.py`, `esp32_live_verify.py`, `test_bt_hid_esp32.py`.
+  `transport_esp32.py`, `test_bt_hid_esp32.py`.
 - Then `701d9cc9`: the guard test went RED (firmware REPORT_MAP index 65 = `0x03` vs reports' `0x05`)
   because the 5-button change (mouse-buttons) only lived in reports.py. Propagated the 3-byte delta
   into the ESP32 firmware's Report ID 2 buttons block ONLY (Usage Max 3->5, Report Count 3->5,

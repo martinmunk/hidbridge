@@ -222,6 +222,51 @@ class RpcClient:
         self.require_cap("connect")
         return self.call("unpair", {"client": client})
 
+    def target(self, slot: int) -> dict:
+        """Claim slot `slot` as THIS session's send-target WITHOUT (re)advertising it (the old `T<n>`).
+
+        Unlike connect (which brings the identity up + advertises), target assumes an already-live
+        central and just routes this session's subsequent reports to it."""
+        self.require_cap("target")
+        return self.call("target", {"slot": int(slot)})
+
+    def ping(self) -> dict:
+        """Liveness + readiness of the CALLING session's target slot: {device, subscribed, conn}.
+
+        The single-char `P` folded into JSON-RPC. `subscribed` is the iOS-enabled-the-reports
+        readiness signal; `conn` is link-up. Allowed unauthenticated (a bare liveness probe)."""
+        return self.call("ping")
+
+    def advertise(self) -> dict:
+        """(Re)start advertising the current identity slot (the old `A`)."""
+        self.require_cap("advertise")
+        return self.call("advertise")
+
+    def park(self) -> dict:
+        """Stop advertising but KEEP existing connections + bonds (the old `O`).
+
+        Lets another board serve an iPad without this one grabbing it. Resume with connect()."""
+        self.require_cap("park")
+        return self.call("park")
+
+    def net_status(self) -> dict:
+        """The board's Ethernet/TCP state (the old `N`): {eth, ip, port, mdns, token, clients}.
+
+        Answered on a serial-only build too (eth=false), so a host can always ask 'do you have a
+        network path?'. `token` is whether a secret is PROVISIONED, never the secret itself."""
+        self.require_cap("net_status")
+        return self.call("net_status")
+
+    def provision(self, token: str) -> dict:
+        """Set the board's network auth token (the old `W<token>`) -- SERIAL ONLY.
+
+        SECURITY: `token` is the shared secret + TLS pre-shared key. The firmware REFUSES this method
+        over the TCP/TLS net channel (it is honored only on the physically-attached serial channel), so
+        the secret can only be set over the cable. Never log the token or this call's args; the board
+        never echoes it back."""
+        self.require_cap("provision")
+        return self.call("provision", {"token": token})
+
     def layout(self, name: str | None = None, *, slot: int | None = None,
                client: str | None = None) -> dict:
         """Get or set a device slot's keyboard layout (PER SLOT: each bonded device remembers its

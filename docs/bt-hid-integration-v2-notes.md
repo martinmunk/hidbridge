@@ -145,7 +145,7 @@ multi-iOS support with per-adapter isolation and same-MAC warning (49a74c81). Co
 2. Full offline suite + ruff are green; all convergence invariants (report map, CH340 ban,
    readiness gate, per_device_identity capability, firmware==reports guards) are verified above.
 3. What a reviewer should still confirm before main (NOT doable offline here):
-   - Re-run the LIVE device tests (esp32/pico live_verify, multi-daemon, readiness_live) on real
+   - Re-run the LIVE device tests (central self-test esp32/pico, multi-daemon, readiness_live) on real
      hardware -- they are skipped/gated offline. Today's mini6 bring-up already validated the
      three backends live; a final confirmation run is the only gap.
    - Decide whether the proven-negative abs-mouse(3)/digitizer(4) reports stay in the shipped
