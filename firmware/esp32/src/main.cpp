@@ -132,7 +132,7 @@ static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 // connection budget below). Overridable at build time (-DNUM_SLOTS=N). NVS bond/CCCD storage must fit
 // NUM_SLOTS (raised in platformio.ini build_flags).
 #ifndef NUM_SLOTS
-#define NUM_SLOTS 10
+#define NUM_SLOTS 16
 #endif
 
 // CONCURRENT connections are capped separately by NimBLE's budget (RAM per live link). The board

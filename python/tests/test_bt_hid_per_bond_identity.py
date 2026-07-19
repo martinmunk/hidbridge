@@ -18,6 +18,7 @@ tests/bt_hid/test_bt_hid_dual_identity_live.py (BT_HID_LIVE_DUAL=1).
 """
 
 import pathlib
+import re
 
 import pytest
 
@@ -135,6 +136,32 @@ def test_firmware_declares_slot_protocol(rel):
     assert '"slot"' in src and '"addr"' in src, "firmware must emit the identity reply fields"
     # park + disconnect = the deterministic cross-board handoff control
     assert '"parked"' in src, "firmware must implement the park method"
+
+
+def _num_slots(rel):
+    m = re.search(r"#define\s+NUM_SLOTS\s+(\d+)", (ROOT / rel).read_text())
+    assert m, f"{rel}: no #define NUM_SLOTS"
+    return int(m.group(1))
+
+
+def test_both_firmwares_default_to_16_slots():
+    # 16 = the Pico's precompiled arduino-pico BTstack bond ceiling (MAX_NR_LE_DEVICE_DB_ENTRIES /
+    # NVM_NUM_DEVICE_DB_ENTRIES = 16); the ESP32 matches it so REMEMBERED-host capacity is UNIFORM
+    # across boards. NUM_SLOTS is firmware-internal (the wheel never hardcodes a slot count), so this
+    # is proto-neutral -- a 1.0.x wheel drives 1.1.0 firmware unchanged. (fw 1.1.0)
+    assert _num_slots("firmware/esp32/src/main.cpp") == 16
+    assert _num_slots("firmware/pico/src/main.cpp") == 16
+
+
+def test_esp32_bond_and_cccd_stores_cover_all_slots():
+    # NimBLE's bond/CCCD stores must hold every slot's bond + its HID input-report CCCD subscriptions,
+    # else the 11th..16th device cannot persist. MAX_BONDS >= NUM_SLOTS and MAX_CCCDS >= NUM_SLOTS.
+    ini = (ROOT / "firmware/esp32/platformio.ini").read_text()
+    slots = _num_slots("firmware/esp32/src/main.cpp")
+    bonds = int(re.search(r"MAX_BONDS=(\d+)", ini).group(1))
+    cccds = int(re.search(r"MAX_CCCDS=(\d+)", ini).group(1))
+    assert bonds >= slots, f"MAX_BONDS={bonds} < NUM_SLOTS={slots}"
+    assert cccds >= slots, f"MAX_CCCDS={cccds} < NUM_SLOTS={slots}"
 
 
 def test_esp32_firmware_supports_multiple_connections():

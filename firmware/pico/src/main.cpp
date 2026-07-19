@@ -80,9 +80,12 @@ static const uint8_t HID_REPORT_MAP[] = {
 
 // ---- Per-bond IDENTITY (host slots) ----------------------------------------------------------- //
 // Number of BLE host slots (distinct identities). Slot 0 = native public address; slots >=1 =
-// derived static-random addresses. Overridable at build time (-DNUM_SLOTS=N). Two iPads need 2.
+// derived static-random addresses. Overridable at build time (-DNUM_SLOTS=N). 16 = the arduino-pico
+// precompiled-BTstack bond ceiling (MAX_NR_LE_DEVICE_DB_ENTRIES / NVM_NUM_DEVICE_DB_ENTRIES = 16 in
+// the framework's btstack_config.h), so this is the HARD max -- raising it past 16 just advertises
+// extra identities whose bonds cannot persist. Matches the ESP32 default for uniform capacity.
 #ifndef NUM_SLOTS
-#define NUM_SLOTS 2
+#define NUM_SLOTS 16
 #endif
 
 static const char *BASE_NAME = "HIDBRIDGE-pico";
