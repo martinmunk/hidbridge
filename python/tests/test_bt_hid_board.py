@@ -249,6 +249,64 @@ def test_hidbridge_over_mcuboard_full_lifecycle():
 
 
 # --------------------------------------------------------------------------- #
+# DongleBoard adapter (BlueZ), fake link manager (no dbus)
+# --------------------------------------------------------------------------- #
+class _FakeDongleLink:
+    def __init__(self, devices):
+        self.devices = devices           # {path: props}
+        self.disconnected = []
+
+    def all_devices(self, adapter_path):
+        return [(p, pr) for p, pr in self.devices.items() if p.startswith(adapter_path + "/")]
+
+    def find_device(self, adapter_path, name):
+        for p, pr in self.devices.items():
+            if name.lower() in str(pr.get("Alias", "")).lower():
+                return p, pr
+        return None, None
+
+    def connected_devices(self, adapter_path):
+        return [(p, pr) for p, pr in self.devices.items() if pr.get("Connected")]
+
+    def is_connected(self, path):
+        return bool(self.devices.get(path, {}).get("Connected"))
+
+    def connect(self, path, timeout=20.0):
+        self.devices[path]["Connected"] = True
+        return True
+
+    def disconnect(self, path):
+        self.disconnected.append(path)
+        return True
+
+
+def test_dongle_board_lists_bonded_devices(monkeypatch):
+    from hidbridge import conn as C
+    monkeypatch.setattr(C._adapter, "resolve_dongle",
+                        lambda *a, **k: {"hci": "hci1", "product_name": "UB500"})
+    link = _FakeDongleLink({
+        "/org/bluez/hci1/dev_AA": {"Alias": "iPad A", "Paired": True, "Connected": True},
+        "/org/bluez/hci1/dev_BB": {"Alias": "iPad B", "Paired": True, "Connected": False},
+    })
+    board = B.DongleBoard("hci1", link_manager=link, transport=RecordingTransport())
+    board.prepare()
+    assert board.board_info()["board"] == "dongle"
+    assert board.capabilities["max_sessions"] == 1
+    devs = {d.name: d for d in board.list_devices()}
+    assert set(devs) == {"iPad A", "iPad B"}
+    assert devs["iPad A"].connected is True and devs["iPad A"].bonded is True
+
+
+def test_dongle_board_pair_unpair_rename_unsupported(monkeypatch):
+    from hidbridge import conn as C
+    monkeypatch.setattr(C._adapter, "resolve_dongle", lambda *a, **k: {"hci": "hci1"})
+    board = B.DongleBoard("hci1", link_manager=_FakeDongleLink({}), transport=RecordingTransport())
+    for op in (lambda: board.pair("x"), lambda: board.unpair("x"), lambda: board.rename("x")):
+        with pytest.raises(Unsupported):
+            op()
+
+
+# --------------------------------------------------------------------------- #
 # discovery (vendor-gated + handshake), all injected
 # --------------------------------------------------------------------------- #
 def test_discover_returns_boards_that_answer_hello():
