@@ -23,28 +23,21 @@
 // built with -DHIDBRIDGE_NET) over TCP on port 3333. A command is answered on the channel it arrived
 // on; async EVT lines are broadcast to serial + every AUTHENTICATED network client. See "NETWORK".
 //
-// SERIAL PROTOCOL (115200 baud, newline-terminated ASCII lines; host -> ESP32). A line is routed by
-// its FIRST char: '{' = JSON-RPC (the BOARD builds the report -- type/key/move/click/scroll, the
-// slot's layout applies board-side; builders in ../../shared/hidbridge_rpc.h), else a single-char
-// DEVICE command below. (The old host-builds K/M frame relay was removed; the board is in charge.)
-//   P        ping                        -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
-//   A        (re)start advertising                          -> "OK adv"
-//   V        version/status                                 -> "OK HIDBRIDGE-esp32 <state>"
-//   X        disconnect the target slot's central (keep bond) + PARK -> "OK disc" / "OK noconn"
-//   O        park: stop advertising, keep connections + bonds -> "OK parked"
-//   I<n>[:name]  select host SLOT n as the advertising identity (+ optional per-slot name) + advertise
-//                -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
-//   T<n>     set the SEND-target slot (JSON-RPC reports notify ONLY that slot's connection) -> "OK tgt=<n>"
-//   S        slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=1 c0=<0|1> c1=.. s0=<0|1> s1=.."
-//   N        network status -> "OK net eth=<0|1> ip=<a.b.c.d> port=<n> mdns=<host> token=<0|1>
-//                              clients=<n>"   (eth=0 / ip=0.0.0.0 on a build without -DHIDBRIDGE_NET)
-//   W<token> SET the network auth token (>=8 chars) in NVS. SERIAL ONLY -- refused over TCP, so the
-//            secret can only be provisioned over the physically-attached cable. -> "OK token set"
-//            (the token itself is NEVER echoed, logged, or readable back off the board).
+// WIRE PROTOCOL (115200 baud serial / TCP, newline-terminated ASCII lines; host -> ESP32). The wire is
+// ONE versioned JSON-RPC 2.0 protocol: the BOARD builds every report AND owns device management.
+//   report methods : type/key/wake/move/click/press/release/scroll/frames (slot's layout board-side)
+//   device methods : hello, identities, connect, target, disconnect, pair, unpair, nickname, layout,
+//                    advertise, park, ping, net_status, provision  (builders + dispatch in
+//                    ../../shared/hidbridge_rpc.h; the slot/net methods are esp32Custom below)
+// `hello` returns proto + a COMPREHENSIVE caps list; the host feature-detects on caps. `provision`
+// (the net auth token) is SERIAL-ONLY -- refused over TCP so the secret can only be set over the cable.
+// (The old host-builds K/M frame relay AND the single-char device commands P/A/I/T/S/N/V/W/X/O were
+// folded into these methods and REMOVED -- the ONLY non-JSON line still accepted is `@<token>`, the
+// TCP session auth line. Full contract: ../../docs/bt-hid-protocol.md.)
 //   @<token> AUTHENTICATE this TCP session -> "OK auth" / "ERR auth". See "NETWORK" below.
-// ESP32 -> host replies are single lines: "OK ...", "OK noconn" (accepted but no central), or
-// "ERR ...". Asynchronous link events are emitted as "EVT connected" / "EVT disconnected", and HID
-// report SUBSCRIPTION as "EVT ready" / "EVT unsubscribed" (iOS wrote/cleared the report CCCDs).
+// Replies are one JSON object per line (result/error). Asynchronous link events are emitted as
+// "EVT connected" / "EVT disconnected", and HID report SUBSCRIPTION as "EVT ready" / "EVT unsubscribed"
+// (iOS wrote/cleared the report CCCDs) -- the readiness signal the host awaits before the first key.
 //
 // PER-BOND IDENTITY (host slots -- docs/bt-hid-mcu-approach.md): the board presents a DISTINCT BLE
 // identity/address PER bonded iPad, so ONE board can hold two iPads at once on distinct addresses

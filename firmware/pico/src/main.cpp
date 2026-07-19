@@ -8,20 +8,15 @@
  * input reports (a CCCD / Report-Reference GATT quirk); the Pico's HOG stack does it right.
  *
  * The device advertises as "HIDBRIDGE-pico" (distinct from the dongle's "HIDBRIDGE-dongle"). The host
- * (wsb) drives it over USB-CDC serial with a tiny ASCII line protocol, routed by the FIRST char:
- * a line starting '{' is JSON-RPC (the BOARD builds the report -- type/key/move/click/scroll, the
- * slot's layout applies board-side; builders in ../../shared/hidbridge_rpc.h), else it is one of
- * these single-char DEVICE commands. (The old host-builds K/M frame relay was removed; the board is
- * in charge of the reports now.)
- *
- *     P\n            ping  -> replies "PONG name=HIDBRIDGE-pico conn=<0|1>"
- *     I<n>[:name]\n  select host SLOT n as the advertising identity (+ optional name) + advertise
- *                    -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
- *     T<n>\n         set the send-target slot -> "OK tgt=<n>"
- *     S\n            slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=0 c0=<0|1> .. s0=<0|1> .."
- *     X\n            disconnect the current central (keep bond) + PARK -> "OK disc" / "OK noconn"
- *     O\n            park: stop advertising, keep connection + bonds -> "OK parked"
- * Reply per line: "OK" on success, "ERR <reason>" on failure.
+ * drives it over USB-CDC serial with ONE versioned JSON-RPC 2.0 protocol (one JSON object per line):
+ * the BOARD builds every report (type/key/move/click/scroll, the slot's layout applies board-side;
+ * builders in ../../shared/hidbridge_rpc.h) AND owns device management (identities/connect/target/
+ * advertise/park/disconnect/layout/ping -- the JSON replacements for the old single-char commands, in
+ * picoCustom below). `hello` returns proto + a caps list the host feature-detects on. (The old
+ * host-builds K/M frame relay AND the single-char device commands P/I/T/L/S/X/O were folded into these
+ * methods and REMOVED -- any non-JSON line now returns "ERR unknowncmd". Contract:
+ * ../../docs/bt-hid-protocol.md.) The Pico's BTstack wrapper holds ONE central at a time, so it
+ * addresses slots by INDEX and reports multi=0.
  *
  * PER-BOND IDENTITY (host slots -- docs/bt-hid-mcu-approach.md): the board presents a DISTINCT BLE
  * identity/address PER bonded iPad. Slot 0 = the CYW43439 NATIVE public address, so an EXISTING bond
