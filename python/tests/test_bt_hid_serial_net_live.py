@@ -127,9 +127,14 @@ def test_refcount_shared_slot_survives_one_driver_leaving(same_board):
     assert _slot(net_cli, SLOT_A).get("conn"), \
         "slot dropped when serial released though net still claimed it -- refcount broken"
     assert net_cli.type_text("n2").get("sent"), "net drive failed after serial released its claim"
-    # Release the NET claim too -> refcount 0 -> the slot parks (disconnects).
-    net_cli.call("disconnect", {"slot": SLOT_A})
-    assert _wait_conn(net_cli, SLOT_A, want=False), "slot did not park after the LAST claim released"
+    # Release the NET claim too -> refcount 0 -> the slot parks (disconnects). The board may close
+    # this now-idle TLS session as it processes the release, so the net call may not return cleanly --
+    # tolerate that and observe the final park over the PERSISTENT serial channel (which never closes).
+    try:
+        net_cli.call("disconnect", {"slot": SLOT_A})
+    except Exception:
+        pass
+    assert _wait_conn(serial_cli, SLOT_A, want=False), "slot did not park after the LAST claim released"
 
 
 def test_per_session_targets_do_not_clobber(same_board):
