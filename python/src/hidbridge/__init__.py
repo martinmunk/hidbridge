@@ -10,6 +10,7 @@ controller/reports layers at load time (the real serial/net/dongle board drivers
 lazily), so `import hidbridge` stays free of bluetooth/serial deps.
 """
 
+from ._version import __version__  # noqa: E402
 from .bridge import (  # noqa: E402
     CapacityError,
     ConnectTimeout,
@@ -33,6 +34,7 @@ def discover():
 
 
 __all__ = [
+    "__version__",
     "HidBridge", "HidSession", "session", "discover",
     "HidbridgeError", "NotBonded", "ConnectTimeout", "Unsupported", "CapacityError",
     "IncompatibleFirmware",

@@ -4,7 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hidbridge"
-version = "0.1.0"
+# Version is single-sourced from src/hidbridge/_version.py (baseline 1.0.0). The `wheel-v<X.Y.Z>`
+# release build rewrites that file from the git tag before `uv build` -- the tag is the source of
+# truth. See docs/releasing.md.
+dynamic = ["version"]
 description = "Drive a Bluetooth-HID target (iPad / iPhone / any host) from Linux -- keyboard + pointer over the host BlueZ stack or a Pico 2W / ESP32 serial-attached BLE peripheral"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,7 +42,11 @@ dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "pyserial>=3.5"]
 hidbridge = "hidbridge.cli:main"
 
 [project.urls]
-Homepage = "https://example.invalid/hidbridge"   # TODO(martin): set once the repo is created
+Homepage = "https://forgejo.example.com/martinmunk/HIDBridge"
+
+[tool.hatch.version]
+# Single-source the version from the package (release build rewrites this file from the git tag).
+path = "src/hidbridge/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hidbridge"]
