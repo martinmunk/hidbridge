@@ -1036,6 +1036,17 @@ def main(argv=None):
         print(json.dumps(out) if args.json else f"SKIP: {reason}")
         return 2
 
+    # mode=frames relays host-built K/M report frames over the transport. The MCU firmwares no longer
+    # accept K/M on the wire (the board builds every report from JSON-RPC now), so mode=frames applies
+    # ONLY to the dongle (its daemon host-builds + relays). Drive an MCU with --mode rpc instead.
+    if args.mode == "frames" and profile.driver != "daemon":
+        reason = ("mode=frames relays host-built K/M frames, which the MCU firmware no longer accepts "
+                  "(the board builds reports from JSON-RPC) -- drive the MCU with --mode rpc")
+        out = {"status": "skip", "backend": args.backend, "mode": args.mode, "central": central,
+               "reason": reason}
+        print(json.dumps(out) if args.json else f"SKIP: {reason}")
+        return 2
+
     # A live SCENARIO is rpc (JSON-RPC) driven, so the daemon (dongle) backend cannot run it.
     if args.scenario is not None and profile.driver == "daemon":
         reason = (f"scenario {args.scenario!r} needs JSON-RPC firmware; the dongle backend is a BlueZ "

@@ -1,14 +1,16 @@
 """RPC client -- drive a hidbridge board by telling it WHAT to do (JSON-RPC 2.0 over JSON-lines).
 
-The "rpc" drive path is the smart-firmware route: the board owns the HID report descriptor + report
+JSON-RPC is the ONLY report path on the MCU wire: the board owns the HID report descriptor + report
 building, and the host sends high-level INTENT --
 `{"jsonrpc":"2.0","id":1,"method":"type","params":{"text":"hi"}}` -- rather than pre-built report
-bytes. Contrast the "raw" path (`controller.py` + the frame transports), where the host builds the
-exact report bytes and the board is "just a radio".
+bytes. (The old "raw" K/M frame relay, where the host built the exact bytes and the board was "just a
+radio", was removed from the firmware; the dongle backend still host-builds via reports.py, but over
+its own daemon socket, not this MCU channel.)
 
-Both paths talk to the SAME firmware over the same channel (serial or TCP); the board routes a line to
-the RPC handler iff it is a JSON object (starts with `{`), else to the raw single-char frame handler.
-So a network client authenticates once with the raw `@<token>` line, then sends JSON-RPC.
+A line reaches the MCU over the SAME channel (serial or TCP); the board routes it to the RPC handler
+iff it is a JSON object (starts with `{`), else to the single-char DEVICE command handler
+(advertise/select-slot/status/park/auth). A network client authenticates once with the `@<token>`
+line, then sends JSON-RPC.
 
 This module is also the board driver's device-management channel: `identities`/`pair`/`unpair`/
 `connect`/`disconnect`/`nickname`/`layout` resolve a device by NAME (client label) to a firmware slot,

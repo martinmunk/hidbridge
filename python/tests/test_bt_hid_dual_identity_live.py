@@ -32,9 +32,9 @@ pytestmark = pytest.mark.skipif(
     reason="live dual-identity test; set BT_HID_LIVE_DUAL=1 (+ a bonded ESP32/Pico + both iPads)")
 
 from hidbridge import naming as N  # noqa: E402
-from hidbridge import reports as R  # noqa: E402
 from hidbridge import transport_esp32 as TE  # noqa: E402
 from hidbridge import transport_pico as TP  # noqa: E402
+from hidbridge.rpc import RpcClient  # noqa: E402
 
 SLOT_MINI6_ESP = 0   # ESP32 native identity (existing bond preserved)
 SLOT_MINI5_ESP = 1   # ESP32 static-random identity
@@ -51,12 +51,25 @@ def _wait_slot(status_fn, slot, want=True, timeout=40.0, poll=1.0):
     return bool(status_fn()["conn"].get(slot)) == want
 
 
+def _rpc_type_slot(tp, slot, text):
+    """Drive a keystroke to a specific host slot over the MCU's JSON-RPC channel (the board builds the
+    report -- the MCU wire no longer accepts host-built K/M frames). Targets `slot` (T<n>) first so the
+    report notifies that slot's central, then types. Returns the rpc result."""
+    tp.target_slot(slot)
+    ch = getattr(tp, "_ser", None)
+    if ch is None:                        # nudge the transport to open its serial channel
+        (getattr(tp, "_open", None) or getattr(tp, "_get", None))()
+        ch = tp._ser
+    return RpcClient(ch).type_text(text)
+
+
 def _drive_slot_honestly(esp32, slot):
-    """Verify slot is CONNECTED (so a report really lands) then send a keystroke; assert real OK."""
+    """Verify slot is CONNECTED (so a report really lands) then type a keystroke to it; assert the board
+    built + notified the report (sent>0, conn true on the target slot)."""
     assert esp32.slots_status()["conn"].get(slot), f"slot {slot} not connected -- cannot drive it"
-    for rep in R.type_text("x"):
-        res = esp32.send([(rep.kind, rep.data)])
-        assert res.get("ok"), f"drive slot {slot} failed: {res}"
+    res = _rpc_type_slot(esp32, slot, "x")
+    assert res.get("sent"), f"drive slot {slot} reported nothing sent: {res}"
+    assert res.get("conn", True), f"drive slot {slot}: board had no central on the target slot: {res}"
 
 
 @pytest.fixture()
@@ -129,15 +142,13 @@ def test_pico_time_sliced_switch(esp32, pico):
     p5 = pico.select_slot(SLOT_MINI5_PICO, N.slot_identity_name("pico", "mini5"))
     assert p5["ok"], f"pico slot0 select failed: {p5}"
     assert _wait_slot(pico.slots_status, SLOT_MINI5_PICO), "mini5 did not connect to the Pico slot0"
-    for rep in R.type_text("x"):
-        assert pico.send([(rep.kind, rep.data)])["ok"], "driving mini5 on the Pico failed"
+    assert _rpc_type_slot(pico, SLOT_MINI5_PICO, "x").get("sent"), "driving mini5 on the Pico failed"
 
     # switch to mini6 (Pico slot 1) -> single-connection, so slot0 releases
     p6 = pico.select_slot(SLOT_MINI6_PICO, N.slot_identity_name("pico", "mini6"))
     assert p6["ok"] and p6["addr"] != p5["addr"], "pico slots must have distinct addresses"
     assert _wait_slot(pico.slots_status, SLOT_MINI6_PICO), "mini6 did not connect to the Pico slot1"
-    for rep in R.type_text("x"):
-        assert pico.send([(rep.kind, rep.data)])["ok"], "driving mini6 on the Pico failed"
+    assert _rpc_type_slot(pico, SLOT_MINI6_PICO, "x").get("sent"), "driving mini6 on the Pico failed"
 
     # single-connection: only ONE slot connected at a time (multi=0)
     st = pico.slots_status()

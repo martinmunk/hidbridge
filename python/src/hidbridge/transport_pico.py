@@ -8,14 +8,15 @@ first-class, low-cost, interchangeable HID BACKEND: a contributor who has a Pico
 Bluetooth dongle can still wake / unlock / type / click an iPad-iPhone-Mac.
 
 The Pico runs the firmware in `firmware/pico/` (BTstack HOG, advertising as `HIDBRIDGE-pico` -- a
-distinct name so it does NOT collide with the dongle's `HIDBRIDGE-dongle`). This host ships each HID
-report as ONE ASCII line over the Pico's USB-CDC serial; the Pico adds only the reportID and emits
-it as a BLE HID notification. `reports.py` stays the SINGLE SOURCE OF TRUTH for the report BYTES --
-we send the exact 8-byte keyboard / 4-byte mouse body it builds; the Pico never re-derives them.
+distinct name so it does NOT collide with the dongle's `HIDBRIDGE-dongle`). The production drive path
+is JSON-RPC (`board.McuBoard` + `rpc.py`): the BOARD builds every report. This module owns the
+radio/device-mgmt side of the same USB-CDC serial channel (ping/status/slots) plus a pure host-side
+report FRAMER (`encode_frame`/`decode_frame`/`send`) kept for the offline byte-parity tests + the
+central self-test's encodability check. NOTE: the firmware NO LONGER accepts K/M frame lines on the
+wire (the host-builds relay was removed); `send()` is a host encoder, not a live MCU drive path.
 
-Line protocol (ASCII, one report per line, `\n`-terminated), host -> Pico:
-    K <16 hex>   keyboard report    (8-byte boot body: mod,resv,k1..k6)          -> report ID 1
-    M <8 hex>    relative mouse      (4-byte body: buttons,dx,dy,wheel)           -> report ID 2
+Line protocol (ASCII, `\n`-terminated), host -> Pico. A line is routed by its FIRST char: '{' =
+JSON-RPC (the board builds the report), else a single-char command:
     P            ping           -> Pico replies e.g. `PONG name=HIDBRIDGE-pico conn=1`
 Pico -> host reply, one line per command: `OK` on success, `ERR <reason>` on failure.
 

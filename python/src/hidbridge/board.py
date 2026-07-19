@@ -113,8 +113,8 @@ class McuBoard:
         try:
             h = self._rpc.hello()
         except RpcError:
-            # A board that cannot answer `hello` (older/minimal firmware) still relays raw frames;
-            # degrade device management but keep the raw drive path usable.
+            # A board that cannot answer `hello` (older/minimal firmware) predates JSON-RPC; report a
+            # degraded, capability-less board so device management + drive verbs fail cleanly (no caps).
             self._info = {"board": "?", "fw": "", "device": "", "nick": "", "proto": None,
                           "layouts": []}
             self.capabilities = {"max_sessions": 1, "per_device_identity": False, "layouts": False,

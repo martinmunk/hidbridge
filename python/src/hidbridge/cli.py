@@ -81,8 +81,8 @@ def _alt_send(cmd: dict) -> dict:
     """Route a daemon-style command dict to the opened board.
 
     The drive verbs go to the board's HIGH-LEVEL methods (type/key/move/click/scroll): the BOARD
-    builds the reports (the target slot's per-slot layout applies board-side). `reports` is the raw
-    escape hatch -- pre-built frames relayed over the raw frame transport (the firmware K/M path).
+    builds the reports (the target slot's per-slot layout applies board-side). A board backend never
+    receives a host-built `reports` frame -- that path is dongle-only (host builds, daemon relays).
     """
     b = _BOARD
     t = cmd.get("cmd")
@@ -100,9 +100,6 @@ def _alt_send(cmd: dict) -> dict:
         return b.click(cmd.get("button", "left"))
     if t == "scroll":
         return b.scroll(int(cmd["clicks"]))
-    if t == "reports":
-        frames = [(f["kind"], bytes.fromhex(f["hex"])) for f in cmd["frames"]]
-        return _ALT_TRANSPORT.send(frames)
     return {"ok": False, "error": f"cmd {t!r} unsupported on backend {_BACKEND!r}"}
 
 

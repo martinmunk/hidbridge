@@ -2,18 +2,20 @@
 
 An ESP32 (~$5) is an alternative HID BACKEND: instead of a USB Bluetooth dongle driven by BlueZ, an
 ESP32 running the `HIDBRIDGE-esp32` firmware (hidbridge/firmware/esp32/) is the BLE HID keyboard+
-mouse peripheral, and this host talks to it over USB serial. It plugs into `HidController` as a
-drop-in transport (`.send(frames)`), so `reports.py` stays the SINGLE source of truth for the report
-bytes -- the ESP32 only relays them as BLE HID input notifications.
+mouse peripheral, and this host talks to it over USB serial. The production drive path is JSON-RPC
+(`board.McuBoard` + `rpc.py`): the BOARD builds every report. This module owns the radio/device-mgmt
+side of the same serial channel (advertise/ping/status/slots), plus a pure host-side report FRAMER
+(`encode_frame`/`send`) kept for the offline byte-parity tests + the central self-test's encodability
+check. NOTE: the firmware NO LONGER accepts K/M frame lines on the wire (the host-builds relay was
+removed); `send()` is a host encoder, not a live MCU drive path.
 
 Why an ESP32 backend at all: the BlueZ/dongle path is stuck on iOS not subscribing to our HID report
 characteristics (a CCCD / Report-Reference GATT quirk). The ESP32's NimBLE HID-over-GATT stack serves
 that correctly + iOS-compatibly out of the box, so this backend works where BlueZ fights us. It also
 lowers the contributor hardware bar: an ESP32 is a common, cheap board.
 
-Serial wire protocol (must match the firmware; newline-terminated ASCII lines, host -> ESP32):
-    K<hex>   keyboard report body, 8 bytes (16 hex chars)     -> BLE keyboard input notification
-    M<hex>   mouse report body, 4 bytes (8 hex chars)          -> BLE mouse input notification
+Serial wire protocol (must match the firmware; newline-terminated ASCII lines, host -> ESP32). A line
+is routed by its FIRST char: '{' = JSON-RPC (the board builds the report), else a single-char command:
     P        ping   -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
     A        (re)start advertising -> "OK adv"  (bare 'A' with NO hex body; disambiguated by length)
 The ESP32 answers each line with a single "OK..."/"ERR..." line. Asynchronous link state is emitted
