@@ -246,8 +246,34 @@ def dismiss(target: str, bond: str, *, method: str = "dialog",
         with bridge.connect(bond, timeout=connect_timeout) as hid:
             result["connected"] = True
             result["ready"] = None
-            result["ran"] = run_plan(hid.controller, plan, pin=pin)
+            result["ran"] = run_plan(_SessionRunner(hid), plan, pin=pin)
     return result
+
+
+class _SessionRunner:
+    """Adapt a HidSession (high-level type/key/move/click) to the controller-shaped surface run_plan
+    drives (wake/send_key/click/move/unlock). The board builds the reports: `wake` is a space key and
+    `unlock` is just typing the passcode + Enter (the board owns the layout)."""
+
+    def __init__(self, session):
+        self._s = session
+
+    def wake(self):
+        return self._s.key("space")
+
+    def send_key(self, name, mod=0):
+        return self._s.key(name, mod)
+
+    def click(self, button="left"):
+        return self._s.click(button)
+
+    def move(self, dx, dy):
+        return self._s.move(dx, dy)
+
+    def unlock(self, passcode, press_enter=True):
+        self._s.type(passcode)
+        if press_enter:
+            self._s.key("enter")
 
 
 # --------------------------------------------------------------------------- #

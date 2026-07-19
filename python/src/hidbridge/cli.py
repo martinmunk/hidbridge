@@ -7,12 +7,12 @@ management uses BlueZ D-Bus scoped to the DONGLE adapter.
 BACKENDS (`--backend`):
   dongle (default)  the USB Bluetooth dongle via BlueZ + the `ble_hid` daemon (all subcommands).
   pico              a Raspberry Pi Pico 2 W running the BTstack HOG firmware (firmware/pico/),
-                    reached over USB serial. Report commands (wake/unlock/type/key/move/click/
-                    tap-trust/status) route through the shared HidController + `reports` layer so
-                    the exact same report BYTES are emitted; pairing is done in the paired device's
-                    Bluetooth settings (see `pair-mode`). Minimal contributor hardware: a ~USD 6 Pico instead
-                    of a BT dongle. `pico` needs no dbus/daemon.
-  esp32             an ESP32 (NimBLE HOG firmware) over USB serial -- same report layer as pico.
+                    reached over USB serial. Report commands (wake/unlock/type/key/move/click) tell
+                    the BOARD what to do (JSON-RPC); the firmware builds the reports (its per-slot
+                    layout applies). Pairing is done in the paired device's Bluetooth settings (see
+                    `pair-mode`). Minimal contributor hardware: a ~USD 6 Pico instead of a BT dongle.
+                    `pico` needs no dbus/daemon.
+  esp32             an ESP32 (NimBLE HOG firmware) over USB serial -- same board-builds path as pico.
   net               an Ethernet-equipped ESP32 running the same firmware, reached over TCP (no USB
                     cable). Address it with --host <mDNS-name|IP> (default port 3333). The path is
                     token-authenticated; set the token on the board over USB first with
@@ -35,8 +35,9 @@ Subcommands:
   tap-trust             helper: nudge the relative pointer toward a dialog button + click
   status                show daemon + link status
 
-SECURITY: `unlock` expands the passcode to HID frames LOCALLY and sends only frames to the daemon;
-the passcode string is never logged, never sent as text, never stored.
+`unlock` types the passcode like any other text (the board -- or the daemon -- builds the reports) and
+never PRINTS it. There is no host-side never-as-text machinery: the serial hop is local USB, the net
+hop is TLS-PSK, and the keystrokes ride BLE regardless.
 """
 
 from __future__ import annotations
@@ -59,9 +60,11 @@ CONTROL_SOCK = N.control_sock("default", env_override=os.environ.get("BT_HID_SOC
 
 # HID backend: "dongle" (default, BlueZ + ble_hid daemon) or an alternative transport backend
 # (e.g. "esp32" = an ESP32 BLE-HID board over USB serial). Non-dongle backends open a HidBridge and
-# route the report commands through its board transport (raw K/M frames, or the rpc `frames` method
-# when --rpc) instead of the daemon socket. Set once in main().
-_ALT_TRANSPORT = None      # the opened bridge's board transport when --backend is non-dongle, else None
+# drive it with the board's HIGH-LEVEL verbs (type/key/move/click) -- the BOARD builds the reports,
+# so the target slot's per-slot layout applies board-side -- instead of the daemon socket. Set once
+# in main().
+_ALT_TRANSPORT = None      # the opened bridge's raw frame transport (radio ops), else None
+_BOARD = None              # the opened bridge's board object (the high-level drive target), else None
 _BRIDGE = None             # the opened hidbridge.HidBridge for a non-dongle backend, else None
 _BACKEND = "dongle"
 
@@ -75,26 +78,28 @@ DEVICE_IFACE = "org.bluez.Device1"
 # daemon control socket
 # --------------------------------------------------------------------------- #
 def _alt_send(cmd: dict) -> dict:
-    """Route a daemon-style command dict through the selected alternative backend transport.
+    """Route a daemon-style command dict to the opened board.
 
-    Report commands map 1:1 onto HidController methods so `reports.py` stays the single source of
-    truth for the emitted bytes; the transport (e.g. ESP32 over serial) just relays them.
+    The drive verbs go to the board's HIGH-LEVEL methods (type/key/move/click/scroll): the BOARD
+    builds the reports (the target slot's per-slot layout applies board-side). `reports` is the raw
+    escape hatch -- pre-built frames relayed over the raw frame transport (the firmware K/M path).
     """
-    from hidbridge.controller import HidController
-    c = HidController(_ALT_TRANSPORT)
+    b = _BOARD
     t = cmd.get("cmd")
     if t == "ping":
         if hasattr(_ALT_TRANSPORT, "ping"):
             return _ALT_TRANSPORT.ping()
         return {"ok": True, "backend": _BACKEND}
     if t == "type":
-        return c.type_text(cmd["text"])
+        return b.type(cmd["text"])
     if t == "key":
-        return c.send_key(cmd["name"], int(cmd.get("modifiers", 0)))
+        return b.key(cmd["name"], int(cmd.get("modifiers", 0)))
     if t == "move":
-        return c.move(int(cmd["dx"]), int(cmd["dy"]))
+        return b.move(int(cmd["dx"]), int(cmd["dy"]))
     if t == "click":
-        return c.click(cmd.get("button", "left"))
+        return b.click(cmd.get("button", "left"))
+    if t == "scroll":
+        return b.scroll(int(cmd["clicks"]))
     if t == "reports":
         frames = [(f["kind"], bytes.fromhex(f["hex"])) for f in cmd["frames"]]
         return _ALT_TRANSPORT.send(frames)
@@ -318,39 +323,52 @@ def _layout_of(args) -> str:
     return (getattr(args, "layout", None) or R.DEFAULT_LAYOUT)
 
 
+def _board_backend() -> bool:
+    """True for a non-dongle (MCU/net) backend -- the board builds the reports and owns the layout."""
+    return _ALT_TRANSPORT is not None
+
+
+def _send_type(text, layout):
+    """Type `text`. On a board backend the BOARD builds it (its per-slot layout applies) -- send the
+    high-level 'type'. On the dongle, honour --layout by expanding host-side (reports.py)."""
+    if not _board_backend() and layout != R.DEFAULT_LAYOUT:
+        frames = [{"kind": "keyboard", "hex": r.data.hex()}
+                  for r in R.type_text(text, layout=layout)]
+        return _send({"cmd": "reports", "frames": frames})
+    return _send({"cmd": "type", "text": text})
+
+
 def cmd_unlock(args):
-    # Expand LOCALLY to frames; never send/log the passcode text.
-    frames = [{"kind": "keyboard", "hex": r.data.hex()}
-              for r in R.passcode_reports(args.passcode, press_enter=not args.no_enter,
-                                          layout=_layout_of(args))]
-    _require_ok(_send({"cmd": "reports", "frames": frames}))
+    # A passcode is just text typed at the lock screen; the board (or daemon) builds the reports the
+    # same as any typing. Hygiene: never print the passcode. (No special never-as-text machinery: the
+    # serial hop is local USB, the net hop is TLS-PSK, and the keystrokes ride BLE regardless.)
+    try:
+        _require_ok(_send_type(args.passcode, _layout_of(args)))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not args.no_enter:
+        _require_ok(_send({"cmd": "key", "name": "enter"}))
     print("sent passcode + Enter." if not args.no_enter else "sent passcode.")
 
 
 def cmd_type(args):
     layout = _layout_of(args)
-    if layout != R.DEFAULT_LAYOUT:
-        # Non-US layout: expand HOST-SIDE with reports.py (the single source of truth) and send the
-        # pre-built frames -- works uniformly across every raw backend (dongle daemon / MCU serial)
-        # without teaching each one about layouts. For --rpc mode the board owns the layout,
-        # selected PER SLOT with `hidbridge --rpc ... ` + the board's `layout` method / web UI.
-        try:
-            frames = [{"kind": "keyboard", "hex": r.data.hex()}
-                      for r in R.type_text(args.text, layout=layout)]
-        except ValueError as e:
-            print(f"error: {e}", file=sys.stderr)
-            sys.exit(1)
-        _require_ok(_send({"cmd": "reports", "frames": frames}))
-    else:
-        _require_ok(_send({"cmd": "type", "text": args.text}))
-    print(f"typed {len(args.text)} chars ({layout}).")
+    try:
+        _require_ok(_send_type(args.text, layout))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    where = "board layout" if _board_backend() else layout
+    print(f"typed {len(args.text)} chars ({where}).")
 
 
 def cmd_key(args):
     layout = _layout_of(args)
-    if layout != R.DEFAULT_LAYOUT and len(args.name) == 1:
-        # A single printable char is layout-dependent; expand host-side. Named keys (enter/f5/...)
-        # are layout-independent and take the normal path.
+    if not _board_backend() and layout != R.DEFAULT_LAYOUT and len(args.name) == 1:
+        # Dongle + a single printable char is layout-dependent; expand host-side. Named keys
+        # (enter/f5/...) are layout-independent, and a board backend owns its own layout -> both take
+        # the high-level path.
         try:
             frames = [{"kind": "keyboard", "hex": r.data.hex()}
                       for r in R.key_reports(args.name, args.mod, layout=layout)]
@@ -469,10 +487,9 @@ def cmd_status(args):
     if _ALT_TRANSPORT is not None:
         info = dict(_BRIDGE.info) if _BRIDGE is not None else {}
         caps = _BRIDGE.capabilities if _BRIDGE is not None else {}
-        mode = getattr(_BRIDGE, "mode", "raw")
-        print(f"{_BACKEND} backend UP (mode={mode}): board={info.get('board')} fw={info.get('fw')!r} "
-              f"nick={info.get('nick')!r} max_sessions={caps.get('max_sessions')} "
-              f"caps={caps.get('caps')}")
+        print(f"{_BACKEND} backend UP (board builds): board={info.get('board')} "
+              f"fw={info.get('fw')!r} nick={info.get('nick')!r} "
+              f"max_sessions={caps.get('max_sessions')} caps={caps.get('caps')}")
         resp = _send({"cmd": "ping"})
         if resp.get("ok") and "connected" in resp:
             print("  link: " + ("connected" if resp.get("connected") else "advertising (no central)"))
@@ -590,14 +607,11 @@ def build_parser():
                         "--host hidbridge-esp32.local")
     p.add_argument("--layout", default=os.environ.get("BT_HID_LAYOUT", R.DEFAULT_LAYOUT),
                    choices=sorted(R.LAYOUTS),
-                   help="keyboard layout the TARGET host uses ('us' default, 'da' Danish, 'uk' British). Decides "
-                        "which scancode+modifier each character maps to for type/key/unlock (raw). "
-                        "For --rpc/rpc the board owns the layout, set PER DEVICE with its `layout` "
-                        "method / web UI.")
-    p.add_argument("--rpc", action="store_true", default=bool(os.environ.get("BT_HID_RPC")),
-                   help="rpc: tell the BOARD what to do (JSON-RPC); it builds the HID reports "
-                        "itself, instead of the host building frames. Needs an MCU backend "
-                        "(--backend esp32/pico/net + --port/--host).")
+                   help="keyboard layout the TARGET host uses ('us' default, 'da' Danish, 'uk' "
+                        "British). For the DONGLE this decides which scancode+modifier each character "
+                        "maps to for type/key/unlock. For an MCU backend the BOARD owns the layout "
+                        "(it builds the reports), set PER DEVICE with its `layout` method / web UI; "
+                        "--layout is ignored there.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("adapters", help="show detected adapters + which dongle is used")
@@ -686,17 +700,18 @@ def build_parser():
 
 
 def _init_backend(args):
-    """For a non-dongle backend, open a HidBridge once and route report cmds through its board transport.
+    """For a non-dongle backend, open a HidBridge once and drive it with the board's high-level verbs.
 
     The board SELF-IDENTIFIES from a LOCATION (no board-type prefix): net -> --host, serial esp32/pico
-    -> --port/--pico-port, else autodetect. `--rpc` selects mode='rpc' (the board's `frames` method);
-    otherwise raw K/M frames. The dongle backend keeps the daemon-socket path (_ALT_TRANSPORT stays None).
+    -> --port/--pico-port, else autodetect. The MCU board BUILDS the reports (type/key/move/click) and
+    owns the per-slot layout; the raw frame transport is kept for the board-level radio ops. The dongle
+    backend keeps the daemon-socket path (_ALT_TRANSPORT / _BOARD stay None).
     """
-    global _ALT_TRANSPORT, _BACKEND, _BRIDGE
+    global _ALT_TRANSPORT, _BACKEND, _BRIDGE, _BOARD
     _BACKEND = (getattr(args, "backend", None) or "dongle").lower()
 
     if _BACKEND in ("dongle", "daemon", "ble", "socket"):
-        _ALT_TRANSPORT = None
+        _ALT_TRANSPORT = _BOARD = None
         return
 
     if _BACKEND == "net":
@@ -705,25 +720,25 @@ def _init_backend(args):
     else:
         # a serial device path; None -> autodetect (vendor-gated scan + handshake).
         location = getattr(args, "port", None) or getattr(args, "pico_port", None)
-    mode = "rpc" if getattr(args, "rpc", False) else "raw"
     from hidbridge import HidBridge
     try:
-        _BRIDGE = HidBridge(location, mode=mode)
+        _BRIDGE = HidBridge(location)
         _BRIDGE.__enter__()                       # open + probe (the board self-identifies)
-        _ALT_TRANSPORT = _BRIDGE._board.transport()
+        _BOARD = _BRIDGE._board
+        _ALT_TRANSPORT = _BOARD.transport()       # the raw frame transport (radio ops: advertise/ping)
     except Exception as e:  # noqa: BLE001
         print(f"error: {_BACKEND} backend unavailable: {e}", file=sys.stderr)
         sys.exit(2)
 
 
 def _close_backend():
-    global _BRIDGE
+    global _BRIDGE, _BOARD, _ALT_TRANSPORT
     if _BRIDGE is not None:
         try:
             _BRIDGE.__exit__(None, None, None)
         except Exception:  # noqa: BLE001
             pass
-        _BRIDGE = None
+        _BRIDGE = _BOARD = _ALT_TRANSPORT = None
 
 
 def _resolve_control_sock(args):
