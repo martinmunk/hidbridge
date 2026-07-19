@@ -84,6 +84,57 @@ review as a unit. The two halves still have independent toolchains (pip/pytest v
 separate subtrees, so a later split into `hidbridge-python` + `hidbridge-firmware` is
 straightforward if desired.
 
+## Install in your project (consumers)
+
+Released wheels are published to this LAN's Forgejo **PyPI registry**. To use `hidbridge` from
+another Python project, install it from that index:
+
+```bash
+pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
+pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
+```
+
+Persist the index in a project rather than typing it each time:
+
+```text
+# requirements.txt
+--extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
+hidbridge[mcu]
+```
+
+```toml
+# pyproject.toml (uv)
+[[tool.uv.index]]
+name = "forgejo"
+url = "http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/"
+```
+then `uv add --index forgejo hidbridge`.
+
+> **Auth:** these examples assume the registry is **public-read** (like this instance's Debian
+> registry). If read is token-gated, use the credentialed index URL
+> `http://<user>:<token>@forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/`
+> (or a `~/.netrc` entry). The plain `http://` is deliberate -- HTTPS/443 is unreachable on this LAN;
+> pass `--trusted-host forgejo.example.com` if pip warns.
+
+Then drive a target in a few lines (the board self-identifies from the location you pass):
+
+```python
+from hidbridge import HidBridge, session
+
+# open the board (a serial ESP32 here), connect one bonded host, type into it:
+with HidBridge("/dev/ttyUSB3") as bridge, bridge.connect("laptop3") as s:
+    s.type("hello")
+    s.key("enter")
+    s.move(40, 0); s.click("left")
+
+# single-host shorthand -- open board + connect + yield the session in one call:
+with session("/dev/ttyUSB3", "laptop3") as s:
+    s.type("hi")
+```
+
+Releasing new versions (the `wheel-v*` / `fw-v*` tag flow) is documented in
+[`docs/releasing.md`](docs/releasing.md).
+
 ## Quick start
 
 **MCU backend (no root, no daemon)** -- flash a Pico or ESP32 (see [`firmware/`](firmware/)), then:
@@ -130,6 +181,8 @@ the boards.
 
 ## Status
 
-This is an extracted **v0** for review -- a self-contained copy of the BT-HID toolbox with no
-dependency on its source project. Not yet published; no CI. See the report accompanying this
-extraction for what to review before creating the upstream repo + pipelines.
+A self-contained copy of the BT-HID toolbox with no dependency on its source project. CI + releases
+run on this LAN's Forgejo (`.forgejo/workflows/`): an offline gate on every push/PR, plus tag-driven
+release pipelines that publish the wheel (`wheel-v*`) and firmware (`fw-v*`) **independently**, both
+starting at 1.0.0. See [`docs/releasing.md`](docs/releasing.md) for the SemVer scheme, the tag
+conventions, and the one-time runner + `PACKAGE_REGISTRY_TOKEN` setup.

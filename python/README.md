@@ -24,6 +24,22 @@ truth for the HID report descriptor), so behaviour is identical regardless of tr
 
 ## Install
 
+**As a consumer** (released wheels live on this LAN's Forgejo PyPI registry):
+
+```bash
+pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
+pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ "hidbridge[mcu]"   # + pyserial for the serial backend
+```
+
+Persist the index with an `--extra-index-url` line in `requirements.txt`, a `pip.conf` entry, or
+`[[tool.uv.index]]` + `uv add --index ...`. The registry is assumed **public-read** (like this
+instance's Debian registry); if read is token-gated, use the credentialed index URL
+`http://<user>:<token>@forgejo.example.com:3000/...`. Plain `http://` is required
+(HTTPS/443 is unreachable on this LAN; add `--trusted-host` if pip warns). Full detail +
+the release flow: [`../docs/releasing.md`](../docs/releasing.md).
+
+**From source** (this checkout):
+
 ```bash
 # from this directory (hidbridge/python)
 pip install -e ".[mcu]"        # Pico / ESP32 serial backend (pyserial)
@@ -62,6 +78,47 @@ hidbridge --target labpad type "hi"
 ```
 
 Run `hidbridge --help` for the full subcommand list.
+
+## Python API
+
+The driving surface is two context managers that mirror the hardware: a **`HidBridge`** is the board
+channel; **`bridge.connect(name)`** advertises a bonded identity, waits until it is ready, and hands
+back a **`HidSession`** you drive. You pass a *location* ("/dev/ttyUSB3", a net host, "hci1", or
+nothing to autodetect) -- never a board type; the board self-identifies into `bridge.info` /
+`bridge.capabilities`.
+
+```python
+from hidbridge import HidBridge
+
+with HidBridge("/dev/ttyUSB3") as bridge, bridge.connect("laptop3") as s:
+    s.type("hello world")
+    s.key("enter")
+    s.move(40, 0)          # relative pointer
+    s.click("left")
+    s.scroll(-3)
+# leaving the `with` disconnects but keeps the bond -- no idle connections
+```
+
+The session verbs are the whole vocabulary: `type(text)`, `key(name, mod=0)`, `move(dx, dy)`,
+`click(button="left")`, `scroll(clicks)`. Who builds the report bytes is a backend detail -- an MCU
+board delegates each verb to the firmware (the target slot's keyboard layout applies board-side); a
+dongle builds the bytes host-side. Either way the surface is identical. "Unlock an iPad" is just
+typing the passcode: `s.type(pin); s.key("enter")`.
+
+For the single-host case, `hidbridge.session(location, device)` opens the board, connects the one
+device, and yields the session (tearing both down on exit):
+
+```python
+from hidbridge import session
+
+with session("/dev/ttyUSB3", "laptop3") as s:
+    s.type("hi")
+```
+
+Errors are typed under `HidbridgeError`: `NotBonded`, `ConnectTimeout`, `Unsupported`,
+`CapacityError`, `IncompatibleFirmware`. Multiple sessions can be open at once on a board that
+supports it (the ESP32 holds several identities); otherwise a second `connect()` raises. The wheel
+version is `hidbridge.__version__`.
 
 ## The passcode PIN (secret, external)
 
