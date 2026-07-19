@@ -66,6 +66,34 @@ def test_serial_link_imports_without_pyserial():
 
 
 # --------------------------------------------------------------------------- #
+# readline() reassembles a line delivered across a mid-line timeout (no hardware; a pipe fd)
+# --------------------------------------------------------------------------- #
+@pytest.mark.skipif(not __import__("sys").platform.startswith("linux"),
+                    reason="RawSerialLink (raw-fd readline) is Linux-only")
+def test_rawserial_readline_reassembles_across_timeout():
+    """A long JSON-RPC line whose head arrives, then the port STALLS past the timeout, then the tail
+    (with the newline) arrives. readline() must return b'' on the stall while KEEPING the head, then
+    return the WHOLE reassembled line -- not the truncated tail. Drives a real os.pipe() through the
+    same select()/os.read() path (fd swapped in, no tty open)."""
+    from hidbridge import serial_link as SL
+    rfd, wfd = os.pipe()
+    link = SL.RawSerialLink("/dev/null", timeout=0.05, open_now=False)
+    link._fd = rfd
+    try:
+        head = b'{"jsonrpc":"2.0","id":1,"resu'
+        os.write(wfd, head)
+        # the newline has NOT arrived within the timeout -> no complete line yet, but the head is kept
+        assert link.readline() == b""
+        assert link._buf == head                      # partial retained, NOT discarded
+        os.write(wfd, b'lt":{"ok":1}}\n')
+        assert link.readline() == b'{"jsonrpc":"2.0","id":1,"result":{"ok":1}}\n'
+        assert link._buf == b""                        # fully consumed
+    finally:
+        os.close(rfd)
+        os.close(wfd)
+
+
+# --------------------------------------------------------------------------- #
 # HARDWARE-GATED: real CP2102 ESP32 must open WITHOUT rebooting (BT_HID_HW_ESP32=1)
 # --------------------------------------------------------------------------- #
 _HW = os.environ.get("BT_HID_HW_ESP32") == "1"

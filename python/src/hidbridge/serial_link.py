@@ -185,7 +185,12 @@ class RawSerialLink:
                 pass
 
     def readline(self) -> bytes:
-        r"""Read one '\n'-terminated line (bounded by self.timeout). Returns b'' on timeout."""
+        r"""Read one '\n'-terminated line (bounded by self.timeout). Returns b'' if no COMPLETE
+        line is ready before the timeout -- crucially KEEPING any partial bytes in self._buf so the
+        next call resumes accumulating them. This is line-oriented, not byte-oriented: a large reply
+        (e.g. the 2435-byte `identities` line) that straddles a stall reassembles across successive
+        readline() calls instead of being truncated. (An earlier version returned the partial AND
+        cleared the buffer on timeout, which lost the head of a line delivered across a stall.)"""
         end = time.monotonic() + self.timeout
         while b"\n" not in self._buf:
             remaining = end - time.monotonic()
@@ -206,9 +211,9 @@ class RawSerialLink:
         if b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
             return line + b"\n"
-        # timed out: return whatever partial we have (mirrors pyserial's timeout semantics)
-        line, self._buf = self._buf, b""
-        return line
+        # Timed out with no complete line yet: KEEP the partial in self._buf (do NOT discard it) and
+        # report "nothing complete yet" so callers poll again and the line reassembles next time.
+        return b""
 
     # -- context manager ---------------------------------------------------- #
     def __enter__(self) -> RawSerialLink:
