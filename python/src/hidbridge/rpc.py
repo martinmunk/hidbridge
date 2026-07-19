@@ -91,14 +91,34 @@ class RpcClient:
         req = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": p}
         self._ch.write((json.dumps(req, separators=(",", ":")) + "\n").encode("ascii"))
         want = self._id
-        # Track whether the board said ANYTHING (a non-empty line): silence -> RpcTimeout (nothing
-        # there); noise but no matching JSON reply -> RpcProtocolError (answered, but not JSON-RPC --
-        # e.g. legacy firmware replying `ERR unknowncmd`). Lets the probe tell the two apart.
+        # Demux robustly. During the post-connect window the board emits a burst of async `EVT`
+        # notifications (id=None) and can briefly stall (an empty read) BEFORE the real reply, so we
+        # must not let any of that starve the response:
+        #   * async notifications, mismatched-id (pipelined) replies, and noise lines are SKIPPED and
+        #     do NOT consume the response budget the way a fixed loop count did;
+        #   * a TRANSIENT stall (a bounded run of empty reads -- each is one full channel-timeout
+        #     window with no complete line) is tolerated, not treated as the end, so a reply that
+        #     lands just after the stall is still read;
+        #   * total work is capped (an empty run AND an overall line count) so a stuck/flooding board
+        #     can't spin forever.
+        # The RpcTimeout(silence)/RpcProtocolError(answered-wrong) distinction is preserved: `noise`
+        # is set only by a non-JSON-RPC line, so pure silence still raises RpcTimeout and a legacy
+        # `ERR unknowncmd` still raises RpcProtocolError (board._probe/_probe_port rely on this).
         noise = None
-        for _ in range(self._max_reads):
+        empty_run = 0
+        # Consecutive empty reads tolerated: a POST-CONNECT stall is brief (one, maybe two,
+        # channel-timeout windows), so a small run keeps latency for a genuinely silent board low
+        # (silence still terminates in a handful of windows -> RpcTimeout fast).
+        max_empty = 3
+        max_total = max(self._max_reads * 8, 128)  # overall line cap: a notification flood can't loop forever
+        for _ in range(max_total):
             raw = self._ch.readline()
             if not raw:
-                break                         # timeout / no (more) data
+                empty_run += 1
+                if empty_run > max_empty:
+                    break                     # a real stall / silence: stop reading
+                continue
+            empty_run = 0                     # data flowed -- the stall (if any) is over
             line = raw.decode("ascii", "replace").strip()
             if not line.startswith("{"):
                 if line:

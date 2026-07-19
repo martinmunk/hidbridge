@@ -283,6 +283,78 @@ def test_non_json_reply_raises_rpc_protocol_error():
 
 
 # --------------------------------------------------------------------------- #
+# robust demux under the post-connect window (async EVT burst + a brief stall)
+# --------------------------------------------------------------------------- #
+class QueueChannel:
+    """A minimal write/readline channel: readline() yields the queued items IN ORDER; a b"" item is
+    an empty read (a stall / timeout window). Exhausted -> b"" (silence). Records the last request."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.req = None
+
+    def write(self, b):
+        self.req = json.loads(b.decode())
+        return len(b)
+
+    def readline(self):
+        return self._items.pop(0) if self._items else b""
+
+
+def _line(obj):
+    return (json.dumps(obj) + "\n").encode()
+
+
+def test_call_survives_notification_flood_exceeding_max_reads():
+    # MORE THAN max_reads async EVT notifications (id=null) precede the real reply. A fixed
+    # max_reads loop would exhaust its budget on the notifications and never see the reply.
+    note = _line({"jsonrpc": "2.0", "method": "event", "params": {"event": "ready"}})
+    reply = _line({"jsonrpc": "2.0", "id": 1, "result": {"ok": 1}})
+    ch = QueueChannel([note] * 20 + [reply])     # 20 >> the default max_reads (12)
+    assert rpc.RpcClient(ch, max_reads=12).wake() == {"ok": 1}
+
+
+def test_call_survives_notification_flood_with_no_id_key():
+    # notifications may omit the id key entirely (not just id=null) -- still skipped, not counted.
+    note = _line({"jsonrpc": "2.0", "method": "event", "params": {"event": "ready"}})
+    del_note = _line({"jsonrpc": "2.0", "params": {"event": "ready"}})  # no id key at all
+    reply = _line({"jsonrpc": "2.0", "id": 1, "result": {"ok": 2}})
+    ch = QueueChannel(([note, del_note] * 10) + [reply])
+    assert rpc.RpcClient(ch, max_reads=12).wake() == {"ok": 2}
+
+
+def test_call_tolerates_stall_empty_reads_before_reply():
+    # the board goes quiet briefly (empty reads) after the EVT burst, then answers. Breaking on the
+    # first empty read (the old behaviour) would mistake the stall for silence -> RpcTimeout.
+    reply = _line({"jsonrpc": "2.0", "id": 1, "result": {"ok": 3}})
+    ch = QueueChannel([b"", b"", reply])         # two stall windows, then the reply
+    assert rpc.RpcClient(ch).wake() == {"ok": 3}
+
+
+def test_call_tolerates_evt_burst_then_stall_then_reply():
+    # the full post-connect shape: several async EVT ready lines, a stall, then the matching reply.
+    note = _line({"jsonrpc": "2.0", "method": "event", "params": {"event": "ready"}})
+    reply = _line({"jsonrpc": "2.0", "id": 1, "result": {"subscribed": 1}})
+    ch = QueueChannel([note, note, note, b"", reply])
+    assert rpc.RpcClient(ch).wake() == {"subscribed": 1}
+
+
+def test_call_silence_still_raises_rpc_timeout():
+    # a channel that ONLY ever stalls (b"") must still be classified as silence -> RpcTimeout, not
+    # spin forever (regression guard for the RpcTimeout vs RpcProtocolError distinction).
+    with pytest.raises(rpc.RpcTimeout):
+        rpc.RpcClient(QueueChannel([])).wake()
+
+
+def test_call_noise_after_stall_still_raises_protocol_error():
+    # a board that answers only with non-JSON noise (interleaved with stalls) still raises
+    # RpcProtocolError -- it ANSWERED, just not with JSON-RPC.
+    ch = QueueChannel([b"", b"ERR unknowncmd\n", b""])
+    with pytest.raises(rpc.RpcProtocolError):
+        rpc.RpcClient(ch).wake()
+
+
+# --------------------------------------------------------------------------- #
 # hello / capabilities + auth + target parsing
 # --------------------------------------------------------------------------- #
 def test_hello_and_supports():
