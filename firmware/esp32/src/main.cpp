@@ -116,7 +116,7 @@
 
 static const char* DEVICE_NAME = "HIDBRIDGE-esp32";
 
-// Compile-time firmware SemVer, surfaced in `hello` as `fw`. Defaults to "1.0.0-dev"; the `fw-v`
+// Compile-time firmware SemVer, surfaced in `hello` as `fw`. Defaults to "1.0.0-dev"; the `fw/release/`
 // release build stamps the tag's version with -DHB_FW_VERSION='"<X.Y.Z>"' (nested quotes: the flag
 // must pass a C string literal). This is the firmware RELEASE version and is INDEPENDENT of both the
 // wheel version and the wire-compat integer `proto` (hbmode1::PROTO_VERSION). The OTA live test

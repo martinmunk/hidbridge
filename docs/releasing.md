@@ -13,8 +13,8 @@ by parity tests), which is *why* they live together -- but they are versioned an
 
 | Number | Where | Source of truth | Bumps when |
 | --- | --- | --- | --- |
-| **wheel version** | `hidbridge.__version__` / the wheel filename | the `wheel-v<X.Y.Z>` git tag | you release the Python package |
-| **firmware version** | `hello.fw` (baked via `-DHB_FW_VERSION`) | the `fw-v<X.Y.Z>` git tag | you release the firmware |
+| **wheel version** | `hidbridge.__version__` / the wheel filename | the `wheel/release/<X.Y.Z>` git tag | you release the Python package |
+| **firmware version** | `hello.fw` (baked via `-DHB_FW_VERSION`) | the `fw/release/<X.Y.Z>` git tag | you release the firmware |
 | **`proto`** (wire-compat integer) | `hello.proto` / `hbmode1::PROTO_VERSION` | the firmware source | **only** on a *breaking* protocol change |
 
 `proto` is **not** the release version. The host<->MCU protocol is additive (a new capability is a new
@@ -27,10 +27,10 @@ firmware 1.1.0 against `proto` 1 simultaneously -- three numbers, three clocks.
 
 | Tag | Triggers | Publishes |
 | --- | --- | --- |
-| `wheel-v1.0.0` | `.forgejo/workflows/release-wheel.yml` | wheel + sdist -> Forgejo PyPI registry |
-| `fw-v1.0.0` | `.forgejo/workflows/release-firmware.yml` | esp32 + pico `.bin`/`.uf2` -> Forgejo generic registry |
+| `wheel/release/1.0.0` | `.forgejo/workflows/release-wheel.yml` | wheel + sdist -> Forgejo PyPI registry |
+| `fw/release/1.0.0` | `.forgejo/workflows/release-firmware.yml` | esp32 + pico `.bin`/`.uf2` -> Forgejo generic registry |
 
-Prefixed tags are what make one repo serve two release lines: a `wheel-v*` tag never triggers a
+Prefixed tags are what make one repo serve two release lines: a `wheel/release/*` tag never triggers a
 firmware build and vice versa.
 
 ### Wheel version wiring
@@ -38,7 +38,7 @@ firmware build and vice versa.
 The wheel version is single-sourced from `python/src/hidbridge/_version.py` (committed baseline
 `1.0.0`). `pyproject.toml` declares `dynamic = ["version"]` and reads that file via
 `[tool.hatch.version]`. A plain `uv build` on an untagged tree therefore produces the baseline
-`1.0.0`. The release workflow rewrites the `__version__` line from the tag (`wheel-v1.2.3` -> `1.2.3`)
+`1.0.0`. The release workflow rewrites the `__version__` line from the tag (`wheel/release/1.2.3` -> `1.2.3`)
 with `sed` before `uv build`, so the published wheel's version derives from the tag.
 
 ### Firmware version wiring
@@ -55,8 +55,8 @@ Everything is driven by pushing a tag; the pipeline builds, gates, and publishes
 ### Wheel
 
 ```bash
-git tag wheel-v1.0.0
-git push origin wheel-v1.0.0
+git tag wheel/release/1.0.0
+git push origin wheel/release/1.0.0
 ```
 
 `release-wheel.yml` then: stamps `_version.py` from the tag -> `ruff check .` + offline `pytest -q` ->
@@ -66,8 +66,8 @@ already-published version is idempotent (a "file already exists" upload is treat
 ### Firmware
 
 ```bash
-git tag fw-v1.0.0
-git push origin fw-v1.0.0
+git tag fw/release/1.0.0
+git push origin fw/release/1.0.0
 ```
 
 `release-firmware.yml` then builds `esp32dev`, `esp32-ethernet-kit`, `esp32-wifi`, and `rpipico2w`

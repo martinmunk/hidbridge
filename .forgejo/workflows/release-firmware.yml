@@ -1,8 +1,8 @@
-# Release the firmware -- triggered by a `fw-v<X.Y.Z>` tag (the version SOURCE OF TRUTH).
+# Release the firmware -- triggered by a `fw/release/<X.Y.Z>` tag (the version SOURCE OF TRUTH).
 #
 # Flow: derive the version from the tag -> build both firmwares with -DHB_FW_VERSION injected (so
 # hello.fw reports the release version) -> publish the .bin/.uf2 artifacts to this Forgejo's GENERIC
-# package registry. The wheel releases separately (release-wheel.yml, `wheel-v*` tags).
+# package registry. The wheel releases separately (release-wheel.yml, `wheel/release/*` tags).
 #
 # CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
 # actions/checkout; registry over HTTP :3000 (HTTPS/443 unreachable on this LAN); upload is idempotent
@@ -14,7 +14,7 @@ name: release-firmware
 
 on:
   push:
-    tags: ["fw-v*"]
+    tags: ["fw/release/*"]
 
 concurrency:
   group: release-firmware-${{ github.ref }}
@@ -45,13 +45,13 @@ jobs:
         run: pip install --no-cache-dir platformio
 
       - name: Derive version from the tag
-        # fw-v1.2.3 -> 1.2.3 ; injected into every build via -DHB_FW_VERSION (baked into hello.fw).
+        # fw/release/1.2.3 -> 1.2.3 ; injected into every build via -DHB_FW_VERSION (baked into hello.fw).
         run: |
           set -eu
-          VERSION="${GITHUB_REF_NAME#fw-v}"
+          VERSION="${GITHUB_REF_NAME#fw/release/}"
           case "$VERSION" in
             [0-9]*.[0-9]*.[0-9]*) : ;;
-            *) echo "tag $GITHUB_REF_NAME does not look like fw-v<X.Y.Z>"; exit 1 ;;
+            *) echo "tag $GITHUB_REF_NAME does not look like fw/release/<X.Y.Z>"; exit 1 ;;
           esac
           echo "firmware version = $VERSION (from tag $GITHUB_REF_NAME)"
           echo "FW_VERSION=$VERSION" >> "$GITHUB_ENV"

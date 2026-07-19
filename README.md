@@ -132,7 +132,7 @@ with session("/dev/ttyUSB3", "laptop3") as s:
     s.type("hi")
 ```
 
-Releasing new versions (the `wheel-v*` / `fw-v*` tag flow) is documented in
+Releasing new versions (the `wheel/release/*` / `fw/release/*` tag flow) is documented in
 [`docs/releasing.md`](docs/releasing.md).
 
 ## Quick start
@@ -183,6 +183,6 @@ the boards.
 
 A self-contained copy of the BT-HID toolbox with no dependency on its source project. CI + releases
 run on this LAN's Forgejo (`.forgejo/workflows/`): an offline gate on every push/PR, plus tag-driven
-release pipelines that publish the wheel (`wheel-v*`) and firmware (`fw-v*`) **independently**, both
+release pipelines that publish the wheel (`wheel/release/*`) and firmware (`fw/release/*`) **independently**, both
 starting at 1.0.0. See [`docs/releasing.md`](docs/releasing.md) for the SemVer scheme, the tag
 conventions, and the one-time runner + `PACKAGE_REGISTRY_TOKEN` setup.

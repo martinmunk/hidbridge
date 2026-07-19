@@ -1,8 +1,8 @@
-# Release the Python wheel -- triggered by a `wheel-v<X.Y.Z>` tag (the version SOURCE OF TRUTH).
+# Release the Python wheel -- triggered by a `wheel/release/<X.Y.Z>` tag (the version SOURCE OF TRUTH).
 #
 # Flow: derive the version from the tag -> stamp it into src/hidbridge/_version.py -> run the offline
 # gate (ruff + pytest) -> `uv build` -> publish the wheel + sdist to this Forgejo's PyPI registry.
-# The firmware releases separately (release-firmware.yml, `fw-v*` tags); the two version independently.
+# The firmware releases separately (release-firmware.yml, `fw/release/*` tags); the two version independently.
 #
 # CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
 # actions/checkout; registry over HTTP :3000 (HTTPS/443 is unreachable on this LAN); publish is
@@ -16,7 +16,7 @@ name: release-wheel
 
 on:
   push:
-    tags: ["wheel-v*"]
+    tags: ["wheel/release/*"]
 
 # Never cancel an in-progress publish (mirrors deb.yml).
 concurrency:
@@ -41,15 +41,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Derive version from the tag + stamp _version.py
-        # wheel-v1.2.3 -> 1.2.3 ; the built wheel/sdist version derives from the tag.
+        # wheel/release/1.2.3 -> 1.2.3 ; the built wheel/sdist version derives from the tag.
         working-directory: python
         run: |
           set -eu
-          VERSION="${GITHUB_REF_NAME#wheel-v}"
+          VERSION="${GITHUB_REF_NAME#wheel/release/}"
           echo "wheel version = $VERSION (from tag $GITHUB_REF_NAME)"
           case "$VERSION" in
             [0-9]*.[0-9]*.[0-9]*) : ;;
-            *) echo "tag $GITHUB_REF_NAME does not look like wheel-v<X.Y.Z>"; exit 1 ;;
+            *) echo "tag $GITHUB_REF_NAME does not look like wheel/release/<X.Y.Z>"; exit 1 ;;
           esac
           sed -i -E "s/^__version__ = .*/__version__ = \"${VERSION}\"/" src/hidbridge/_version.py
           grep '__version__' src/hidbridge/_version.py

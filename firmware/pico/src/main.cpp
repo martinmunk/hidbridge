@@ -88,7 +88,7 @@ static const uint8_t HID_REPORT_MAP[] = {
 static const char *BASE_NAME = "HIDBRIDGE-pico";
 
 // Compile-time firmware SemVer, surfaced in `hello` as `fw` (see picoFillHello). Defaults to
-// "1.0.0-dev"; the `fw-v` release build stamps the tag's version with -DHB_FW_VERSION='"<X.Y.Z>"'.
+// "1.0.0-dev"; the `fw/release/` release build stamps the tag's version with -DHB_FW_VERSION='"<X.Y.Z>"'.
 // This is the firmware RELEASE version, INDEPENDENT of the wheel version and the wire-compat integer
 // `proto` (hbmode1::PROTO_VERSION). See docs/releasing.md.
 #ifndef HB_FW_VERSION
