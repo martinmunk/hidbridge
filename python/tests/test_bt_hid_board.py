@@ -2,8 +2,10 @@
 
 No hardware: `resolve_board` builds a board object but does no I/O until prepare(), and the MCU
 adapter is exercised with an injected fake RPC client + fake transport, so the identities/pair/connect/
-disconnect/transport(raw|rpc)/wait_ready mapping is pinned in the offline suite. Live behaviour stays
-gated (a flashed board / a bonded host).
+disconnect/drive/wait_ready mapping is pinned in the offline suite. The MCU board DELEGATES the drive
+verbs (type/key/move/click/scroll) to the firmware's high-level JSON-RPC methods (the board builds the
+reports); the dongle board builds them host-side via reports.py. Live behaviour stays gated (a flashed
+board / a bonded host).
 """
 
 import pytest
@@ -34,17 +36,10 @@ def test_classify(loc, family):
 def test_resolve_serial_and_net_build_mcu_boards_without_io():
     assert isinstance(B.resolve_board("/dev/ttyUSB3"), B.McuBoard)
     assert isinstance(B.resolve_board("192.0.2.102", token="secrettoken"), B.McuBoard)
-    # mode threads through
-    assert B.resolve_board("/dev/ttyUSB3", mode="rpc").mode == "rpc"
 
 
 def test_resolve_dongle_builds_dongle_board():
     assert isinstance(B.resolve_board("hci1"), B.DongleBoard)
-
-
-def test_dongle_rejects_rpc_mode():
-    with pytest.raises(Unsupported):
-        B.resolve_board("hci1", mode="rpc")
 
 
 # --------------------------------------------------------------------------- #
@@ -75,12 +70,28 @@ class FakeRpc:
         self.calls.append(("identities", {}))
         return {"slots": [dict(s) for s in self._slots], "adv": 0, "tgt": 0}
 
-    def call(self, method, params=None):
+    def call(self, method, params=None, *, dry=False):
         self.calls.append((method, dict(params or {})))
         if method == "connect":
             # mark the named/indexed slot connected + subscribed (simulate the iPad reattaching)
             self._set(params, conn=True, sub=True)
         return {"ok": True, **(params or {})}
+
+    # high-level drive verbs (mirror rpc.RpcClient: shape params + record via call)
+    def type_text(self, text, *, dry=False):
+        return self.call("type", {"text": text}, dry=dry)
+
+    def key(self, name, mod=0, *, dry=False):
+        return self.call("key", {"name": name, "mod": int(mod)}, dry=dry)
+
+    def move(self, dx, dy, *, dry=False):
+        return self.call("move", {"dx": int(dx), "dy": int(dy)}, dry=dry)
+
+    def click(self, button="left", *, dry=False):
+        return self.call("click", {"button": button}, dry=dry)
+
+    def scroll(self, clicks, *, dry=False):
+        return self.call("scroll", {"clicks": int(clicks)}, dry=dry)
 
     def pair(self, client):
         self.calls.append(("pair", {"client": client}))
@@ -120,10 +131,10 @@ class FakeTransport:
         self.closed = True
 
 
-def _mcu(slots, mode="raw", rpc=None, tp=None):
+def _mcu(slots, rpc=None, tp=None):
     rpc = rpc or FakeRpc(slots=slots)
     tp = tp or FakeTransport()
-    b = B.McuBoard(mode=mode, transport=tp, rpc_client=rpc)
+    b = B.McuBoard(transport=tp, rpc_client=rpc)
     b.prepare()
     return b, rpc, tp
 
@@ -208,27 +219,30 @@ def test_disconnect_maps_to_rpc():
 
 
 # --------------------------------------------------------------------------- #
-# transport: raw relays K/M frames; rpc relays via the `frames` method
+# drive verbs: the MCU board tells the firmware WHAT (high-level JSON-RPC); the board builds
 # --------------------------------------------------------------------------- #
-def test_raw_transport_is_the_frame_relay():
-    b, _, tp = _mcu([{"slot": 0, "client": "mini5", "bonded": True, "conn": True, "sub": True}],
-                    mode="raw")
-    HidController(b.transport("mini5")).type_text("hi")
-    assert tp.frames                                # frames went to the raw transport
-    assert tp.frames[0][0] == "keyboard"
+def test_drive_verbs_delegate_to_firmware_rpc_methods():
+    b, rpc, tp = _mcu([{"slot": 0, "client": "mini5", "bonded": True, "conn": True, "sub": True}])
+    b.type("hi")
+    b.key("enter", 8)
+    b.move(3, -4)
+    b.click("back")
+    b.scroll(-2)
+    # each verb is a high-level JSON-RPC method -- the BOARD builds the report bytes (per-slot layout
+    # applies board-side); nothing is relayed as pre-built frames over the raw transport
+    assert ("type", {"text": "hi"}) in rpc.calls
+    assert ("key", {"name": "enter", "mod": 8}) in rpc.calls
+    assert ("move", {"dx": 3, "dy": -4}) in rpc.calls
+    assert ("click", {"button": "back"}) in rpc.calls
+    assert ("scroll", {"clicks": -2}) in rpc.calls
+    assert tp.frames == []                           # NOT host-built + relayed as raw frames
 
 
-def test_rpc_transport_relays_prebuilt_frames_via_frames_method():
-    b, rpc, tp = _mcu([{"slot": 0, "client": "mini5", "bonded": True, "conn": True, "sub": True}],
-                      mode="rpc")
-    HidController(b.transport("mini5")).type_text("hi")
-    assert tp.frames == []                           # NOT the raw transport
-    assert rpc.frames_sent                           # relayed as JSON-RPC `frames`
-    # frames are hex '<ridHex><bodyHex>' with the keyboard report id 01
-    ref = RecordingTransport()
-    HidController(ref).type_text("hi")
-    flat = [f for batch in rpc.frames_sent for f in batch]
-    assert flat[0].startswith("01") and flat[0][2:] == ref.frames[0][1].hex()
+def test_transport_accessor_returns_the_raw_frame_channel():
+    # the raw frame transport stays available for the board-level radio ops (advertise/net_status/
+    # ping in the CLI); it is NOT the drive path anymore
+    b, _, tp = _mcu([])
+    assert b.transport() is tp
 
 
 # --------------------------------------------------------------------------- #
@@ -238,12 +252,13 @@ def test_hidbridge_over_mcuboard_full_lifecycle():
     slots = [{"slot": 0, "client": "mini5", "bonded": True, "conn": False, "sub": False}]
     rpc = FakeRpc(slots=slots)
     tp = FakeTransport()
-    board = B.McuBoard(mode="raw", transport=tp, rpc_client=rpc)
+    board = B.McuBoard(transport=tp, rpc_client=rpc)
     with HidBridge("/dev/ttyUSB3", backend=board) as bridge:
         assert bridge.info["board"] == "esp32"
         assert [d.name for d in bridge.list_devices()] == ["mini5"]
         with bridge.connect("mini5") as s:
             s.type("hi")
+        assert ("type", {"text": "hi"}) in rpc.calls     # board built it via the `type` RPC method
         assert ("disconnect", {"client": "mini5"}) in rpc.calls
     assert tp.closed
 
@@ -295,6 +310,24 @@ def test_dongle_board_lists_bonded_devices(monkeypatch):
     devs = {d.name: d for d in board.list_devices()}
     assert set(devs) == {"iPad A", "iPad B"}
     assert devs["iPad A"].connected is True and devs["iPad A"].bonded is True
+
+
+def test_dongle_board_drives_host_built_reports(monkeypatch):
+    # a dongle has no board to delegate to, so type/key/... build the exact reports.py bytes host-side
+    from hidbridge import conn as C
+    monkeypatch.setattr(C._adapter, "resolve_dongle", lambda *a, **k: {"hci": "hci1"})
+    rec = RecordingTransport()
+    board = B.DongleBoard("hci1", link_manager=_FakeDongleLink({}), transport=rec)
+    board.prepare()
+    board.type("hi")
+    board.key("enter", 8)
+    board.move(3, -4)
+    board.click("back")
+    board.scroll(-2)
+    ref = RecordingTransport()
+    c = HidController(ref)
+    c.type_text("hi"); c.send_key("enter", 8); c.move(3, -4); c.click("back"); c.scroll(-2)
+    assert rec.frames == ref.frames                  # byte-for-byte what a bare controller sends
 
 
 def test_dongle_board_pair_unpair_rename_unsupported(monkeypatch):

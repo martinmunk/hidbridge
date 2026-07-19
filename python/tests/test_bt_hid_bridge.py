@@ -9,7 +9,7 @@ Design under test:
   with HidBridge("/dev/ttyUSB3") as bridge:           # board channel; probes + self-identifies
       bridge.list_devices()                           # [Device(name=..., bonded=..., connected=...)]
       with bridge.connect("laptop3") as session:      # connect-on-demand; blocks until ready
-          session.type("hi")                          # relays reports.py frames (default 'raw' mode)
+          session.type("hi")                          # tell it WHAT; the board builds + sends
       # session exit -> disconnect, bond kept
 
   with hidbridge.session("/dev/ttyUSB3", "laptop3") as s:   # single-host shorthand: opens + connects
@@ -33,9 +33,6 @@ from hidbridge import (
     NotBonded,
     Unsupported,
 )
-from hidbridge.controller import HidController, RecordingTransport
-
-
 class _Dev:
     def __init__(self, name, bonded=True, connected=False):
         self.name, self.bonded, self.connected = name, bonded, connected
@@ -43,7 +40,10 @@ class _Dev:
 
 class FakeBoard:
     """In-memory stand-in for a board channel (the object injected via backend= instead of a real
-    serial/net/dongle driver). Implements exactly the protocol HidBridge calls."""
+    serial/net/dongle driver). Implements exactly the protocol HidBridge calls -- including the
+    HIGH-LEVEL drive verbs (type/key/move/click/scroll): the caller tells the board WHAT, the board
+    builds + sends. Byte-parity with reports.py is a per-backend concern (asserted in the board /
+    rpc-drift tests), NOT here."""
 
     def __init__(self, *, board="esp32", fw="dev", devices=("laptop3",),
                  max_sessions=1, will_connect=True):
@@ -51,8 +51,8 @@ class FakeBoard:
         self._devices = {n: _Dev(n) for n in devices}
         self.capabilities = {"max_sessions": max_sessions, "layouts": True}
         self._will_connect = will_connect
-        self._transport = RecordingTransport()
         # observability for assertions
+        self.drove: list = []                         # the high-level drive calls, in order
         self.prepared = self.closed = False
         self.connects, self.disconnects = [], []
 
@@ -89,8 +89,21 @@ class FakeBoard:
         if name in self._devices:
             self._devices[name].connected = False
 
-    def transport(self, name=None):
-        return self._transport
+    # ---- drive (high-level; the board owns report building) ----
+    def type(self, text):
+        self.drove.append(("type", text)); return {"ok": True}
+
+    def key(self, name, mod=0):
+        self.drove.append(("key", name, mod)); return {"ok": True}
+
+    def move(self, dx, dy):
+        self.drove.append(("move", dx, dy)); return {"ok": True}
+
+    def click(self, button="left"):
+        self.drove.append(("click", button)); return {"ok": True}
+
+    def scroll(self, clicks):
+        self.drove.append(("scroll", clicks)); return {"ok": True}
 
 
 def test_bridge_enters_prepares_and_exposes_probe_info():
@@ -113,16 +126,31 @@ def test_list_devices_and_pair_unpair():
         assert "dev-trix" not in [d.name for d in b.list_devices()]
 
 
-def test_connect_returns_hidsession_and_relays_expected_frames():
+def test_connect_returns_hidsession_and_delegates_drive_to_board():
     fake = FakeBoard(devices=("laptop3",))
     with HidBridge("x", backend=fake) as b:
         with b.connect("laptop3") as s:
             assert isinstance(s, HidSession)
             s.type("hi")
-    ref = RecordingTransport()
-    HidController(ref).type_text("hi")
-    assert fake._transport.frames == ref.frames     # exactly what a bare controller would send
+            s.key("enter", 8)
+            s.move(3, -4)
+            s.click("right")
+            s.scroll(-2)
+    # the session is a thin pass-through to the board's high-level verbs (the board builds the bytes)
+    assert fake.drove == [("type", "hi"), ("key", "enter", 8), ("move", 3, -4),
+                          ("click", "right"), ("scroll", -2)]
     assert fake.connects == ["laptop3"]
+
+
+def test_session_surface_is_high_level_only():
+    # exactly type/key/move/click/scroll -- NO unlock, NO frames, NO raw controller escape hatch
+    fake = FakeBoard(devices=("laptop3",))
+    with HidBridge("x", backend=fake) as b:
+        with b.connect("laptop3") as s:
+            for verb in ("type", "key", "move", "click", "scroll"):
+                assert callable(getattr(s, verb))
+            for gone in ("unlock", "frames", "controller"):
+                assert not hasattr(s, gone), f"HidSession must not expose {gone!r}"
 
 
 def test_session_exit_disconnects_and_keeps_bond():

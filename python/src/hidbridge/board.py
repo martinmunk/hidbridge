@@ -11,13 +11,16 @@ the caller never passes a board TYPE -- the location's SHAPE picks a family, and
   a host / IP / "*.local" ............................. a network MCU over TLS (needs `token`)
   None ................................................ autodetect a plugged-in serial board
 
-The MCU family reuses the existing, load-bearing layers rather than reimplementing BLE: the frame
-transports (`transport_esp32`/`transport_net`, incl. the RESET-FREE serial open) relay the raw report
-bytes, and the JSON-RPC client (`rpc.RpcClient`) does the name-aware device management (identities/
-pair/unpair/connect/nickname/layout) over the SAME open channel. `mode` selects only the LAST hop:
-"raw" relays host-built frames as K/M lines; "rpc" relays them via the JSON-RPC `frames` method (the
-board notifies the same bytes -- byte-parity either way; the passcode is always pre-built host-side,
-never sent as text).
+The MCU family reuses the existing, load-bearing layers rather than reimplementing BLE: the JSON-RPC
+client (`rpc.RpcClient`) drives BOTH the name-aware device management (identities/pair/unpair/connect/
+nickname/layout) AND the high-level HID verbs (type/key/move/click/scroll) over the SAME open channel.
+The BOARD builds the report bytes on the firmware -- so the target slot's per-slot keyboard LAYOUT
+applies board-side (the point of "board in charge"). The raw frame transport (`transport_esp32`/
+`transport_net`, incl. the RESET-FREE serial open) is kept only for the board-level radio ops
+(advertise / net-status / ping), not for driving.
+
+A BlueZ dongle has no board to delegate to, so DongleBoard builds the bytes HOST-side via reports.py /
+HidController and hands them to the daemon -- the SAME high-level verbs, host-built under the hood.
 
 This module lazy-imports serial/dbus INSIDE the resolver, so `import hidbridge` stays dep-free.
 """
@@ -56,26 +59,6 @@ class NoBoardFound(HidbridgeError):
     """Autodetect found no plugged-in board."""
 
 
-# --------------------------------------------------------------------------- #
-# raw <-> rpc frame relay (the "rpc" drive path's transport)
-# --------------------------------------------------------------------------- #
-class _RpcFramesTransport:
-    """A HidController transport whose `.send(frames)` relays PRE-BUILT report bytes via the board's
-    JSON-RPC `frames` method (the board just notifies them). Host still builds the bytes (reports.py),
-    so byte-parity with the raw path holds; the wire is JSON-RPC instead of K/M lines."""
-
-    _RID = {"keyboard": 1, "mouse": 2}
-
-    def __init__(self, rpc_client):
-        self._rpc = rpc_client
-
-    def send(self, frames):
-        hexframes = ["%02x%s" % (self._RID[k], b.hex()) for (k, b) in frames]
-        res = self._rpc.frames(hexframes)
-        # normalise to the {"ok": ...} shape the controller callers expect
-        return {"ok": True, **(res if isinstance(res, dict) else {})}
-
-
 def _board_from_device_name(device: str) -> str:
     """'HIDBRIDGE-esp32' -> 'esp32', 'HIDBRIDGE-pico' -> 'pico'; fall back to esp32."""
     d = (device or "").lower()
@@ -93,15 +76,15 @@ def _board_from_device_name(device: str) -> str:
 # MCU board (esp32 / pico serial, and net over TCP)
 # --------------------------------------------------------------------------- #
 class McuBoard:
-    """A serial/network MCU running the hidbridge firmware. Device management is JSON-RPC (rpc.py) over
-    the transport's OWN open channel; report relay is the raw transport (raw mode) or the RPC `frames`
-    method (rpc mode)."""
+    """A serial/network MCU running the hidbridge firmware. Both device management AND the drive verbs
+    are JSON-RPC (rpc.py) over the transport's OWN open channel -- the BOARD builds every report (the
+    slot's layout applies board-side). The raw frame transport is kept only for the board-level radio
+    ops (advertise/net-status/ping)."""
 
-    def __init__(self, *, transport_factory=None, mode="raw", transport=None, rpc_client=None):
+    def __init__(self, *, transport_factory=None, transport=None, rpc_client=None):
         # transport_factory() -> an open frame transport (owns the reset-free channel). Injectables
         # `transport`/`rpc_client` skip the factory + probe for offline tests.
         self._factory = transport_factory
-        self.mode = mode
         self._tp = transport
         self._rpc = rpc_client
         self._info: dict = {}
@@ -251,10 +234,25 @@ class McuBoard:
                 return bool(self._slot_state(slot).get("sub"))
             time.sleep(0.5)
 
-    # ---- report transport (per the drive mode) ----
+    # ---- drive verbs: tell the firmware WHAT; it builds the reports (slot layout applies board-side) ----
+    def type(self, text: str):
+        return self._rpc.type_text(text)
+
+    def key(self, name: str, mod: int = 0):
+        return self._rpc.key(name, mod)
+
+    def move(self, dx: int, dy: int):
+        return self._rpc.move(dx, dy)
+
+    def click(self, button: str = "left"):
+        return self._rpc.click(button)
+
+    def scroll(self, clicks: int):
+        return self._rpc.scroll(clicks)
+
+    # ---- raw frame transport: NOT the drive path; kept for the board-level radio ops (the CLI's
+    #      advertise / net-status / ping go straight to the frame transport). ----
     def transport(self, name=None):
-        if self.mode == "rpc":
-            return _RpcFramesTransport(self._rpc)
         return self._tp
 
 
@@ -265,14 +263,12 @@ class DongleBoard:
     """The host's own BlueZ adapter + the per-adapter ble_hid daemon. Single BLE identity: it holds one
     bonded host at a time and pairs via `pair-mode`, so pair/unpair/rename here are Unsupported."""
 
-    def __init__(self, dongle_id=None, *, mode="raw", allow_builtin=False, link_manager=None,
+    def __init__(self, dongle_id=None, *, allow_builtin=False, link_manager=None,
                  transport=None):
-        if mode == "rpc":
-            raise Unsupported("the dongle backend has no rpc drive path; use mode='raw'")
         from . import conn as _conn
         self._backend = _conn.DongleLinkBackend(dongle_id, allow_builtin=allow_builtin,
                                                 link_manager=link_manager, transport=transport)
-        self.mode = mode
+        self._ctl = None
         self.capabilities = {"max_sessions": 1, "per_device_identity": False, "layouts": True,
                              "medium": "bluez"}
 
@@ -315,6 +311,29 @@ class DongleBoard:
 
     def wait_ready(self, name, timeout) -> bool:
         return self._backend.wait_ready(timeout)
+
+    # ---- drive verbs: no board to delegate to, so build the reports HOST-side (reports.py) and hand
+    #      them to the daemon over the control socket. Same surface as the MCU, host-built. ----
+    def _controller(self):
+        if self._ctl is None:
+            from .controller import HidController
+            self._ctl = HidController(self._backend.transport())
+        return self._ctl
+
+    def type(self, text: str):
+        return self._controller().type_text(text)
+
+    def key(self, name: str, mod: int = 0):
+        return self._controller().send_key(name, mod)
+
+    def move(self, dx: int, dy: int):
+        return self._controller().move(dx, dy)
+
+    def click(self, button: str = "left"):
+        return self._controller().click(button)
+
+    def scroll(self, clicks: int):
+        return self._controller().scroll(clicks)
 
     def transport(self, name=None):
         return self._backend.transport()
@@ -363,20 +382,20 @@ def _net_transport_factory(host, *, token=None, **opts):
     return make
 
 
-def resolve_board(location, *, token=None, mode="raw", allow_builtin=False, **opts):
+def resolve_board(location, *, token=None, allow_builtin=False, **opts):
     """Return a real board object for `location` (see module docstring). Lazy-imports the drivers."""
     family, arg = _classify(location)
     if family == "auto":
         arg = _autodetect_port()
         family = "serial"
     if family == "serial":
-        return McuBoard(transport_factory=_serial_transport_factory(arg, **opts), mode=mode)
+        return McuBoard(transport_factory=_serial_transport_factory(arg, **opts))
     if family == "net":
-        return McuBoard(transport_factory=_net_transport_factory(arg, token=token, **opts), mode=mode)
+        return McuBoard(transport_factory=_net_transport_factory(arg, token=token, **opts))
     if family == "dongle":
         dongle_id = None if _HCI_RE.match(arg or "") is None and not _is_mac(arg or "") else arg
         # a bare "hciN"/MAC is the adapter id; anything else (shouldn't reach here) -> autodetect
-        return DongleBoard(arg, mode=mode, allow_builtin=allow_builtin)
+        return DongleBoard(arg, allow_builtin=allow_builtin)
     raise HidbridgeError(f"cannot resolve a board from location {location!r}")
 
 

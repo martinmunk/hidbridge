@@ -7,7 +7,7 @@ Two levels, mirroring the hardware:
     `bridge.capabilities`. The bridge also does device management: list_devices / pair / unpair.
   * a **HidSession** is one connect-on-demand link to a bonded host. `bridge.connect(name)` advertises
     that identity, waits until it is ready, and hands back a session you drive (type/key/move/click/
-    unlock). Leaving the `with` disconnects it but keeps the bond -- no idle connections.
+    scroll). Leaving the `with` disconnects it but keeps the bond -- no idle connections.
 
 For the single-host case, `hidbridge.session(location, device)` is a shorthand that opens the bridge,
 connects the one device, and yields the HidSession (tearing both down on exit).
@@ -16,16 +16,16 @@ Multiple sessions can be open at once when the board supports it (the ESP32 hold
 otherwise `connect()` raises. Errors are typed: NotBonded / ConnectTimeout / Unsupported /
 CapacityError, all under HidbridgeError.
 
-Report mode defaults to "raw" (the host builds the exact bytes via reports.py and the board relays
-them as K/M frame lines -- offline byte-parity); mode="rpc" relays the same host-built bytes via the
-board's JSON-RPC `frames` method instead. See docs/bt-hid-modes.md.
+The caller speaks ONE high-level vocabulary (type/key/move/click/scroll); WHO builds the report bytes
+is a backend detail the caller never sees. An MCU board (esp32/pico/net) delegates each verb to the
+firmware's JSON-RPC methods so the BOARD builds the reports -- and the target slot's per-slot keyboard
+layout applies board-side. A BlueZ dongle has no board to delegate to, so it builds the bytes
+host-side (reports.py) transparently. Either way the session surface is identical.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
-
-from .controller import HidController
 
 DEFAULT_CONNECT_TIMEOUT = 20.0
 
@@ -59,14 +59,17 @@ class CapacityError(HidbridgeError):
 # --------------------------------------------------------------------------- #
 class HidSession:
     """One connected host, for the duration of a `with`. Enter = already connected + ready (the work
-    happened in HidBridge.connect); exit = disconnect, bond kept. Drive it with type/key/move/click/
-    scroll/unlock."""
+    happened in HidBridge.connect); exit = disconnect, bond kept.
+
+    The surface is exactly the high-level drive verbs -- type/key/move/click/scroll -- each a thin
+    pass-through to the board, which owns report building (an MCU builds them on the firmware with the
+    slot's layout; the dongle builds them host-side). "Unlock an iPad" is an APPLICATION concept, not
+    a HID primitive: type the passcode like any other text (`s.type(pin); s.key("enter")`)."""
 
     def __init__(self, bridge: "HidBridge", board, name: str):
         self._bridge = bridge
         self._board = board
         self.name = name
-        self._ctl = HidController(board.transport(name))
         self._closed = False
 
     def __enter__(self) -> "HidSession":
@@ -81,29 +84,21 @@ class HidSession:
             self._closed = True
             self._bridge._release(self)
 
-    @property
-    def controller(self) -> HidController:
-        """The underlying HidController (for scripted timelines / dismiss_trust plans)."""
-        return self._ctl
-
-    # ---- drive (thin, well-named wrappers over HidController) ----
+    # ---- drive (tell the board WHAT; it builds + sends) ----
     def type(self, text: str):
-        return self._ctl.type_text(text)
+        return self._board.type(text)
 
     def key(self, name: str, mod: int = 0):
-        return self._ctl.send_key(name, mod)
+        return self._board.key(name, mod)
 
     def move(self, dx: int, dy: int):
-        return self._ctl.move(dx, dy)
+        return self._board.move(dx, dy)
 
     def click(self, button: str = "left"):
-        return self._ctl.click(button)
+        return self._board.click(button)
 
     def scroll(self, clicks: int):
-        return self._ctl.scroll(clicks)
-
-    def unlock(self, passcode: str, press_enter: bool = True):
-        return self._ctl.unlock(passcode, press_enter=press_enter)
+        return self._board.scroll(clicks)
 
 
 # --------------------------------------------------------------------------- #
@@ -121,11 +116,10 @@ class HidBridge:
     real board driver. Construction is cheap -- all I/O happens on `with` (prepare + probe).
     """
 
-    def __init__(self, location=None, *, backend=None, mode: str = "raw", token=None, **opts):
+    def __init__(self, location=None, *, backend=None, token=None, **opts):
         self.location = location
-        self.mode = mode
         self._board = (backend if backend is not None
-                       else _resolve_board(location, token=token, mode=mode, **opts))
+                       else _resolve_board(location, token=token, **opts))
         self.info: dict = {}
         self._sessions: list[HidSession] = []
 
@@ -198,15 +192,15 @@ def session(location, device, *, timeout: float = DEFAULT_CONNECT_TIMEOUT, **opt
     """Open a board, connect ONE bonded `device`, and yield the HidSession; tear both down on exit.
 
     For the single-host case where you do not need the bridge itself (list_devices / pair / multi).
-    `opts` pass through to HidBridge (backend=, mode=, token=, ...).
+    `opts` pass through to HidBridge (backend=, token=, ...).
     """
     with HidBridge(location, **opts) as bridge:
         with bridge.connect(device, timeout=timeout) as sess:
             yield sess
 
 
-def _resolve_board(location, *, token=None, mode="raw", **opts):
+def _resolve_board(location, *, token=None, **opts):
     # Lazy-import the real drivers so `import hidbridge` stays free of serial/dbus deps (bridge.py
-    # itself imports only the stdlib-clean controller/reports layers at module load).
+    # itself imports only the stdlib at module load).
     from .board import resolve_board
-    return resolve_board(location, token=token, mode=mode, **opts)
+    return resolve_board(location, token=token, **opts)
