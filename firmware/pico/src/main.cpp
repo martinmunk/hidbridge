@@ -8,11 +8,12 @@
  * input reports (a CCCD / Report-Reference GATT quirk); the Pico's HOG stack does it right.
  *
  * The device advertises as "HIDBRIDGE-pico" (distinct from the dongle's "HIDBRIDGE-dongle"). The host
- * (wsb) drives it over USB-CDC serial with a tiny ASCII line protocol -- ONE HID report per line --
- * so python/src/hidbridge/reports.py stays the SINGLE SOURCE OF TRUTH for the report bytes:
+ * (wsb) drives it over USB-CDC serial with a tiny ASCII line protocol, routed by the FIRST char:
+ * a line starting '{' is JSON-RPC (the BOARD builds the report -- type/key/move/click/scroll, the
+ * slot's layout applies board-side; builders in ../../shared/hidbridge_rpc.h), else it is one of
+ * these single-char DEVICE commands. (The old host-builds K/M frame relay was removed; the board is
+ * in charge of the reports now.)
  *
- *     K <16 hex>\n   keyboard report    (8-byte boot body: mod,resv,k1..k6)         -> report ID 1
- *     M <8 hex>\n    relative mouse      (4-byte body: buttons,dx,dy,wheel)          -> report ID 2
  *     P\n            ping  -> replies "PONG name=HIDBRIDGE-pico conn=<0|1>"
  *     I<n>[:name]\n  select host SLOT n as the advertising identity (+ optional name) + advertise
  *                    -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
@@ -81,13 +82,6 @@ static const uint8_t HID_REPORT_MAP[] = {
     // WSB-HID-REPORT-MAP-END
 };
 
-// reports.py report body lengths (bytes AFTER the report ID) for each kind.
-static const int KBD_BODY = 8;        // mod,resv,k1..k6                        -> report ID 1
-static const int MOUSE_BODY = 4;      // buttons,dx,dy,wheel                    -> report ID 2
-
-// reportIDs -- MUST match the report map above / reports.py.
-static const uint8_t RID_KEYBOARD = 1;
-static const uint8_t RID_MOUSE = 2;
 
 // ---- Per-bond IDENTITY (host slots) ----------------------------------------------------------- //
 // Number of BLE host slots (distinct identities). Slot 0 = native public address; slots >=1 =
@@ -191,41 +185,9 @@ static void addr_hex(const bd_addr_t a, char *out, size_t cap) {
     snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-#define LINE_MAX 1024   // >= a JSON-RPC line (rpc); raw frames are tiny
+#define LINE_MAX 1024   // >= a JSON-RPC line; single-char commands are tiny
 static char line_buf[LINE_MAX];
 static int  line_len = 0;
-
-static int hexval(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-// Parse a (whitespace-tolerant) hex string into out[]. Returns byte count, or -1 on bad
-// nibble / odd length / overflow.
-static int parse_hex(const char *s, uint8_t *out, int max) {
-    int n = 0;
-    while (*s) {
-        if (*s == ' ' || *s == '\t') { s++; continue; }
-        int hi = hexval(*s++);
-        if (!*s) return -1;             // odd number of nibbles
-        int lo = hexval(*s++);
-        if (hi < 0 || lo < 0) return -1;
-        if (n >= max) return -1;
-        out[n++] = (uint8_t)((hi << 4) | lo);
-    }
-    return n;
-}
-
-// Emit one HID input report: [reportID | body] as a BLE HID notification, ack OK/ERR.
-static void send_report(uint8_t report_id, const uint8_t *body, int body_len) {
-    uint8_t report[1 + 8];   // 8 = max body (keyboard); mouse(4) fits
-    report[0] = report_id;
-    memcpy(report + 1, body, body_len);
-    bool ok = PicoBluetoothBLEHID.send(report, 1 + body_len);
-    Serial.println(ok ? "OK" : "ERR notconnected");
-}
 
 // ---- rpc (JSON-RPC): builders + dispatch live in ../../shared/hidbridge_rpc.h; the Pico
 // provides only the BLE-notify sink + its capabilities. Serial-only, so always authenticated. ----
@@ -350,17 +312,9 @@ static void handle_line(char *line) {
         return;
     }
 
-    uint8_t body[8];
-    int n = parse_hex(line + 1, body, sizeof(body));
-    if (kind == 'K' || kind == 'k') {
-        if (n != KBD_BODY) { Serial.println("ERR badframe"); return; }
-        send_report(RID_KEYBOARD, body, KBD_BODY);
-    } else if (kind == 'M' || kind == 'm') {
-        if (n != MOUSE_BODY) { Serial.println("ERR badframe"); return; }
-        send_report(RID_MOUSE, body, MOUSE_BODY);
-    } else {
-        Serial.println("ERR unknowncmd");
-    }
+    // The MCU wire speaks JSON-RPC (the board builds the reports, above) + these single-char device
+    // commands. The old host-builds K/M frame relay was removed -- an unrecognised command is refused.
+    Serial.println("ERR unknowncmd");
 }
 
 void setup() {

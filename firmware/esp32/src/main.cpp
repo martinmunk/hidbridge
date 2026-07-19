@@ -23,9 +23,10 @@
 // built with -DHIDBRIDGE_NET) over TCP on port 3333. A command is answered on the channel it arrived
 // on; async EVT lines are broadcast to serial + every AUTHENTICATED network client. See "NETWORK".
 //
-// SERIAL PROTOCOL (115200 baud, newline-terminated ASCII lines; host -> ESP32):
-//   K<hex>   keyboard report body, 8 bytes = 16 hex chars  -> notify keyboard input report
-//   M<hex>   mouse report body, 4 bytes = 8 hex chars       -> notify mouse input report
+// SERIAL PROTOCOL (115200 baud, newline-terminated ASCII lines; host -> ESP32). A line is routed by
+// its FIRST char: '{' = JSON-RPC (the BOARD builds the report -- type/key/move/click/scroll, the
+// slot's layout applies board-side; builders in ../../shared/hidbridge_rpc.h), else a single-char
+// DEVICE command below. (The old host-builds K/M frame relay was removed; the board is in charge.)
 //   P        ping                        -> "OK HIDBRIDGE-esp32 subscribed=<0|1> conn=<0|1>"
 //   A        (re)start advertising                          -> "OK adv"
 //   V        version/status                                 -> "OK HIDBRIDGE-esp32 <state>"
@@ -33,7 +34,7 @@
 //   O        park: stop advertising, keep connections + bonds -> "OK parked"
 //   I<n>[:name]  select host SLOT n as the advertising identity (+ optional per-slot name) + advertise
 //                -> "OK slot=<n> addr=<12hex> name=<name> conn=<0|1>"
-//   T<n>     set the SEND-target slot (K/M notify ONLY that slot's connection) -> "OK tgt=<n>"
+//   T<n>     set the SEND-target slot (JSON-RPC reports notify ONLY that slot's connection) -> "OK tgt=<n>"
 //   S        slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=1 c0=<0|1> c1=.. s0=<0|1> s1=.."
 //   N        network status -> "OK net eth=<0|1> ip=<a.b.c.d> port=<n> mdns=<host> token=<0|1>
 //                              clients=<n>"   (eth=0 / ip=0.0.0.0 on a build without -DHIDBRIDGE_NET)
@@ -313,8 +314,6 @@ static const uint8_t REPORT_MAP[] = {
 
 static const uint8_t KBD_REPORT_ID = 1;
 static const uint8_t MOUSE_REPORT_ID = 2;
-static const size_t  KBD_BODY_LEN = 8;
-static const size_t  MOUSE_BODY_LEN = 4;
 
 static NimBLEHIDDevice*    hid = nullptr;
 static NimBLECharacteristic* inputKbd = nullptr;
@@ -325,7 +324,7 @@ static NimBLEServer*       server = nullptr;
 // slotAddr[0] = native public address (captured at setup); slotAddr[k>=1] = derived static-random.
 // slotConn[k] = the conn handle of the central connected on slot k (or NONE). slotSub[k] = iOS has
 // enabled the keyboard report CCCD on slot k (readiness). advSlot = the slot currently ADVERTISING;
-// g_activeTarget = the slot the IN-FLIGHT dispatch notifies K/M to (see below). slotName[k] = that
+// g_activeTarget = the slot the IN-FLIGHT dispatch notifies reports to (see below). slotName[k] = that
 // slot's advertised name.
 static NimBLEAddress       slotAddr[NUM_SLOTS];
 static uint16_t            slotConn[NUM_SLOTS];
@@ -343,7 +342,7 @@ static int                 advSlot = 0;
 // ROUTING is PER SESSION now, not one global drive target. g_activeTarget holds the slot the CURRENTLY
 // DISPATCHING line routes reports to (notifyTarget reads it): the dispatcher loads it from the calling
 // session's claimed slot BEFORE the line and stores any change back AFTER (a connect/pair/T moves the
-// session's single claim). -1 = the caller claims no slot yet (K/M answer "OK noconn").
+// session's single claim). -1 = the caller claims no slot yet (JSON-RPC reports answer "conn":false).
 static int                 g_activeTarget = -1;
 // The USB SERIAL channel is itself one persistent session, so it owns ONE claimed slot exactly like a
 // TCP session or a WS client (-1 = none). Serial never "closes", so its claim only moves, it is never
@@ -753,26 +752,6 @@ void setup() {
 #endif
 }
 
-// ---- hex helpers ----
-static int hexNibble(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-  return -1;
-}
-
-// Parse `hex` (2*expect chars) into out[expect]. Returns true on success.
-static bool parseHexBody(const String& hex, uint8_t* out, size_t expect) {
-  if (hex.length() != expect * 2) return false;
-  for (size_t i = 0; i < expect; i++) {
-    int hi = hexNibble(hex[2 * i]);
-    int lo = hexNibble(hex[2 * i + 1]);
-    if (hi < 0 || lo < 0) return false;
-    out[i] = (uint8_t)((hi << 4) | lo);
-  }
-  return true;
-}
-
 // Format a NimBLEAddress as 12 hex chars, MSB first (val[] is little-endian, so print val[5..0]).
 static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
   const uint8_t* v = a.getBase()->val;
@@ -782,7 +761,7 @@ static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
 // Notify ONE report to the ACTIVE target slot's central. Returns true if it actually notified (a
 // central is connected on that slot), false if there was none. Routes via g_activeTarget, which the
 // dispatcher has set to the CALLING SESSION's claimed slot before this line -- so two sessions driving
-// two slots each hit their own central. Shared by raw (raw frame relay) and rpc (below).
+// two slots each hit their own central. The rpc BLE-notify sink (esp32Notify, below) calls it.
 static bool notifyTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len) {
   if (chr == nullptr) return false;
   chr->setValue((uint8_t*)body, len);
@@ -799,11 +778,6 @@ static NimBLECharacteristic* charForReportId(uint8_t rid) {
     case MOUSE_REPORT_ID:     return inputMouse;
   }
   return nullptr;
-}
-
-static void sendReportToTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len,
-                               Print& out) {
-  out.println(notifyTarget(chr, body, len) ? "OK" : "OK noconn");
 }
 
 static bool anyConnected() {
@@ -1161,7 +1135,7 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
     hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
-  char cmd = line[0];                                               // raw: single-char frames
+  char cmd = line[0];                                               // single-char device command
   String arg = line.substring(1);
 
 #ifdef HIDBRIDGE_NET
@@ -1170,15 +1144,10 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
   (void)sess;
 #endif
 
-  if (cmd == 'K') {
-    uint8_t body[KBD_BODY_LEN];
-    if (!parseHexBody(arg, body, KBD_BODY_LEN)) { out.println("ERR badkbd"); return; }
-    sendReportToTarget(inputKbd, body, KBD_BODY_LEN, out);
-  } else if (cmd == 'M') {
-    uint8_t body[MOUSE_BODY_LEN];
-    if (!parseHexBody(arg, body, MOUSE_BODY_LEN)) { out.println("ERR badmouse"); return; }
-    sendReportToTarget(inputMouse, body, MOUSE_BODY_LEN, out);
-  } else if (cmd == 'P') {
+  // Reports are built by the board over JSON-RPC (above); the single-char commands here are device
+  // management (advertise/select-slot/status/park/provision/auth). The old host-builds K/M frame
+  // relay was removed -- an unrecognised command falls through to "ERR unknown".
+  if (cmd == 'P') {
     // Report the CALLING session's active-target slot state (g_activeTarget; -1 => sub/con both 0).
     // subscribed= BEFORE conn= so a legacy host's endswith("conn=1") parse still works.
     bool sub = (g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) && slotSub[g_activeTarget];
@@ -1213,7 +1182,7 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
     out.print(" conn=");
     out.println(slotConn[n] != BLE_HS_CONN_HANDLE_NONE ? "1" : "0");
   } else if (cmd == 'T') {
-    // T<n> -- CLAIM slot n for THIS session: route its subsequent K/M reports to slot n's connection.
+    // T<n> -- CLAIM slot n for THIS session: route its subsequent JSON-RPC reports to slot n's connection.
     // Unlike connect it does NOT advertise/bring the slot up (it assumes an already-live central); it
     // just moves this session's single claim (handleLine/finishRoute parks the old slot iff last claimer).
     int n = arg.toInt();
@@ -1285,7 +1254,7 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
 }
 
 // The single per-session entry for serial + TCP lines. Before dispatch, load THIS session's claimed
-// slot into the routing global g_activeTarget (so its K/M + rpc reports hit ITS target); after
+// slot into the routing global g_activeTarget (so its JSON-RPC reports hit ITS target); after
 // dispatch, store back any claim the line moved (connect/pair/T/disconnect/X) and ref-count-park a
 // released slot (finishRoute). Serial (sess == nullptr) uses the one g_serialDrivenSlot; a TCP session
 // uses its own drivenSlot. This is the SAME before/after-dispatch pattern the WS path (wsOnText) uses.

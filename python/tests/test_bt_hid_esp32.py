@@ -199,6 +199,19 @@ def _strip_ws(s: str) -> str:
 #   (c) no stateless driving: the HTTP /rpc drive endpoint is gone (driving is WS/TCP/serial only);
 #   (d) fail-closed auth: an UNauthenticated WS client can still reach only `hello`.
 # --------------------------------------------------------------------------- #
+def test_line_dispatcher_has_no_km_frame_handlers():
+    """The MCU wire no longer accepts host-built K/M report frames -- the board builds every report from
+    JSON-RPC now (the host `type`/`key`/`move` verbs). Guard: the single-char line dispatcher has no
+    'K'/'M' branch; a re-added one would resurrect the removed raw relay (and a second, drift-prone
+    report path alongside reports.py / hidbridge_rpc.h)."""
+    src = _strip_ws((ROOT / "firmware/esp32/src/main.cpp").read_text())
+    assert "cmd=='K'" not in src and "cmd=='M'" not in src, (
+        "the line dispatcher must not handle 'K'/'M' frame lines -- the host-builds K/M relay was removed")
+    raw = (ROOT / "firmware/esp32/src/main.cpp").read_text()
+    assert "parseHexBody" not in raw and "sendReportToTarget" not in raw, (
+        "the K/M-only hex-body parser + report sender must be gone with the K/M branches")
+
+
 def test_notify_target_routes_via_active_session_target():
     """(a) notifyTarget must route to g_activeTarget -- the slot the dispatcher set from the CALLING
     session's claim before this line -- so two sessions driving two slots each hit their own central.

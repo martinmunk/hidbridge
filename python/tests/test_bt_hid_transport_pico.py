@@ -216,6 +216,17 @@ def test_firmware_report_map_matches_reports_descriptor():
     assert _extract_firmware_report_map() == R.REPORT_DESCRIPTOR
 
 
+def test_firmware_line_handler_has_no_km_frame_relay():
+    """The Pico MCU wire no longer accepts host-built K/M report frames -- the board builds every report
+    from JSON-RPC now. Guard: handle_line has no 'K'/'M' branch and the K/M-only hex parser / report
+    sender are gone (a re-added relay would drift from reports.py / hidbridge_rpc.h)."""
+    src = _FIRMWARE_MAIN.read_text()
+    assert "kind == 'K'" not in src and "kind == 'M'" not in src, (
+        "handle_line must not relay 'K'/'M' frame lines -- the host-builds K/M relay was removed")
+    assert "parse_hex" not in src and "send_report" not in src, (
+        "the K/M-only hex parser + send_report helper must be gone with the K/M branch")
+
+
 # --------------------------------------------------------------------------- #
 # Generic backend loader entry point: `bt_hid --backend pico` routes through
 # controller.make_transport("pico") -> transport_pico.make_transport(), so the Pico must expose the
