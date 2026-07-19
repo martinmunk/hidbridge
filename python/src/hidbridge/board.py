@@ -410,11 +410,15 @@ def _is_pico_port(port) -> bool:
     ESP32 bridge (/dev/ttyUSB*, CP210x/FT2232) instead needs the reset-free B0 open (DTR de-asserted),
     so the transport family is keyed off this."""
     from . import transport_pico as TP
-    base = os.path.basename(str(port or ""))
+    # Resolve /dev/serial/by-id/... symlinks (the stable path we hand out) to the real /dev/ttyACMx
+    # BEFORE the basename check -- a by-id path's basename is "usb-...-if00", not "ttyACM*", so without
+    # this a by-id Pico location falls back to the ESP32 transport and the Pico's CDC never transmits.
+    real = os.path.realpath(str(port or ""))
+    base = os.path.basename(real)
     if not base.startswith("ttyACM"):
         return False
     try:
-        return TP._tty_usb_vendor(port) == TP._PICO_USB_VENDOR
+        return TP._tty_usb_vendor(real) == TP._PICO_USB_VENDOR
     except OSError:
         return False
 

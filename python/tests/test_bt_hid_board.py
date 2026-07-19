@@ -389,6 +389,18 @@ def test_is_pico_port_only_for_ttyacm_raspberry_vid(monkeypatch):
     assert B._is_pico_port("/dev/ttyUSB3") is False                  # ttyUSB is never a Pico
 
 
+def test_is_pico_port_resolves_by_id_symlink(tmp_path, monkeypatch):
+    import os
+    import hidbridge.transport_pico as TP
+    # /dev/serial/by-id/usb-Raspberry_Pi_Pico_2W_...-if00 is a SYMLINK to /dev/ttyACMx (the stable path
+    # we hand out). _is_pico_port must resolve it BEFORE the ttyACM basename check -- else a by-id
+    # location falls back to the ESP32 transport (DTR de-asserted) and the Pico's CDC never transmits.
+    link = tmp_path / "usb-Raspberry_Pi_Pico_2W_0169ABE90D273D42-if00"
+    os.symlink("/dev/ttyACM7", link)
+    monkeypatch.setattr(TP, "_tty_usb_vendor", lambda dev: "2e8a")
+    assert B._is_pico_port(str(link)) is True
+
+
 def test_serial_factory_selects_pico_transport_for_pico_port(monkeypatch):
     import hidbridge.transport_pico as TP
     monkeypatch.setattr(TP, "_tty_usb_vendor", lambda dev: "2e8a")
