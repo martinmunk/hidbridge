@@ -23,7 +23,6 @@ from hidbridge.transport_pico import (  # noqa: E402
     autodetect_port,
     decode_frame,
     encode_frame,
-    encode_ping,
 )
 
 
@@ -95,8 +94,8 @@ def test_decode_is_inverse_of_encode():
         assert decode_frame(encode_frame(kind, body)) == (kind, body)
 
 
-def test_encode_ping_and_ack_parsing():
-    assert encode_ping() == b"P\n"
+def test_ack_parsing():
+    # (encode_ping() was removed -- the single-char `P` ping is gone; ack_is_ok still gates send().)
     assert ack_is_ok(b"OK\n") is True
     assert ack_is_ok(b"ok\r\n") is True
     assert ack_is_ok(b"ERR notconnected\n") is False
@@ -128,14 +127,6 @@ def test_send_without_ack_does_not_read():
     resp = t.send([("mouse", bytes([0, 1, 2, 3]))])
     assert resp == {"ok": True, "sent": 1}
     assert fake.written == b"M 00010203\n"
-
-
-def test_ping_returns_pong_line():
-    t, fake = _transport(replies=[b"PONG name=HIDBRIDGE-pico conn=1\n"])
-    resp = t.ping()
-    assert resp["ok"] is True
-    assert resp["reply"] == "PONG name=HIDBRIDGE-pico conn=1"
-    assert fake.written == b"P\n"
 
 
 def test_persist_false_closes_after_send():

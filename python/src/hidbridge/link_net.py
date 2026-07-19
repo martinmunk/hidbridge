@@ -1,22 +1,17 @@
-"""NETWORK MCU link backend for HidSession (bt_hid.conn) -- connect-on-demand over TCP.
+"""NETWORK MCU link backend for HidSession (bt_hid.conn) -- LEGACY, capability shim only.
 
 The network twin of `link_esp32`: an Ethernet-equipped ESP32 running the same NimBLE HID firmware,
-reached over the LAN instead of USB. It subclasses Esp32LinkBackend and swaps only the transport
-(NetTransport instead of the serial Esp32Transport) and the reset-free-serial concerns that do not
-apply to a socket -- the connect / disconnect / readiness / host-slot lifecycle is identical, because
-it is the same board speaking the same protocol.
-
-    from hidbridge import HidBridge
-    with HidBridge("hidbridge-esp32.local") as b, b.connect("My iPad") as hid:
-        hid.type_text("hello"); hid.send_key("enter")
+reached over the LAN instead of USB. SUPERSEDED like its serial sibling -- the drive lifecycle now
+lives in `board.McuBoard` over JSON-RPC. This module is kept ONLY so
+`conn.make_link_backend("net:...")` auto-loads it and `targets.py` reads its static `capabilities`
+dict. It subclasses Esp32LinkBackend and swaps only the transport (NetTransport instead of the serial
+Esp32Transport); the removed single-char drive methods are inherited as superseded stubs.
 
 `conn.make_link_backend("net:...")` auto-loads this module. The auth token is NOT in the target
 string; it comes from ~/.config/bt_hid/net.token / BT_HID_NET_TOKEN (see transport_net.load_token).
 """
 
 from __future__ import annotations
-
-import time
 
 from .conn import BtHidError
 from .link_esp32 import Esp32LinkBackend
@@ -42,21 +37,6 @@ class NetLinkBackend(Esp32LinkBackend):
             self._tp = make_transport(**opts)      # opens the TCP channel + authenticates
         except Exception as e:  # noqa: BLE001
             raise BtHidError(f"net backend not ready: {e}") from e
-
-    def disconnect(self):
-        # Same as the serial backend minus the leave-tty-at-B0 dance (there is no tty): drop the BLE
-        # central (firmware 'X', bond kept), then close the socket.
-        if self._tp is None:
-            return
-        try:
-            self._tp.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        time.sleep(0.2)
-        try:
-            self._tp.close()
-        finally:
-            self._tp = None
 
     def describe(self) -> str:
         return f"net (nimble-hog over tcp, {self._host or 'auto'})"

@@ -87,18 +87,17 @@ def test_hw_open_does_not_reset_board():
     time.sleep(0.4)
 
     def open_and_check_banner():
+        # No single-char ping any more (folded into JSON-RPC); the no-reset assertion needs only the
+        # open path -- _rebooted_on_open is set by _settle() draining (or NOT) a boot banner.
         tp = TE.Esp32Transport(port=_PORT, timeout=1.0)
         try:
-            # a live board answers P immediately with its conn state
-            st = tp.ping()
-            return tp._rebooted_on_open, st
+            return tp._rebooted_on_open
         finally:
             tp.close()
 
     for _ in range(2):
-        rebooted, st = open_and_check_banner()
+        rebooted = open_and_check_banner()
         assert rebooted is False, "board rebooted on open -- no-reset regression!"
-        assert st["ok"] and "conn=" in st["resp"]
         time.sleep(0.6)
 
 
@@ -123,8 +122,6 @@ def test_hw_ftdi_open_does_not_reset_board():
         tp = TE.Esp32Transport(port=_FTDI_PORT, timeout=1.0)
         try:
             assert tp._rebooted_on_open is False, "Ethernet-Kit rebooted on open -- regression!"
-            st = tp.ping()
-            assert st["ok"] and "conn=" in st["resp"]
         finally:
             tp.close()
         time.sleep(0.6)

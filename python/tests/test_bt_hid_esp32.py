@@ -101,11 +101,8 @@ def test_transport_skips_async_evt_lines():
     assert resp["ok"] and resp["sent"] == 1
 
 
-def test_ping_parses_connection_state():
-    fake = FakeSerial(replies=[b"OK HIDBRIDGE-esp32 conn=1\n"])
-    tp = TE.Esp32Transport(port=fake)
-    resp = tp.ping()
-    assert resp["ok"] and resp["connected"] is True
+# (The single-char `P` ping test was removed: transport.ping() is gone -- the firmware no longer
+# speaks the single-char device protocol; ping/status is a JSON-RPC method on board.McuBoard now.)
 
 
 # --------------------------------------------------------------------------- #

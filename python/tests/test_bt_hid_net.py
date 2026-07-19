@@ -101,69 +101,10 @@ def test_network_report_frames_match_reports_layer():
     assert t._ser.written[1:] == expected     # [0] is the @auth line
 
 
-# --------------------------------------------------------------------------- #
-# N (net status) reply parsing
-# --------------------------------------------------------------------------- #
-def test_parse_net_status():
-    st = TN.NetTransport(host=None, open_now=False, token=None)
-    st._ser = FakeChannel(
-        [b"OK net eth=1 ip=192.0.2.42 port=3333 mdns=hidbridge-esp32.local token=1 clients=2\n"])
-    got = st.net_status()
-    assert got["ok"] and got["eth"] is True and got["ip"] == "192.0.2.42"
-    assert got["port"] == 3333 and got["mdns"] == "hidbridge-esp32.local"
-    assert got["token"] is True and got["clients"] == 2
-
-
-def test_net_status_on_serial_only_firmware():
-    from hidbridge.transport_esp32 import parse_net_status
-    got = parse_net_status("OK net eth=0 ip=0.0.0.0 port=0 mdns= token=0 clients=0")
-    assert got["ok"] and got["eth"] is False and got["token"] is False
-
-
-# --------------------------------------------------------------------------- #
-# token provisioning framing (W<token>) -- serial only, min length, no newline
-# --------------------------------------------------------------------------- #
-def test_encode_set_token_ok():
-    from hidbridge.transport_esp32 import encode_set_token
-    assert encode_set_token("abcdefgh") == b"Wabcdefgh\n"
-
-
-@pytest.mark.parametrize("bad", ["short", "", "has\nnewline12"])
-def test_encode_set_token_rejects_bad(bad):
-    from hidbridge.transport_esp32 import Esp32Error, encode_set_token
-    with pytest.raises(Esp32Error):
-        encode_set_token(bad)
-
-
-# The TLS firmware answers `W<token>` with an ack that varies by whether the TLS port could be brought
-# up right then: "OK token set (TLS enabled)" on a fresh board provisioned live, "(reboot to apply as
-# the new TLS key)" when a key is already baked in, "(reboot to enable TLS)" if bring-up failed, or a
-# bare "OK token set" from older firmware. set_net_token must treat EVERY "OK..." as success (so
-# `net-provision` does not falsely report failure) and must NEVER surface the token in the ack.
-@pytest.mark.parametrize("ack", [
-    b"OK token set (TLS enabled)\n",
-    b"OK token set (reboot to apply as the new TLS key)\n",
-    b"OK token set (reboot to enable TLS)\n",
-    b"OK token set\n",
-])
-def test_set_net_token_accepts_all_tls_acks_without_leaking(ack):
-    from hidbridge.transport_esp32 import Esp32Transport
-    t = Esp32Transport(port=None, open_now=False)
-    t._ser = FakeChannel([ack])
-    res = t.set_net_token("supersecrettoken")
-    assert res["ok"] is True                       # every OK-ack is provisioning success
-    assert "supersecrettoken" not in res["resp"]   # the board never echoes the token
-    assert t._ser.written[0] == b"Wsupersecrettoken\n"   # W<token> framing went out
-
-
-def test_set_net_token_board_rejection_is_not_ok():
-    # a board that rejects the token (e.g. too short for its own guard) must read as failure so
-    # `net-provision` exits non-zero rather than claiming success.
-    from hidbridge.transport_esp32 import Esp32Transport
-    t = Esp32Transport(port=None, open_now=False)
-    t._ser = FakeChannel([b"ERR shorttoken\n"])
-    res = t.set_net_token("abcdefgh")
-    assert res["ok"] is False
+# NOTE: the net-status (`N`) reply parsing + token-provisioning (`W<token>`) framing tests were
+# REMOVED here: those single-char device commands are gone from the firmware (net status +
+# provisioning are now JSON-RPC methods on board.McuBoard / rpc.py), so the transport no longer
+# carries parse_net_status / net_status / encode_set_token / set_net_token.
 
 
 # --------------------------------------------------------------------------- #

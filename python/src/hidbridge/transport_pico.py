@@ -9,16 +9,16 @@ Bluetooth dongle can still wake / unlock / type / click an iPad-iPhone-Mac.
 
 The Pico runs the firmware in `firmware/pico/` (BTstack HOG, advertising as `HIDBRIDGE-pico` -- a
 distinct name so it does NOT collide with the dongle's `HIDBRIDGE-dongle`). The production drive path
-is JSON-RPC (`board.McuBoard` + `rpc.py`): the BOARD builds every report. This module owns the
-radio/device-mgmt side of the same USB-CDC serial channel (ping/status/slots) plus a pure host-side
-report FRAMER (`encode_frame`/`decode_frame`/`send`) kept for the offline byte-parity tests + the
-central self-test's encodability check. NOTE: the firmware NO LONGER accepts K/M frame lines on the
-wire (the host-builds relay was removed); `send()` is a host encoder, not a live MCU drive path.
+is JSON-RPC (`board.McuBoard` + `rpc.py`): the BOARD builds every report AND owns advertising /
+device management. This module is now JUST a pure host-side report FRAMER
+(`encode_frame`/`decode_frame`/`send`) kept for the offline byte-parity tests + the central
+self-test's encodability check. NOTE: the firmware NO LONGER accepts K/M frame lines on the wire (the
+host-builds relay was removed) and NO LONGER speaks the single-char device commands (P/I/T/S/X/O --
+all folded into JSON-RPC); `send()` is a host encoder, not a live MCU drive path.
 
-Line protocol (ASCII, `\n`-terminated), host -> Pico. A line is routed by its FIRST char: '{' =
-JSON-RPC (the board builds the report), else a single-char command:
-    P            ping           -> Pico replies e.g. `PONG name=HIDBRIDGE-pico conn=1`
-Pico -> host reply, one line per command: `OK` on success, `ERR <reason>` on failure.
+Line protocol (ASCII, `\n`-terminated), host -> Pico: a line is routed by its FIRST char -- '{' =
+JSON-RPC (the board builds the report + manages the radio). That is the only protocol the firmware
+speaks now.
 
 `pyserial` is imported LAZILY (only when actually opening a port), so the pure framing helpers +
 their offline tests run with no serial dependency and no hardware.
@@ -70,80 +70,6 @@ def decode_frame(line: bytes) -> tuple[str, bytes]:
     if len(body) != _KIND_BODYLEN[kind]:
         raise ValueError(f"bad {kind} body length in {line!r}")
     return kind, body
-
-
-def encode_ping() -> bytes:
-    return b"P\n"
-
-
-# --------------------------------------------------------------------------- #
-# Per-bond IDENTITY (host-slot) commands -- pure framing + reply parsers.
-#
-# Same wire protocol as the ESP32 (transport_esp32) so the host side is symmetric:
-#   I<n>  select slot n as the advertising identity + (re)advertise -> "OK slot=<n> addr=<hex> conn="
-#   T<n>  send-target slot -> "OK tgt=<n>"
-#   S     slots status -> "OK slots=<N> adv=<n> tgt=<n> multi=<0|1> c0=.. s0=.."
-# On the Pico (BTstack) slot 0 is the native CYW43439 public address (existing bond preserved) and
-# slots >=1 are static-random addresses set via gap_random_address_set(). NOTE the arduino-pico
-# PicoBluetoothBLEHID wrapper tracks a SINGLE con handle, so the Pico reports multi=0 (deterministic
-# time-sliced slot selection, not simultaneous hold -- see docs/bt-hid-mcu-approach.md).
-# --------------------------------------------------------------------------- #
-def encode_slot_select(slot: int, name: str | None = None) -> bytes:
-    """`I<n>` / `I<n>:<name>` -- select slot n + optionally set its target-scoped advertised name."""
-    if not isinstance(slot, int) or slot < 0:
-        raise ValueError(f"slot must be a non-negative int, got {slot!r}")
-    if name:
-        if ":" in name or "\n" in name:
-            raise ValueError(f"slot name must not contain ':' or newline, got {name!r}")
-        return f"I{slot}:{name}\n".encode("ascii")
-    return f"I{slot}\n".encode("ascii")
-
-
-def encode_slot_target(slot: int) -> bytes:
-    if not isinstance(slot, int) or slot < 0:
-        raise ValueError(f"slot must be a non-negative int, got {slot!r}")
-    return f"T{slot}\n".encode("ascii")
-
-
-def encode_slots_query() -> bytes:
-    return b"S\n"
-
-
-def _kv_tokens(resp: str) -> dict:
-    return dict(t.split("=", 1) for t in (resp or "").split() if "=" in t)
-
-
-def parse_slot_reply(resp: str) -> dict:
-    toks = _kv_tokens(resp)
-    slot = toks.get("slot")
-    return {
-        "ok": (resp or "").upper().startswith("OK"),
-        "slot": int(slot) if slot is not None and slot.isdigit() else None,
-        "addr": toks.get("addr"),
-        "name": toks.get("name"),
-        "connected": toks.get("conn") == "1",
-        "resp": resp,
-    }
-
-
-def parse_slots_status(resp: str) -> dict:
-    toks = _kv_tokens(resp)
-
-    def _int(key):
-        v = toks.get(key)
-        return int(v) if v is not None and v.lstrip("-").isdigit() else None
-
-    conn, sub = {}, {}
-    for k, v in toks.items():
-        if len(k) >= 2 and k[0] == "c" and k[1:].isdigit():
-            conn[int(k[1:])] = v == "1"
-        elif len(k) >= 2 and k[0] == "s" and k[1:].isdigit():
-            sub[int(k[1:])] = v == "1"
-    return {
-        "ok": (resp or "").upper().startswith("OK"),
-        "slots": _int("slots"), "adv": _int("adv"), "tgt": _int("tgt"),
-        "multi": toks.get("multi") == "1", "conn": conn, "sub": sub, "resp": resp,
-    }
 
 
 def ack_is_ok(line: bytes) -> bool:
@@ -273,55 +199,6 @@ class PicoSerialTransport:
             if not self.persist:
                 self.close()
         return {"ok": True, "sent": sent}
-
-    def ping(self) -> dict:
-        """Probe the Pico: returns its PONG status line (or an error)."""
-        ser = self._get()
-        try:
-            self._write_line(ser, encode_ping())
-            reply = ser.readline().decode("ascii", "replace").strip()
-        finally:
-            if not self.persist:
-                self.close()
-        return {"ok": bool(reply), "reply": reply}
-
-    # -- per-bond identity (host-slot) control (see the framing helpers above) --
-    def _cmd(self, line: bytes) -> str:
-        ser = self._get()
-        try:
-            self._write_line(ser, line)
-            return ser.readline().decode("ascii", "replace").strip()
-        finally:
-            if not self.persist:
-                self.close()
-
-    def select_slot(self, slot: int, name: str | None = None) -> dict:
-        """Select host slot `slot` as the advertising identity + (re)advertise (`I<n>`).
-
-        Optional `name` sets that slot's target-scoped advertised BLE name (e.g. `HIDBRIDGE-pico-mini5`)."""
-        return parse_slot_reply(self._cmd(encode_slot_select(slot, name)))
-
-    def target_slot(self, slot: int) -> dict:
-        """Set the send-target slot (`T<n>`)."""
-        resp = self._cmd(encode_slot_target(slot))
-        toks = _kv_tokens(resp)
-        tgt = toks.get("tgt")
-        return {"ok": resp.upper().startswith("OK"),
-                "tgt": int(tgt) if tgt is not None and tgt.isdigit() else None, "resp": resp}
-
-    def slots_status(self) -> dict:
-        """Query the slot table + per-slot connect/subscribe state (`S`)."""
-        return parse_slots_status(self._cmd(encode_slots_query()))
-
-    def disconnect(self) -> dict:
-        """Disconnect the current central (keep bond) + park (`X`). Frees the iPad for another board."""
-        resp = self._cmd(b"X\n")
-        return {"ok": resp.upper().startswith("OK"), "resp": resp}
-
-    def park(self) -> dict:
-        """Stop advertising, keep any connection + bonds (`O`)."""
-        resp = self._cmd(b"O\n")
-        return {"ok": resp.upper().startswith("OK"), "resp": resp}
 
 
 def make_transport(**opts) -> PicoSerialTransport:
