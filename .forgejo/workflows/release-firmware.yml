@@ -1,0 +1,108 @@
+# Release the firmware -- triggered by a `fw-v<X.Y.Z>` tag (the version SOURCE OF TRUTH).
+#
+# Flow: derive the version from the tag -> build both firmwares with -DHB_FW_VERSION injected (so
+# hello.fw reports the release version) -> publish the .bin/.uf2 artifacts to this Forgejo's GENERIC
+# package registry. The wheel releases separately (release-wheel.yml, `wheel-v*` tags).
+#
+# CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
+# actions/checkout; registry over HTTP :3000 (HTTPS/443 unreachable on this LAN); upload is idempotent
+# (200/201 ok, 409/"already exists" non-fatal); needs the PACKAGE_REGISTRY_TOKEN secret (write:package).
+#
+# CONSUMERS download an artifact with (see docs/releasing.md):
+#   curl -O http://forgejo.example.com:3000/api/packages/martinmunk/generic/hidbridge-firmware/<version>/hidbridge-esp32-ethernet-kit-<version>.bin
+name: release-firmware
+
+on:
+  push:
+    tags: ["fw-v*"]
+
+concurrency:
+  group: release-firmware-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-publish:
+    runs-on: docker
+    container:
+      image: python:3.13-slim
+    env:
+      REG_BASE: http://forgejo.example.com:3000
+    steps:
+      - name: Install Node.js + git (checkout + the PlatformIO git-hosted pico platform need them)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq nodejs git ca-certificates curl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ hashFiles('firmware/**/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --no-cache-dir platformio
+
+      - name: Derive version from the tag
+        # fw-v1.2.3 -> 1.2.3 ; injected into every build via -DHB_FW_VERSION (baked into hello.fw).
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#fw-v}"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "tag $GITHUB_REF_NAME does not look like fw-v<X.Y.Z>"; exit 1 ;;
+          esac
+          echo "firmware version = $VERSION (from tag $GITHUB_REF_NAME)"
+          echo "FW_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build ESP32 firmware (version injected into hello.fw)
+        working-directory: firmware/esp32
+        run: |
+          set -eu
+          # PLATFORMIO_BUILD_FLAGS is appended to EVERY env; the nested quotes make it a C string
+          # literal. One `pio run` builds the envs sequentially (they share the scons state dir, so
+          # never launch parallel pio processes against the same project).
+          export PLATFORMIO_BUILD_FLAGS="-DHB_FW_VERSION='\"${FW_VERSION}\"'"
+          pio run -e esp32dev -e esp32-ethernet-kit -e esp32-wifi
+
+      - name: Build Pico firmware (version injected into hello.fw)
+        working-directory: firmware/pico
+        run: |
+          set -eu
+          export PLATFORMIO_BUILD_FLAGS="-DHB_FW_VERSION='\"${FW_VERSION}\"'"
+          pio run -e rpipico2w
+
+      - name: Stage artifacts with versioned names
+        run: |
+          set -eu
+          mkdir -p artifacts
+          E=firmware/esp32/.pio/build
+          P=firmware/pico/.pio/build
+          cp "$E/esp32-ethernet-kit/firmware.bin" "artifacts/hidbridge-esp32-ethernet-kit-${FW_VERSION}.bin"
+          cp "$E/esp32dev/firmware.bin"           "artifacts/hidbridge-esp32dev-${FW_VERSION}.bin"
+          cp "$E/esp32-wifi/firmware.bin"         "artifacts/hidbridge-esp32-wifi-${FW_VERSION}.bin"
+          cp "$P/rpipico2w/firmware.uf2"          "artifacts/hidbridge-pico-${FW_VERSION}.uf2"
+          # The pico also emits a .bin; include it if present.
+          [ -f "$P/rpipico2w/firmware.bin" ] && cp "$P/rpipico2w/firmware.bin" "artifacts/hidbridge-pico-${FW_VERSION}.bin" || true
+          ls -l artifacts/
+
+      - name: Publish artifacts to the Forgejo generic registry (idempotent)
+        env:
+          PACKAGE_REGISTRY_TOKEN: ${{ secrets.PACKAGE_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          [ -n "${PACKAGE_REGISTRY_TOKEN:-}" ] || { echo "PACKAGE_REGISTRY_TOKEN secret not set"; exit 1; }
+          BASE="${REG_BASE}/api/packages/martinmunk/generic/hidbridge-firmware/${FW_VERSION}"
+          for f in artifacts/*; do
+            name="$(basename "$f")"
+            echo "uploading $name -> $BASE/$name"
+            code="$(curl -X PUT -sS -o /tmp/pub.out -w '%{http_code}' \
+                    --user "martinmunk:${PACKAGE_REGISTRY_TOKEN}" \
+                    --upload-file "$f" "$BASE/$name" || true)"
+            case "$code" in
+              200|201) echo "  published ($code)" ;;
+              409)     echo "  already published at ${FW_VERSION} ($code) -- nothing to do" ;;
+              *) echo "  ERROR uploading $name ($code):"; cat /tmp/pub.out; exit 1 ;;
+            esac
+          done

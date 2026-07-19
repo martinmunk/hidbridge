@@ -1,0 +1,60 @@
+# Hardware-in-the-loop (HIL) -- FUTURE STAGE, STUB.
+#
+# This is the on-bench hardware gate: the tests that need real boards + a real bonded host, which
+# CANNOT run on the docker CI runner. It is deliberately manual (workflow_dispatch) and is NOT
+# expected to pass until a self-hosted runner is wired to the bench (see docs/releasing.md).
+#
+# It runs on a SELF-HOSTED runner registered with the label `hidbridge-bench`, installed ON the bench
+# host (NOT in a container) so it can reach the USB serial ports, the LAN boards, and the bonded iPad.
+# See docs/releasing.md "Future: the hardware-in-the-loop runner" for how to register it.
+name: hil
+
+on:
+  workflow_dispatch:
+  # Optionally also nightly once the bench runner is stable:
+  # schedule:
+  #   - cron: "0 4 * * *"
+
+concurrency:
+  group: hil-bench          # the bench is a shared physical resource -- never two HIL runs at once
+  cancel-in-progress: false
+
+jobs:
+  hardware:
+    # Register the bench runner with these labels (docs/releasing.md). No container: the runner runs
+    # directly on the bench host, which owns the serial ports + the net token + the bonded host.
+    runs-on: [self-hosted, hidbridge-bench]
+    defaults:
+      run:
+        working-directory: python
+    env:
+      # The bench boards (see the project bench notes). Adjust to the live ports/IPs before enabling.
+      #   espeth (Ethernet): /dev/ttyUSB3, 192.0.2.102, env esp32-ethernet-kit
+      #   wifi board:        /dev/ttyUSB1, 192.0.2.120, env esp32-wifi
+      # Ports drift between sessions -- re-identify with a serial `N` query. The net token lives at
+      # ~/.config/bt_hid/net.token (0600) and is the TLS-PSK + OTA password; it is NOT a CI secret.
+      BT_HID_CENTRAL: "1"           # on-host BLE-central HID self-test (needs the built-in adapter + an MCU)
+      BT_HID_ESP32_PORT: "/dev/ttyUSB3"
+      BT_HID_NET_HOST: "192.0.2.102"
+      BT_HID_OTA: "1"               # over-the-air reflash loop (REFLASHES the board -- see the test's warning)
+      BT_HID_ESP32_OTA_HOST: "192.0.2.102"
+      # Live-host tests (a real bonded iPad) opt in with their own BT_HID_LIVE_* vars; enable per run.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install package + dev/mcu tooling
+        # The bench host already has the system dbus/gi for the dongle path; install the serial + dev
+        # tooling into the runner's environment (or reuse the repo's python/.venv).
+        run: pip install -e ".[dev,mcu]"
+
+      - name: Hardware-gated tests (the HIL gate)
+        # STUB: this runs the hardware/live tests -- the *_live.py files plus any test that self-gates
+        # on the BT_HID_* env vars set above (central self-test, OTA loop). It will FAIL until the
+        # bench runner + boards are wired and the env above points at the live ports/IPs. Narrow the
+        # selection per run as needed (e.g. drop BT_HID_OTA to skip the reflash loop).
+        run: |
+          pytest -q tests/ -k "live or ota or central" || {
+            echo "HIL stub: hardware tests did not pass -- expected until the bench runner is wired."
+            exit 1
+          }

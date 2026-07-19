@@ -1,0 +1,93 @@
+# Release the Python wheel -- triggered by a `wheel-v<X.Y.Z>` tag (the version SOURCE OF TRUTH).
+#
+# Flow: derive the version from the tag -> stamp it into src/hidbridge/_version.py -> run the offline
+# gate (ruff + pytest) -> `uv build` -> publish the wheel + sdist to this Forgejo's PyPI registry.
+# The firmware releases separately (release-firmware.yml, `fw-v*` tags); the two version independently.
+#
+# CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
+# actions/checkout; registry over HTTP :3000 (HTTPS/443 is unreachable on this LAN); publish is
+# idempotent (re-pushing an existing version is not a failure); needs the PACKAGE_REGISTRY_TOKEN
+# secret (write:package).
+#
+# CONSUMERS install the published wheel with:
+#   pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
+# (see docs/releasing.md + README).
+name: release-wheel
+
+on:
+  push:
+    tags: ["wheel-v*"]
+
+# Never cancel an in-progress publish (mirrors deb.yml).
+concurrency:
+  group: release-wheel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-publish:
+    runs-on: docker
+    container:
+      image: python:3.13-slim
+    defaults:
+      run:
+        working-directory: python
+    env:
+      REG_BASE: http://forgejo.example.com:3000
+    steps:
+      - name: Install Node.js (actions/checkout is a JS action; the container has no node)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq nodejs git ca-certificates curl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive version from the tag + stamp _version.py
+        # wheel-v1.2.3 -> 1.2.3 ; the built wheel/sdist version derives from the tag.
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#wheel-v}"
+          echo "wheel version = $VERSION (from tag $GITHUB_REF_NAME)"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "tag $GITHUB_REF_NAME does not look like wheel-v<X.Y.Z>"; exit 1 ;;
+          esac
+          sed -i -E "s/^__version__ = .*/__version__ = \"${VERSION}\"/" src/hidbridge/_version.py
+          grep '__version__' src/hidbridge/_version.py
+
+      - name: Install tooling (dev extra + build/publish tools)
+        run: pip install --no-cache-dir -e ".[dev]" uv twine
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pytest (offline gate)
+        run: pytest -q
+
+      - name: Build wheel + sdist
+        run: |
+          rm -rf dist
+          uv build
+          ls -l dist/
+          twine check dist/*
+
+      - name: Publish to the Forgejo PyPI registry (idempotent)
+        env:
+          PACKAGE_REGISTRY_TOKEN: ${{ secrets.PACKAGE_REGISTRY_TOKEN }}
+        run: |
+          set -eu
+          [ -n "${PACKAGE_REGISTRY_TOKEN:-}" ] || { echo "PACKAGE_REGISTRY_TOKEN secret not set"; exit 1; }
+          # twine exits non-zero if a file's version already exists. Treat that as success so
+          # re-running the tag is idempotent (mirrors the deb publish's 409 handling).
+          set +e
+          out="$(twine upload --non-interactive --disable-progress-bar \
+                   --repository-url "${REG_BASE}/api/packages/martinmunk/pypi" \
+                   -u martinmunk -p "${PACKAGE_REGISTRY_TOKEN}" dist/* 2>&1)"
+          rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ]; then
+            if echo "$out" | grep -qiE 'already exist|conflict|409|has been already'; then
+              echo "  version already published -- nothing to do (idempotent)"
+            else
+              exit $rc
+            fi
+          fi

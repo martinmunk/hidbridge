@@ -1,0 +1,84 @@
+# CI -- the hardware-INDEPENDENT gate (Forgejo Actions; GitHub-Actions-compatible syntax).
+#
+# Runs on every push to main and every pull request. Two jobs, NO publishing:
+#   * python   -- ruff + the offline pytest suite (the exact commands validated locally)
+#   * firmware -- compile-only builds of both firmwares (no flashing)
+# The hardware-in-the-loop tests live in hil.yml (a self-hosted stub).
+#
+# CONVENTIONS (match the repo's other .forgejo pipelines -- see any a private project*/.forgejo/deb.yml):
+#   * runs-on: docker  == the label this LAN's Forgejo runner advertises. Change it only if you
+#     register the runner under a different label (docs/releasing.md).
+#   * The job runs INSIDE a `container:`; that image has NO Node, and actions/checkout is a JS
+#     action, so the FIRST step apt-installs nodejs+git+curl BEFORE the checkout or it fails.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: docker
+    container:
+      image: python:3.13-slim
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - name: Install Node.js (actions/checkout is a JS action; the container has no node)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq nodejs git ca-certificates curl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install package + dev tooling
+        # The [dev] extra pulls pytest, ruff, build, pyserial. The offline suite needs no
+        # dbus/PyGObject (those tests self-skip), so a plain python container is enough.
+        run: pip install --no-cache-dir -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pytest (offline suite)
+        # Offline by default; hardware/live tests self-skip without their BT_HID_* env vars.
+        run: pytest -q
+
+  firmware:
+    runs-on: docker
+    container:
+      image: python:3.13-slim
+    steps:
+      - name: Install Node.js + git (checkout + the PlatformIO git-hosted pico platform need them)
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq nodejs git ca-certificates curl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Optional: cache the PlatformIO toolchains/frameworks (large first-run download). Degrades
+      # gracefully (a warning) if this Forgejo instance has no actions cache backend configured.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ hashFiles('firmware/**/platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install --no-cache-dir platformio
+
+      # Compile-only (no -t upload). esp32-ethernet-kit is the net build; esp32dev the plain serial
+      # build; esp32-wifi shares the chip so it's cheap. Add -e esp32-s3-devkitc-1 /
+      # -e esp32-c3-devkitm-1 for those variants (extra toolchain downloads).
+      - name: Build ESP32 firmware
+        working-directory: firmware/esp32
+        run: pio run -e esp32dev -e esp32-ethernet-kit -e esp32-wifi
+
+      - name: Build Pico firmware
+        working-directory: firmware/pico
+        run: pio run -e rpipico2w
