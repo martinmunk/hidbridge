@@ -16,6 +16,7 @@ from .bridge import (  # noqa: E402
     HidBridge,
     HidbridgeError,
     HidSession,
+    IncompatibleFirmware,
     NotBonded,
     Unsupported,
     session,
@@ -34,4 +35,5 @@ def discover():
 __all__ = [
     "HidBridge", "HidSession", "session", "discover",
     "HidbridgeError", "NotBonded", "ConnectTimeout", "Unsupported", "CapacityError",
+    "IncompatibleFirmware",
 ]

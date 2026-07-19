@@ -46,11 +46,17 @@ class FakeBoard:
     rpc-drift tests), NOT here."""
 
     def __init__(self, *, board="esp32", fw="dev", devices=("laptop3",),
-                 max_sessions=1, will_connect=True):
+                 max_sessions=1, will_connect=True, proto=None, caps=None, raise_on=None):
         self._board, self._fw = board, fw
+        self._proto = proto                           # None = not a versioned MCU (like the dongle)
         self._devices = {n: _Dev(n) for n in devices}
         self.capabilities = {"max_sessions": max_sessions, "layouts": True}
+        if caps is not None:                          # a caps-advertising board (an MCU via hello)
+            self.capabilities["caps"] = list(caps)
         self._will_connect = will_connect
+        # method names that raise the firmware "method not found" RpcError (simulates an older board
+        # that lacks a method the wheel calls) -- the _guard should turn it into IncompatibleFirmware.
+        self._raise_on = set(raise_on or ())
         # observability for assertions
         self.drove: list = []                         # the high-level drive calls, in order
         self.prepared = self.closed = False
@@ -64,10 +70,16 @@ class FakeBoard:
         self.closed = True
 
     def board_info(self):
-        return {"board": self._board, "fw": self._fw}
+        return {"board": self._board, "fw": self._fw, "proto": self._proto}
+
+    def _maybe_raise(self, method):
+        if method in self._raise_on:
+            from hidbridge.rpc import RpcError
+            raise RpcError(f"{method}: method not found (code -32601)")
 
     # ---- device management ----
     def list_devices(self):
+        self._maybe_raise("list_devices")
         return list(self._devices.values())
 
     def pair(self, name):
@@ -91,6 +103,7 @@ class FakeBoard:
 
     # ---- drive (high-level; the board owns report building) ----
     def type(self, text):
+        self._maybe_raise("type")
         self.drove.append(("type", text)); return {"ok": True}
 
     def key(self, name, mod=0):
@@ -203,5 +216,71 @@ def test_capacity_exhausted_on_multi_backend_raises():
 
 
 def test_all_errors_subclass_hidbridge_error():
-    for exc in (NotBonded, ConnectTimeout, Unsupported, CapacityError):
+    from hidbridge import IncompatibleFirmware
+    for exc in (NotBonded, ConnectTimeout, Unsupported, CapacityError, IncompatibleFirmware):
         assert issubclass(exc, HidbridgeError)
+
+
+# --------------------------------------------------------------------------- #
+# version negotiation (Phase B): the host<->MCU contract is `hello`'s proto + caps
+# --------------------------------------------------------------------------- #
+def test_new_host_old_firmware_low_proto_raises_incompatible():
+    # a board whose firmware protocol predates MIN_FIRMWARE_PROTO -> a clear typed refusal on __enter__,
+    # NOT a silent proceed. This is the new-wheel / old-board direction of the decoupling.
+    from hidbridge import IncompatibleFirmware
+    from hidbridge.bridge import MIN_FIRMWARE_PROTO
+    fake = FakeBoard(proto=MIN_FIRMWARE_PROTO - 1, caps=["keyboard", "mouse"])
+    with pytest.raises(IncompatibleFirmware, match="protocol"):
+        HidBridge("x", backend=fake).__enter__()
+    assert fake.closed                                # the failed open still closed the channel
+
+
+def test_supported_proto_enters_cleanly():
+    from hidbridge.bridge import MIN_FIRMWARE_PROTO
+    fake = FakeBoard(proto=MIN_FIRMWARE_PROTO, caps=["keyboard", "mouse", "connect"])
+    with HidBridge("x", backend=fake) as b:
+        assert b.info["proto"] == MIN_FIRMWARE_PROTO
+        assert b.supports("connect") and not b.supports("nope")
+
+
+def test_old_host_new_firmware_ignores_unknown_caps():
+    # a NEWER board advertising caps this wheel does not know -> we simply use the shared ones; unknown
+    # caps are inert (never crash on them). This is the old-wheel / new-board direction.
+    fake = FakeBoard(proto=99, caps=["keyboard", "mouse", "connect", "some_future_thing"])
+    with HidBridge("x", backend=fake) as b:
+        with b.connect("laptop3") as s:
+            s.type("hi")
+    assert fake.drove == [("type", "hi")]
+
+
+def test_require_capability_missing_raises_incompatible():
+    from hidbridge import IncompatibleFirmware
+    fake = FakeBoard(proto=1, caps=["keyboard", "mouse"])   # no 'layout'
+    with HidBridge("x", backend=fake) as b:
+        with pytest.raises(IncompatibleFirmware, match="lacks"):
+            b.require_capability("layout", "per-slot keyboard layout")
+        b.require_capability("keyboard")                    # a present cap does not raise
+
+
+def test_require_capability_skips_boards_without_caps_list():
+    # the dongle advertises no caps list -> require_capability must NOT gate it (its own Unsupported
+    # errors cover it); gating here would wrongly reject the dongle.
+    fake = FakeBoard()                                      # caps=None -> no 'caps' key
+    with HidBridge("x", backend=fake) as b:
+        b.require_capability("connect")                     # no raise
+
+
+def test_firmware_method_not_found_maps_to_incompatible():
+    from hidbridge import IncompatibleFirmware
+    # a board that REPLIES 'method not found' (an older firmware missing a method) -> the guard turns
+    # the raw RpcError into the typed IncompatibleFirmware, both on management and drive paths.
+    fake = FakeBoard(proto=1, caps=["keyboard"], raise_on=("list_devices",))
+    with HidBridge("x", backend=fake) as b:
+        with pytest.raises(IncompatibleFirmware, match="upgrade the firmware"):
+            b.list_devices()
+    fake2 = FakeBoard(proto=1, caps=["keyboard"], raise_on=("type",))
+    with HidBridge("x", backend=fake2) as b:
+        # connect works; the drive verb hits the missing method -> IncompatibleFirmware
+        sess = HidSession(b, fake2, "laptop3")
+        with pytest.raises(IncompatibleFirmware):
+            sess.type("hi")
