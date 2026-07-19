@@ -9,10 +9,12 @@
 // (esp32 vs pico) by being shared; only the BLE-notify sink + the hello capabilities differ per board
 // and are passed in as callbacks.
 //
-// Wire protocol: JSON-RPC 2.0, one JSON object per line.
+// Wire protocol: JSON-RPC 2.0, one JSON object per line -- EVERYTHING is JSON (proto 2).
 //   request : {"jsonrpc":"2.0","id":<n>,"method":<m>,"params":{...}}
 //   response: {"jsonrpc":"2.0","id":<n>,"result":{...}} | {..,"error":{"code":..,"message":..}}
+//   event   : {"jsonrpc":"2.0","method":"event","params":{"event":<e>,"slot":<n>}}  (id-less notify)
 //   a params "dry":true returns result.frames (built report bytes as hex) WITHOUT notifying.
+// A non-JSON line yields a JSON-RPC parse error {id:null} -- there are NO plain-text EVT/ERR frames.
 #pragma once
 #include <Arduino.h>
 #include <strings.h>
@@ -20,7 +22,9 @@
 
 namespace hbmode1 {
 
-static const int      PROTO_VERSION   = 1;
+static const int      PROTO_VERSION   = 2;   // 2: uniform JSON-RPC wire (JSON `event` notifications +
+                                             // JSON-RPC errors; the plain-text EVT/ERR frames + the
+                                             // @<token> auth line were removed). 1: legacy text frames.
 static const uint8_t  MOD_LSHIFT_BIT  = 0x02;
 static const uint8_t  MOD_ALTGR_BIT   = 0x40;   // Right-Alt: the 3rd (European) shift level (Danish @ [ ] { } \ | ...)
 static const uint8_t  RID_KEYBOARD    = 1;

@@ -21,10 +21,11 @@
 //
 // TRANSPORTS: the SAME line protocol is served over USB serial AND (on a board with an Ethernet PHY,
 // built with -DHIDBRIDGE_NET) over TCP on port 3333. A command is answered on the channel it arrived
-// on; async EVT lines are broadcast to serial + every AUTHENTICATED network client. See "NETWORK".
+// on; async event notifications are broadcast to serial + every AUTHENTICATED network client. See "NETWORK".
 //
 // WIRE PROTOCOL (115200 baud serial / TCP, newline-terminated ASCII lines; host -> ESP32). The wire is
-// ONE versioned JSON-RPC 2.0 protocol: the BOARD builds every report AND owns device management.
+// ONE versioned JSON-RPC 2.0 protocol (proto 2 -- EVERYTHING is JSON): the BOARD builds every report
+// AND owns device management.
 //   report methods : type/key/wake/move/click/press/release/scroll/frames (slot's layout board-side)
 //   device methods : hello, identities, connect, target, disconnect, pair, unpair, nickname, layout,
 //                    advertise, park, ping, net_status, provision  (builders + dispatch in
@@ -32,12 +33,13 @@
 // `hello` returns proto + a COMPREHENSIVE caps list; the host feature-detects on caps. `provision`
 // (the net auth token) is SERIAL-ONLY -- refused over TCP so the secret can only be set over the cable.
 // (The old host-builds K/M frame relay AND the single-char device commands P/A/I/T/S/N/V/W/X/O were
-// folded into these methods and REMOVED -- the ONLY non-JSON line still accepted is `@<token>`, the
-// TCP session auth line. Full contract: ../../docs/bt-hid-protocol.md.)
-//   @<token> AUTHENTICATE this TCP session -> "OK auth" / "ERR auth". See "NETWORK" below.
-// Replies are one JSON object per line (result/error). Asynchronous link events are emitted as
-// "EVT connected" / "EVT disconnected", and HID report SUBSCRIPTION as "EVT ready" / "EVT unsubscribed"
-// (iOS wrote/cleared the report CCCDs) -- the readiness signal the host awaits before the first key.
+// folded into these methods and REMOVED. The `@<token>` TCP auth line is GONE too: a TCP session is
+// authenticated by the TLS-PSK handshake alone. Full contract: ../../docs/bt-hid-protocol.md.)
+// Replies are one JSON object per line (result / JSON-RPC error). A non-JSON line yields a JSON-RPC
+// parse error {id:null}. Asynchronous link/readiness state is an id-less JSON-RPC NOTIFICATION --
+//   {"jsonrpc":"2.0","method":"event","params":{"event":"connected|disconnected|ready|unsubscribed","slot":N}}
+// ("ready"/"unsubscribed" = iOS wrote/cleared the report CCCDs -- the readiness signal the host awaits
+// before the first key). The old plain-text "EVT ..." frames were removed.
 //
 // PER-BOND IDENTITY (host slots -- docs/bt-hid-mcu-approach.md): the board presents a DISTINCT BLE
 // identity/address PER bonded iPad, so ONE board can hold two iPads at once on distinct addresses
@@ -75,8 +77,8 @@
 //     peer holds the token without it ever being transmitted -- the handshake is the authentication;
 //   * if NO token has been provisioned, the TLS port is not even opened -- a board merely plugged into
 //     the LAN cannot be driven over it at all;
-//   * a `@<token>` line is still accepted (over the encrypted channel) for the existing client flow,
-//     but is redundant now that the handshake authenticates; the compare is constant-time.
+//   * the handshake is the SOLE app auth: there is no `@<token>` line (removed with proto 2). A TCP
+//     session serves JSON-RPC the moment its PSK handshake completes; a wrong PSK never gets that far.
 // The one remaining cleartext surface is the OPTIONAL control webpage on :80 (browsers cannot speak
 // TLS-PSK); it is HTTP with an X-Auth-Token header -- LAN-only, and no passcode path uses it. Prefer
 // the USB path for `unlock` if even the LAN is hostile. See docs/bt-hid-network-backend.md.
@@ -190,15 +192,14 @@ static_assert(NUM_SLOTS >= 1 && NUM_SLOTS <= 20,
 #define HB_MAX_NET_CLIENTS 2
 #endif
 #define HB_MIN_TOKEN_LEN  8
-#define HB_MAX_AUTH_FAILS 5
 
 // --------------------------------------------------------------------------- //
 // TLS-PSK on the JSON-RPC / frame port (3333). The port is TLS-ONLY -- there is no plaintext TCP
 // path. The pre-shared key IS the NVS token (the same secret the web `X-Auth-Token` and OTA password
 // reuse), so completing the handshake PROVES the peer holds the token WITHOUT it ever crossing the
-// wire: the handshake is the authentication (`authed` flips true when it finishes, no `@<token>`
-// line needed -- though one is still accepted for the existing raw client flow). A board with no
-// token provisioned opens no TLS port at all (fail-closed). The control webpage stays plain HTTP on
+// wire: the handshake is the SOLE authentication (`authed` flips true when it finishes -- there is no
+// `@<token>` app-line anymore, and a wrong PSK fails the handshake outright). A board with no token
+// provisioned opens no TLS port at all (fail-closed). The control webpage stays plain HTTP on
 // :80 (browsers cannot speak TLS-PSK) -- that is the one remaining cleartext surface, LAN-only.
 // arduino-esp32 ships a TLS *client* but no TLS *server*, so we drive esp_tls's async PSK server
 // over a raw non-blocking lwip socket from netPoll (below).
@@ -215,7 +216,6 @@ struct NetSession {
   mbedtls_net_context nc;                     // holds the accepted socket fd (mbedtls BIO owns it)
   String              buf;
   int                 drivenSlot  = -1;       // the BLE slot THIS session drives/claims (-1 = none)
-  uint8_t             fails       = 0;
 };
 static int                      g_listenFd = -1;     // raw TLS listen socket (replaces NetworkServer)
 static mbedtls_ssl_config       g_tlsConf;           // shared server config: PSK, TLS1.2, one cipher
@@ -458,7 +458,7 @@ static void buildMdnsHost() {
 #ifdef HIDBRIDGE_NET
 // ---- TLS session I/O + teardown --------------------------------------------------------------- //
 // Write `n` bytes through the encrypted channel, looping over partial writes / transient WANT_WRITE.
-// The JSON-RPC reply + EVT lines are small, so a bounded spin is fine; a hard error just gives up
+// The JSON-RPC reply + event notification lines are small, so a bounded spin is fine; a hard error gives up
 // (the session is torn down on the next read).
 static bool tlsWrite(mbedtls_ssl_context* ssl, const uint8_t* data, size_t n) {
   size_t off = 0;
@@ -503,48 +503,59 @@ static void netCloseSession(NetSession& s) {
   s.wantClose = false;
   s.buf = "";
   s.drivenSlot = -1;
-  s.fails = 0;
 }
 #endif  // HIDBRIDGE_NET
 
 // ---- async event fan-out queue (SPSC) -------------------------------------------------------- //
-// evt() can run in the NimBLE HOST TASK (onConnect/onDisconnect/onSubscribe callbacks), but NEITHER
+// evtEvent() can run in the NimBLE HOST TASK (onConnect/onDisconnect/onSubscribe callbacks), but NEITHER
 // the WebSocketsServer NOR a net session's mbedtls_ssl_context is safe to touch cross-task (both are
-// driven from the LOOP task). So evt() only ENQUEUES the (static-storage) EVT string pointer here;
+// driven from the LOOP task). So evtEvent() only ENQUEUES a COPY of the formatted JSON line here;
 // loop() drains it to the WS clients AND the TCP sessions (drainEvts) after wsServer.loop(). Single
-// producer (evt) / single consumer (loop drain); a full queue drops the event (the page also polls
+// producer (evtEvent) / single consumer (loop drain); a full queue drops the event (the page also polls
 // every 3s, so a lost push is self-healing).
 #ifdef HIDBRIDGE_NET
-#define WS_EVT_Q 8
-static volatile const char* g_wsEvtQ[WS_EVT_Q];
-static volatile uint8_t     g_wsEvtHead = 0, g_wsEvtTail = 0;
+#define WS_EVT_Q   8
+#define WS_EVT_LEN 96                          // one JSON `event` notification line (+ NUL) fits easily
+// The queue now carries the FORMATTED JSON line (it holds a dynamic slot number), copied in by the
+// producer, so it is a small ring of fixed buffers rather than static string pointers.
+static char             g_wsEvtQ[WS_EVT_Q][WS_EVT_LEN];
+static volatile uint8_t g_wsEvtHead = 0, g_wsEvtTail = 0;
 static void wsEnqueueEvt(const char* msg) {
   uint8_t nt = (uint8_t)((g_wsEvtTail + 1) & (WS_EVT_Q - 1));
   if (nt == g_wsEvtHead) return;               // full -> drop (polling backstops it)
-  g_wsEvtQ[g_wsEvtTail] = msg;
+  strncpy(g_wsEvtQ[g_wsEvtTail], msg, WS_EVT_LEN - 1);
+  g_wsEvtQ[g_wsEvtTail][WS_EVT_LEN - 1] = '\0';
   g_wsEvtTail = nt;
 }
 #endif
 
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
-// An EVT line ("EVT connected" / "EVT ready" / ...) is UNSOLICITED: it is not a reply to any one
-// channel's command, so it must reach every attached host, not just whoever spoke last. Sessions that
-// have not finished the TLS handshake are excluded -- link state is not something an unauthenticated
-// peer may observe (once the handshake completes, the PSK proved they hold the token).
+// An async event is UNSOLICITED: it is not a reply to any one channel's command, so it must reach
+// every attached host, not just whoever spoke last. Sessions that have not finished the TLS handshake
+// are excluded -- link state is not something an unauthenticated peer may observe (once the handshake
+// completes, the PSK proved they hold the token).
 //
-// CROSS-TASK SAFETY (this is load-bearing, not tidiness): evt() can run in the NimBLE HOST TASK
+// WIRE SHAPE (proto 2): a JSON-RPC NOTIFICATION (no id) --
+//   {"jsonrpc":"2.0","method":"event","params":{"event":"ready|connected|disconnected|unsubscribed","slot":N}}
+// The old plain-text "EVT ready"/"EVT connected"/... frames are gone; the whole wire is JSON now.
+//
+// CROSS-TASK SAFETY (this is load-bearing, not tidiness): evtEvent() can run in the NimBLE HOST TASK
 // (onConnect/onDisconnect/onSubscribe). A per-session mbedtls_ssl_context is NOT safe to touch from two
-// tasks -- if evt() wrote a net client's TLS record from the host task while netPoll() (loop task)
+// tasks -- if it wrote a net client's TLS record from the host task while netPoll() (loop task)
 // read/wrote the SAME context, the record state corrupted and the peer aborted the connection with an
 // EOF (Python saw ssl.SSLEOFError). That is exactly what killed a net session whenever a slot
 // release/park dropped its BLE central: parkTargetSlot -> server->disconnect() -> onDisconnect (host
-// task) -> evt("EVT disconnected") raced the loop task on that session's ssl. So evt() now ONLY
-// ENQUEUES the (static-storage) string; loop() drains it to BOTH the WS pages AND the TCP sessions
-// (drainEvts), where every ssl touch is single-threaded. Serial is a raw UART and stays direct.
-static void evt(const char* msg) {
-  Serial.println(msg);
+// task) -> the disconnected event raced the loop task on that session's ssl. So evtEvent() only
+// FORMATS the JSON line and ENQUEUES a COPY of it; loop() drains it to BOTH the WS pages AND the TCP
+// sessions (drainEvts), where every ssl touch is single-threaded. Serial is a raw UART and stays direct.
+static void evtEvent(const char* event, int slot) {
+  char buf[96];                              // matches WS_EVT_LEN (the NET queue's per-slot buffer)
+  snprintf(buf, sizeof(buf),
+           "{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"%s\",\"slot\":%d}}",
+           event, slot);
+  Serial.println(buf);
 #ifdef HIDBRIDGE_NET
-  wsEnqueueEvt(msg);                         // drained to WS pages + TCP sessions in loop() (drainEvts)
+  wsEnqueueEvt(buf);                          // drained to WS pages + TCP sessions in loop() (drainEvts)
 #endif
 }
 
@@ -590,7 +601,7 @@ class ServerCB : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
     // The central connected on whatever identity we were advertising -> record it against advSlot.
     if (advSlot >= 0 && advSlot < NUM_SLOTS) slotConn[advSlot] = info.getConnHandle();
-    evt("EVT connected");
+    evtEvent("connected", advSlot);
   }
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
     int slot = slotOfHandle(info.getConnHandle());
@@ -598,7 +609,7 @@ class ServerCB : public NimBLEServerCallbacks {
       slotConn[slot] = BLE_HS_CONN_HANDLE_NONE;
       slotSub[slot] = false;              // link gone -> reports no longer enabled on this slot
     }
-    evt("EVT disconnected");
+    evtEvent("disconnected", slot);
     // Resume advertising the slot the HOST currently has selected (advSlot) -- do NOT hijack the
     // single legacy advertiser to the dropped slot. (The old code re-pointed advertising to the
     // dropped slot, so a mini6 flap while we were advertising slot1 for mini5's pair switched the
@@ -619,7 +630,7 @@ class KbdSubCB : public NimBLECharacteristicCallbacks {
     bool nowSub = (subValue != 0);
     if (nowSub != slotSub[slot]) {
       slotSub[slot] = nowSub;
-      evt(nowSub ? "EVT ready" : "EVT unsubscribed");
+      evtEvent(nowSub ? "ready" : "unsubscribed", slot);
     }
   }
 };
@@ -1156,49 +1167,23 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
 static void dispatchLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
-  if (line[0] == '{') {                                             // rpc: JSON-RPC
-    bool authed = true;
+  // The MCU wire is ONE uniform JSON-RPC protocol (proto 2): the board builds every report AND owns
+  // device management (esp32Custom: connect/target/advertise/park/net_status/provision/ping/...). A
+  // non-JSON line deserialize-fails INSIDE handleJsonRpc -> a JSON-RPC parse error {id:null} (there
+  // are no plain-text ERR frames anymore). The old `@<token>` app-line was REMOVED: a TCP session is
+  // authenticated by the TLS-PSK handshake alone (see netPoll: s.authed flips on handshake complete),
+  // so there is no separate auth line to handle here.
+  bool authed = true;
 #ifdef HIDBRIDGE_NET
-    authed = (sess == nullptr || sess->authed);                     // TCP session must authenticate
+  authed = (sess == nullptr || sess->authed);   // TCP session authed by the TLS-PSK handshake; serial trusted
 #else
-    (void)sess;
+  (void)sess;
 #endif
-    // The ACTIVE keyboard layout for this dispatch is the caller's TARGET slot's -- so `type`/`key`
-    // land the right characters on whatever host g_activeTarget points at (laptop3=da, a US host=us).
-    hbmode1::setActiveLayout((g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) ? slotLayout[g_activeTarget]
-                                                                                 : hbmode1::LAYOUT_US);
-    hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
-    return;
-  }
-  char cmd = line[0];                                               // non-JSON line
-
-  // The MCU wire is now ONE versioned JSON-RPC protocol (the board builds every report AND owns device
-  // management -- see esp32Custom: connect/target/advertise/park/net_status/provision/ping/...). The old
-  // single-char device commands were folded into JSON-RPC and REMOVED. The ONLY non-JSON line still
-  // accepted is `@<token>`, the network session's auth line (redundant with the TLS-PSK handshake but
-  // kept for the existing client flow). Anything else is refused.
-  if (cmd == '@') {
-    // @<token> -- authenticate THIS TCP session (see the AUTH note in the header).
-#ifdef HIDBRIDGE_NET
-    String arg = line.substring(1);
-    if (sess == nullptr) { out.println("OK auth"); return; }         // serial is already trusted
-    if (!hasToken()) { out.println("ERR notoken"); return; }         // fail closed: unprovisioned
-    if (tokenEquals(arg)) {
-      sess->authed = true;
-      sess->fails = 0;
-      out.println("OK auth");
-    } else {
-      out.println("ERR auth");
-      if (++sess->fails >= HB_MAX_AUTH_FAILS) sess->wantClose = true;   // stop online guessing
-    }
-#else
-    (void)sess;
-    out.println("ERR nonet");
-#endif
-  } else {
-    (void)sess;
-    out.println("ERR unknown");
-  }
+  // The ACTIVE keyboard layout for this dispatch is the caller's TARGET slot's -- so `type`/`key`
+  // land the right characters on whatever host g_activeTarget points at (laptop3=da, a US host=us).
+  hbmode1::setActiveLayout((g_activeTarget >= 0 && g_activeTarget < NUM_SLOTS) ? slotLayout[g_activeTarget]
+                                                                               : hbmode1::LAYOUT_US);
+  hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
 }
 
 // The single per-session entry for serial + TCP lines. Before dispatch, load THIS session's claimed
@@ -1305,7 +1290,6 @@ static void netPoll() {
       s.wantClose = false;
       s.buf = "";
       s.drivenSlot = -1;                       // a fresh session claims no slot until it connects/T's
-      s.fails = 0;
       // set_bio drives the socket through mbedtls_net_send/recv, which return WANT_READ/WRITE on a
       // non-blocking fd -- exactly what makes the handshake + reads below non-blocking.
       if (mbedtls_ssl_setup(&s.ssl, &g_tlsConf) != 0) {
@@ -1367,18 +1351,21 @@ static IPAddress hbLocalIP() {
 #endif
 }
 
+// Network bring-up state as a JSON `event` notification (proto 2). Serial-only: these fire before any
+// TCP/WS client can be connected (link down, or just got its IP), so there is nothing to broadcast to.
 static void onNetEvent(arduino_event_id_t event) {
   switch (event) {
     case ARDUINO_EVENT_ETH_CONNECTED:
-      Serial.println("EVT net link");
+      Serial.println("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"net\",\"link\":true}}");
       break;
     case ARDUINO_EVENT_ETH_GOT_IP:
 #ifdef HIDBRIDGE_WIFI
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
 #endif
       ethUp = true;
-      Serial.print("EVT net up ip=");
-      Serial.println(hbLocalIP().toString());
+      Serial.print("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"net\",\"link\":true,\"ip\":\"");
+      Serial.print(hbLocalIP().toString());
+      Serial.println("\"}}");
       break;
     case ARDUINO_EVENT_ETH_DISCONNECTED:
     case ARDUINO_EVENT_ETH_STOP:
@@ -1386,7 +1373,7 @@ static void onNetEvent(arduino_event_id_t event) {
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
 #endif
       ethUp = false;
-      Serial.println("EVT net down");
+      Serial.println("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"net\",\"link\":false}}");
       break;
     default:
       break;
@@ -1480,14 +1467,14 @@ function setAdv(i){const on=!!(i&&i.advertising);show($('advind'),on);if(on)$('a
 let WS=null,wsReady=false,pending={};
 function setWsState(on){const d=$('wss');if(!d)return;d.classList.toggle('on',on);
 d.title=on?'live link to board':'disconnected -- driving is paused'}
-function onEvt(){refresh()}   // any server-pushed EVT line -> re-read identities so the page updates live
+function onEvt(){refresh()}   // any server-pushed `event` notification -> re-read identities (live update)
 function wsConnect(){return new Promise(res=>{let settled=false;const fin=v=>{if(!settled){settled=true;res(v)}};
 let sock;try{sock=new WebSocket('ws://'+location.hostname+':81/')}catch(e){return fin(false)}
 WS=sock;const to=setTimeout(()=>{try{sock.close()}catch(e){}fin(false)},4000);
 sock.onopen=()=>{try{sock.send('@'+(TOK||''))}catch(e){}};   // authenticate first, before any rpc
 sock.onmessage=ev=>{const raw=ev.data;
-if(typeof raw==='string'&&raw.slice(0,4)==='EVT '){onEvt(raw);return}
 let j;try{j=JSON.parse(raw)}catch(e){return}
+if(j&&j.method==='event'){onEvt(j);return}   // async JSON-RPC event notification -> refresh live state
 if(!wsReady){if(j.result&&j.result.auth===true){wsReady=true;clearTimeout(to);setWsState(true);fin(true)}
 else if(j.error){clearTimeout(to);try{sock.close()}catch(e){}fin(false)}return}
 const cb=pending[j.id];if(cb){delete pending[j.id];j.error?cb.rej(new Error(j.error.message||'error')):cb.res(j.result||{})}};
@@ -1720,10 +1707,10 @@ static void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
   }
 }
 
-// Drain queued EVT pushes to every AUTHENTICATED client -- WS pages AND TCP sessions (called from
-// loop()). Runs in the LOOP task, so touching wsServer AND each net session's ssl here is safe: this is
-// the single place a net session's TLS record is written for an unsolicited event, so it never races
-// netPoll's read/reply on the same context (the cross-task hazard evt() used to have).
+// Drain queued `event` notifications to every AUTHENTICATED client -- WS pages AND TCP sessions (called
+// from loop()). Runs in the LOOP task, so touching wsServer AND each net session's ssl here is safe: this
+// is the single place a net session's TLS record is written for an unsolicited event, so it never races
+// netPoll's read/reply on the same context (the cross-task hazard evtEvent() must not have).
 static void drainEvts() {
   while (g_wsEvtHead != g_wsEvtTail) {
     const char* msg = (const char*)g_wsEvtQ[g_wsEvtHead];
@@ -1827,7 +1814,7 @@ void loop() {
   netPoll();
   webServer.handleClient();
   wsServer.loop();                           // WS drive channel: reads frames + drives ping/pong
-  drainEvts();                               // push queued EVT lines to the WS pages + TCP sessions
+  drainEvts();                               // push queued event notifications to the WS pages + TCP sessions
   ArduinoOTA.handle();
 #endif
   delay(2);

@@ -14,8 +14,9 @@
  * advertise/park/disconnect/layout/ping -- the JSON replacements for the old single-char commands, in
  * picoCustom below). `hello` returns proto + a caps list the host feature-detects on. (The old
  * host-builds K/M frame relay AND the single-char device commands P/I/T/L/S/X/O were folded into these
- * methods and REMOVED -- any non-JSON line now returns "ERR unknowncmd". Contract:
- * ../../docs/bt-hid-protocol.md.) The Pico's BTstack wrapper holds ONE central at a time, so it
+ * methods and REMOVED. The wire is uniformly JSON (proto 2): a non-JSON line yields a JSON-RPC parse
+ * error {id:null}, not a plain-text ERR frame. Contract: ../../docs/bt-hid-protocol.md.) The Pico's
+ * BTstack wrapper holds ONE central at a time, so it
  * addresses slots by INDEX and reports multi=0.
  *
  * PER-BOND IDENTITY (host slots -- docs/bt-hid-mcu-approach.md): the board presents a DISTINCT BLE
@@ -319,18 +320,15 @@ static void handle_line(char *line) {
     while (*line == ' ' || *line == '\t') line++;
     if (line[0] == 0) return;
 
-    if (line[0] == '{') {                       // rpc: JSON-RPC (serial is trusted -> authed=true)
-        // The active keyboard layout is the TARGET slot's, so `type`/`key` map to the right chars.
-        hbmode1::setActiveLayout((tgt_slot >= 0 && tgt_slot < NUM_SLOTS) ? slot_layout[tgt_slot]
-                                                                         : hbmode1::LAYOUT_US);
-        hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello, picoCustom);
-        return;
-    }
-
-    // The MCU wire is now ONE versioned JSON-RPC protocol: the board builds every report AND owns device
-    // management (picoCustom: connect/target/identities/advertise/park/disconnect/layout/ping -- the JSON
-    // replacements for the old single-char commands, which were REMOVED). Any non-JSON line is refused.
-    Serial.println("ERR unknowncmd");
+    // The MCU wire is ONE uniform JSON-RPC protocol (proto 2): the board builds every report AND owns
+    // device management (picoCustom: connect/target/identities/advertise/park/disconnect/layout/ping --
+    // the JSON replacements for the old single-char commands, which were REMOVED). Serial is trusted ->
+    // authed=true. A non-JSON line deserialize-fails INSIDE handleJsonRpc -> a JSON-RPC parse error
+    // {id:null} (there are no plain-text ERR frames anymore).
+    // The active keyboard layout is the TARGET slot's, so `type`/`key` map to the right chars.
+    hbmode1::setActiveLayout((tgt_slot >= 0 && tgt_slot < NUM_SLOTS) ? slot_layout[tgt_slot]
+                                                                     : hbmode1::LAYOUT_US);
+    hbmode1::handleJsonRpc(String(line), Serial, true, picoNotify, picoFillHello, picoCustom);
 }
 
 void setup() {
@@ -371,8 +369,8 @@ void loop() {
         } else if (line_len < LINE_MAX - 1) {
             line_buf[line_len++] = c;
         } else {
-            line_len = 0;
-            Serial.println("ERR toolong");
+            line_len = 0;                       // runaway line -> JSON-RPC error (no plain-text ERR frames)
+            Serial.println("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"line too long\"}}");
         }
     }
 }
