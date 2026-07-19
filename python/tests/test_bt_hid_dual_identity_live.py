@@ -6,8 +6,13 @@ Acceptance for the per-bond-identity feature (docs/bt-hid-mcu-approach.md):
   * the Pico switches identities deterministically (single-connection: one iPad at a time).
 
 DETERMINISM: both iPads are bonded to BOTH boards, so to test one board cleanly the OTHER board is
-PARKED (X = disconnect+park / O = park) -- the deterministic cross-board handoff. Without that, iOS
-attaches each iPad to whichever board it likes and the hold is not reproducible.
+PARKED (disconnect the held central + stop advertising) -- the deterministic cross-board handoff.
+Without that, iOS attaches each iPad to whichever board it likes and the hold is not reproducible.
+
+DRIVEN OVER THE CURRENT API: the MCU wire is JSON-RPC only (the board builds every report). This test
+drives an `rpc.RpcClient` directly -- `connect`/`disconnect`/`park`/`identities`/`target` for slot
+orchestration and `type` for input. Slots are addressed by INDEX: `connect {"slot":n}` brings that
+identity up + advertises it; `target n` routes THIS session's next report to that slot's central.
 
 PRECONDITIONS (all physical; skipped unless BT_HID_LIVE_DUAL=1):
   ESP32 (BT_HID_ESP32_PORT or autodetect) bonded: slot0<->mini6, slot1<->mini5.
@@ -16,7 +21,7 @@ PRECONDITIONS (all physical; skipped unless BT_HID_LIVE_DUAL=1):
 
 Run:
   BT_HID_LIVE_DUAL=1 BT_HID_ESP32_PORT=/dev/ttyUSB1 BT_HID_PICO_PORT=/dev/ttyACM0 \
-      uv run --with pyserial --with pytest pytest tests/bt_hid/test_bt_hid_dual_identity_live.py -v -s
+      uv run --with pyserial --with pytest pytest tests/test_bt_hid_dual_identity_live.py -v -s
 """
 
 import os
@@ -34,7 +39,7 @@ pytestmark = pytest.mark.skipif(
 from hidbridge import naming as N  # noqa: E402
 from hidbridge import transport_esp32 as TE  # noqa: E402
 from hidbridge import transport_pico as TP  # noqa: E402
-from hidbridge.rpc import RpcClient  # noqa: E402
+from hidbridge.rpc import open_client  # noqa: E402
 
 SLOT_MINI6_ESP = 0   # ESP32 native identity (existing bond preserved)
 SLOT_MINI5_ESP = 1   # ESP32 static-random identity
@@ -42,32 +47,41 @@ SLOT_MINI5_PICO = 0  # Pico native identity (existing bond preserved)
 SLOT_MINI6_PICO = 1  # Pico static-random identity
 
 
-def _wait_slot(status_fn, slot, want=True, timeout=40.0, poll=1.0):
+def _slot(rpc, slot) -> dict:
+    """The board's identity-table row for `slot` (or {} if absent): {slot,client,addr,name,conn,sub}."""
+    for s in rpc.identities().get("slots", []):
+        if s.get("slot") == slot:
+            return s
+    return {}
+
+
+def _wait_slot(rpc, slot, want=True, timeout=40.0, poll=1.0):
     end = time.time() + timeout
     while time.time() < end:
-        if bool(status_fn()["conn"].get(slot)) == want:
+        if bool(_slot(rpc, slot).get("conn")) == want:
             return True
         time.sleep(poll)
-    return bool(status_fn()["conn"].get(slot)) == want
+    return bool(_slot(rpc, slot).get("conn")) == want
 
 
-def _rpc_type_slot(tp, slot, text):
-    """Drive a keystroke to a specific host slot over the MCU's JSON-RPC channel (the board builds the
-    report -- the MCU wire no longer accepts host-built K/M frames). Targets `slot` (T<n>) first so the
-    report notifies that slot's central, then types. Returns the rpc result."""
-    tp.target_slot(slot)
-    ch = getattr(tp, "_ser", None)
-    if ch is None:                        # nudge the transport to open its serial channel
-        (getattr(tp, "_open", None) or getattr(tp, "_get", None))()
-        ch = tp._ser
-    return RpcClient(ch).type_text(text)
+def _bring_up(rpc, slot):
+    """Bring host `slot`'s identity up + advertise it so the bonded iPad reconnects (JSON `connect`,
+    addressed by slot index). On the ESP32 this does NOT drop other slots (it holds several at once)."""
+    return rpc.call("connect", {"slot": slot})
 
 
-def _drive_slot_honestly(esp32, slot):
+def _type_slot(rpc, slot, text):
+    """Drive a keystroke to a specific host slot: `target` that slot (so the board notifies THAT
+    slot's central), then `type` -- the board builds the report. Returns the rpc result ({sent,conn})."""
+    rpc.target(slot)
+    return rpc.type_text(text)
+
+
+def _drive_slot_honestly(rpc, slot):
     """Verify slot is CONNECTED (so a report really lands) then type a keystroke to it; assert the board
     built + notified the report (sent>0, conn true on the target slot)."""
-    assert esp32.slots_status()["conn"].get(slot), f"slot {slot} not connected -- cannot drive it"
-    res = _rpc_type_slot(esp32, slot, "x")
+    assert _slot(rpc, slot).get("conn"), f"slot {slot} not connected -- cannot drive it"
+    res = _type_slot(rpc, slot, "x")
     assert res.get("sent"), f"drive slot {slot} reported nothing sent: {res}"
     assert res.get("conn", True), f"drive slot {slot}: board had no central on the target slot: {res}"
 
@@ -77,9 +91,9 @@ def esp32():
     port = os.environ.get("BT_HID_ESP32_PORT") or TE.detect_port()
     if not port:
         pytest.skip("no ESP32 serial port (set BT_HID_ESP32_PORT)")
-    tp = TE.Esp32Transport(port=port)
-    yield tp
-    tp.close()
+    cli = open_client(f"esp32:{port}")
+    yield cli
+    cli.close()
 
 
 @pytest.fixture()
@@ -88,45 +102,48 @@ def pico():
     if not port:
         yield None
         return
-    tp = TP.PicoSerialTransport(port=port)
-    yield tp
-    tp.close()
+    cli = open_client(f"pico:{port}")
+    yield cli
+    cli.close()
 
 
 def test_esp32_holds_mini5_and_mini6_simultaneously(esp32, pico):
-    # Park the Pico so it releases mini6 (bonded to both) -> the ESP32 can hold it deterministically.
+    # Park the Pico so it releases mini6 (bonded to both) -> the ESP32 can hold it deterministically:
+    # drop the Pico's current central, then stop it advertising.
     if pico is not None:
-        pico.disconnect()   # X: disconnect current central + park
+        pico.disconnect()   # drop the Pico's held central (bond kept)
+        pico.park()         # stop advertising so mini6 is free to attach to the ESP32
 
-    # slot 0 = mini6 (native identity)
-    sel6 = esp32.select_slot(SLOT_MINI6_ESP, N.slot_identity_name("esp32", "mini6"))
-    assert sel6["ok"], f"slot 0 select failed: {sel6}"
-    assert _wait_slot(esp32.slots_status, SLOT_MINI6_ESP), "mini6 did not connect on ESP32 slot 0"
+    # slot 0 = mini6 (native identity): bring it up + advertise
+    _bring_up(esp32, SLOT_MINI6_ESP)
+    assert _wait_slot(esp32, SLOT_MINI6_ESP), "mini6 did not connect on ESP32 slot 0"
+    row6 = _slot(esp32, SLOT_MINI6_ESP)
+    assert row6.get("name") == N.slot_identity_name("esp32", "mini6"), \
+        f"slot 0 advertises {row6.get('name')!r}, expected mini6's identity name"
 
     # slot 1 = mini5 (static-random identity) WITHOUT dropping slot 0
-    sel5 = esp32.select_slot(SLOT_MINI5_ESP, N.slot_identity_name("esp32", "mini5"))
-    assert sel5["ok"] and sel5["addr"] and sel5["addr"] != sel6["addr"], "slots must differ"
-    msb = int(sel5["addr"][:2], 16)
-    assert (msb & 0xC0) == 0xC0, f"slot1 addr {sel5['addr']} not static-random (MSB {msb:#04x})"
-    assert _wait_slot(esp32.slots_status, SLOT_MINI5_ESP), "mini5 did not connect on ESP32 slot 1"
+    _bring_up(esp32, SLOT_MINI5_ESP)
+    row5 = _slot(esp32, SLOT_MINI5_ESP)
+    assert row5.get("addr") and row6.get("addr") and row5["addr"] != row6["addr"], "slots must differ"
+    msb = int(row5["addr"][:2], 16)
+    assert (msb & 0xC0) == 0xC0, f"slot1 addr {row5['addr']} not static-random (MSB {msb:#04x})"
+    assert _wait_slot(esp32, SLOT_MINI5_ESP), "mini5 did not connect on ESP32 slot 1"
 
-    # SUSTAINED simultaneous hold: sample repeatedly; BOTH must stay connected (no time-slice).
+    # SUSTAINED simultaneous hold: sample repeatedly; BOTH must stay connected (no time-slice). Two
+    # slots connected at once IS the "multi" proof (the ESP32's simultaneous-identities capability).
     both_samples = 0
     for _ in range(6):
         time.sleep(1)
-        st = esp32.slots_status()
-        if st["conn"].get(SLOT_MINI6_ESP) and st["conn"].get(SLOT_MINI5_ESP):
+        if _slot(esp32, SLOT_MINI6_ESP).get("conn") and _slot(esp32, SLOT_MINI5_ESP).get("conn"):
             both_samples += 1
     assert both_samples >= 5, f"ESP32 did not SUSTAIN both connected (only {both_samples}/6 samples)"
-    assert esp32.slots_status()["multi"] is True
 
     # drive EACH iPad independently via its slot (honest: connection verified before each)
     _drive_slot_honestly(esp32, SLOT_MINI6_ESP)
     _drive_slot_honestly(esp32, SLOT_MINI5_ESP)
 
-    st2 = esp32.slots_status()
-    assert st2["conn"].get(SLOT_MINI6_ESP) and st2["conn"].get(SLOT_MINI5_ESP), (
-        f"a slot dropped after driving; conn={st2['conn']}")
+    assert _slot(esp32, SLOT_MINI6_ESP).get("conn") and _slot(esp32, SLOT_MINI5_ESP).get("conn"), \
+        "a slot dropped after driving"
 
 
 def test_pico_time_sliced_switch(esp32, pico):
@@ -134,23 +151,22 @@ def test_pico_time_sliced_switch(esp32, pico):
         pytest.skip("no Pico serial port (set BT_HID_PICO_PORT)")
     # Release BOTH iPads from the ESP32 + park it, so they are free to attach to the Pico.
     for slot in (SLOT_MINI6_ESP, SLOT_MINI5_ESP):
-        esp32.target_slot(slot)
-        esp32.disconnect()   # X: disconnect that slot's central + park the ESP32
+        esp32.call("disconnect", {"slot": slot})   # disconnect that slot's central (bond kept)
     esp32.park()
 
-    # select mini5 (Pico slot 0) -> it connects -> drive it
-    p5 = pico.select_slot(SLOT_MINI5_PICO, N.slot_identity_name("pico", "mini5"))
-    assert p5["ok"], f"pico slot0 select failed: {p5}"
-    assert _wait_slot(pico.slots_status, SLOT_MINI5_PICO), "mini5 did not connect to the Pico slot0"
-    assert _rpc_type_slot(pico, SLOT_MINI5_PICO, "x").get("sent"), "driving mini5 on the Pico failed"
+    # mini5 (Pico slot 0): bring it up -> it connects -> drive it
+    _bring_up(pico, SLOT_MINI5_PICO)
+    assert _wait_slot(pico, SLOT_MINI5_PICO), "mini5 did not connect to the Pico slot0"
+    addr5 = _slot(pico, SLOT_MINI5_PICO).get("addr")
+    assert _type_slot(pico, SLOT_MINI5_PICO, "x").get("sent"), "driving mini5 on the Pico failed"
 
     # switch to mini6 (Pico slot 1) -> single-connection, so slot0 releases
-    p6 = pico.select_slot(SLOT_MINI6_PICO, N.slot_identity_name("pico", "mini6"))
-    assert p6["ok"] and p6["addr"] != p5["addr"], "pico slots must have distinct addresses"
-    assert _wait_slot(pico.slots_status, SLOT_MINI6_PICO), "mini6 did not connect to the Pico slot1"
-    assert _rpc_type_slot(pico, SLOT_MINI6_PICO, "x").get("sent"), "driving mini6 on the Pico failed"
+    _bring_up(pico, SLOT_MINI6_PICO)
+    assert _wait_slot(pico, SLOT_MINI6_PICO), "mini6 did not connect to the Pico slot1"
+    addr6 = _slot(pico, SLOT_MINI6_PICO).get("addr")
+    assert addr6 and addr6 != addr5, "pico slots must have distinct addresses"
+    assert _type_slot(pico, SLOT_MINI6_PICO, "x").get("sent"), "driving mini6 on the Pico failed"
 
-    # single-connection: only ONE slot connected at a time (multi=0)
-    st = pico.slots_status()
-    assert st["multi"] is False
-    assert sum(1 for v in st["conn"].values() if v) <= 1, f"Pico held >1 at once: {st['conn']}"
+    # single-connection: only ONE slot connected at a time
+    connected = [s for s in pico.identities().get("slots", []) if s.get("conn")]
+    assert len(connected) <= 1, f"Pico held >1 at once: {connected}"

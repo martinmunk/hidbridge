@@ -36,6 +36,7 @@ pytestmark = pytest.mark.skipif(
 
 from hidbridge import naming as N  # noqa: E402
 from hidbridge import transport_esp32 as TE  # noqa: E402
+from hidbridge.rpc import open_client  # noqa: E402
 
 _ADDR_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(.*)")
 
@@ -110,18 +111,23 @@ def esp32():
     port = os.environ.get("BT_HID_ESP32_PORT") or TE.detect_port()
     if not port:
         pytest.skip("no ESP32 serial port (set BT_HID_ESP32_PORT)")
-    tp = TE.Esp32Transport(port=port)
-    yield tp
-    tp.close()
+    cli = open_client(f"esp32:{port}")   # JSON-RPC client (the MCU wire is JSON-RPC only)
+    yield cli
+    cli.close()
 
 
 @pytest.mark.parametrize("slot,ipad", [(0, "mini6"), (1, "mini5")])
 def test_slot_advertises_its_target_scoped_name(esp32, sniff_hci, slot, ipad):
-    """Selecting slot N must put slot N's address ON AIR advertising `HIDBRIDGE-esp32-<ipad>`."""
+    """Bringing slot N up must put slot N's address ON AIR advertising `HIDBRIDGE-esp32-<ipad>`."""
     expected_name = N.slot_identity_name("esp32", ipad)
-    sel = esp32.select_slot(slot, expected_name)
-    assert sel["ok"] and sel["addr"], f"slot {slot} select failed: {sel}"
-    addr = ":".join(sel["addr"][i:i + 2] for i in range(0, 12, 2)).upper()
+    # `connect {"slot":n}` brings slot n's identity up + advertises it (the JSON method that replaced
+    # the old single-char select-slot). Read the live advertising address from the identity table.
+    esp32.call("connect", {"slot": slot})
+    row = next((s for s in esp32.identities().get("slots", []) if s.get("slot") == slot), {})
+    assert row.get("addr"), f"slot {slot} has no address (adv start failed?): {row}"
+    assert row.get("name") == expected_name, (
+        f"slot {slot} board-side name {row.get('name')!r}, expected {expected_name!r}")
+    addr = ":".join(row["addr"][i:i + 2] for i in range(0, 12, 2)).upper()
 
     seen = _advertised_names(sniff_hci, timeout=8)
     got = seen.get(addr)
