@@ -28,12 +28,11 @@ jobs:
     runs-on: docker
     container:
       image: python:3.13-slim
-    defaults:
-      run:
-        working-directory: python
     env:
       REG_BASE: http://forgejo.example.com:3000
     steps:
+      # NOTE: no job-level working-directory -- this step runs BEFORE checkout (python/ does not exist
+      # yet). The post-checkout steps set working-directory: python individually.
       - name: Install Node.js (actions/checkout is a JS action; the container has no node)
         run: |
           apt-get update -qq
@@ -43,6 +42,7 @@ jobs:
 
       - name: Derive version from the tag + stamp _version.py
         # wheel-v1.2.3 -> 1.2.3 ; the built wheel/sdist version derives from the tag.
+        working-directory: python
         run: |
           set -eu
           VERSION="${GITHUB_REF_NAME#wheel-v}"
@@ -55,15 +55,19 @@ jobs:
           grep '__version__' src/hidbridge/_version.py
 
       - name: Install tooling (dev extra + build/publish tools)
+        working-directory: python
         run: pip install --no-cache-dir -e ".[dev]" uv twine
 
       - name: Ruff
+        working-directory: python
         run: ruff check .
 
       - name: Pytest (offline gate)
+        working-directory: python
         run: pytest -q
 
       - name: Build wheel + sdist
+        working-directory: python
         run: |
           rm -rf dist
           uv build
@@ -71,6 +75,7 @@ jobs:
           twine check dist/*
 
       - name: Publish to the Forgejo PyPI registry (idempotent)
+        working-directory: python
         env:
           PACKAGE_REGISTRY_TOKEN: ${{ secrets.PACKAGE_REGISTRY_TOKEN }}
         run: |

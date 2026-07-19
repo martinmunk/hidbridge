@@ -26,10 +26,9 @@ jobs:
     runs-on: docker
     container:
       image: python:3.13-slim
-    defaults:
-      run:
-        working-directory: python
     steps:
+      # NOTE: no job-level working-directory -- this step runs BEFORE checkout, when python/ does not
+      # exist yet. The post-checkout steps set working-directory: python individually.
       - name: Install Node.js (actions/checkout is a JS action; the container has no node)
         run: |
           apt-get update -qq
@@ -40,13 +39,16 @@ jobs:
       - name: Install package + dev tooling
         # The [dev] extra pulls pytest, ruff, build, pyserial. The offline suite needs no
         # dbus/PyGObject (those tests self-skip), so a plain python container is enough.
+        working-directory: python
         run: pip install --no-cache-dir -e ".[dev]"
 
       - name: Ruff
+        working-directory: python
         run: ruff check .
 
       - name: Pytest (offline suite)
         # Offline by default; hardware/live tests self-skip without their BT_HID_* env vars.
+        working-directory: python
         run: pytest -q
 
   firmware:
