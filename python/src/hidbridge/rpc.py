@@ -44,6 +44,17 @@ class RpcError(RuntimeError):
     """An RPC (JSON-RPC) call failed: transport error, or a JSON-RPC error object was returned."""
 
 
+class RpcTimeout(RpcError):
+    """No bytes at all came back within the read budget -- the board is unreachable / asleep / not a
+    board (as opposed to a board that answered but not with JSON-RPC)."""
+
+
+class RpcProtocolError(RpcError):
+    """The board ANSWERED, but never with a matching JSON-RPC reply -- e.g. legacy/pre-JSON-RPC
+    firmware that replies `ERR unknowncmd` to a JSON request. Distinct from RpcTimeout (silence) so a
+    caller can tell 'wrong/old firmware' from 'nothing there'."""
+
+
 @dataclass
 class ServerInfo:
     """The board's `hello` handshake, cached: version + capabilities the host adapts to."""
@@ -80,16 +91,23 @@ class RpcClient:
         req = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": p}
         self._ch.write((json.dumps(req, separators=(",", ":")) + "\n").encode("ascii"))
         want = self._id
+        # Track whether the board said ANYTHING (a non-empty line): silence -> RpcTimeout (nothing
+        # there); noise but no matching JSON reply -> RpcProtocolError (answered, but not JSON-RPC --
+        # e.g. legacy firmware replying `ERR unknowncmd`). Lets the probe tell the two apart.
+        noise = None
         for _ in range(self._max_reads):
             raw = self._ch.readline()
             if not raw:
-                raise RpcError(f"no response to {method!r} (timeout)")
+                break                         # timeout / no (more) data
             line = raw.decode("ascii", "replace").strip()
             if not line.startswith("{"):
-                continue                      # a raw-path banner / boot line -- skip
+                if line:
+                    noise = line              # a raw-path banner / boot / ERR line -- remember it
+                continue
             try:
                 msg = json.loads(line)
             except ValueError:
+                noise = line
                 continue
             if msg.get("id") is None:
                 continue                      # a notification (async event), not a reply
@@ -99,7 +117,11 @@ class RpcClient:
             if err:
                 raise RpcError(f"{method}: {err.get('message')} (code {err.get('code')})")
             return msg.get("result", {}) or {}
-        raise RpcError(f"no matching JSON-RPC response to {method!r}")
+        if noise is not None:
+            raise RpcProtocolError(
+                f"no JSON-RPC response to {method!r}; board replied {noise!r} (legacy/incompatible "
+                f"firmware?)")
+        raise RpcTimeout(f"no response to {method!r} (timeout)")
 
     # -- capabilities handshake + version handling --
     def hello(self) -> dict:

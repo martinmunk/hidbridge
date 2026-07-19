@@ -211,6 +211,14 @@ class Esp32Transport:
                 self._rebooted_on_open = True   # a cold reset happened; keep draining briefly
         return
 
+    def open_channel(self):
+        """Open the serial/socket channel if needed and return the duck-typed line object
+        (write(bytes)/readline()->bytes). This is the JSON-RPC channel `board.McuBoard` drives over --
+        one uniform hook across the esp32 (reset-free serial), net (TLS socket) and pico transports."""
+        if self._ser is None:
+            self._open()
+        return self._ser
+
     def close(self):
         if self._ser is not None and hasattr(self._ser, "close"):
             try:

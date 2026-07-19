@@ -19,6 +19,7 @@ from .bridge import (  # noqa: E402
     HidSession,
     IncompatibleFirmware,
     NotBonded,
+    ProbeError,
     Unsupported,
     session,
 )
@@ -37,5 +38,5 @@ __all__ = [
     "__version__",
     "HidBridge", "HidSession", "session", "discover",
     "HidbridgeError", "NotBonded", "ConnectTimeout", "Unsupported", "CapacityError",
-    "IncompatibleFirmware",
+    "IncompatibleFirmware", "ProbeError",
 ]

@@ -56,6 +56,13 @@ class ConnectTimeout(HidbridgeError):
     """The device did not (re)connect within the timeout."""
 
 
+class ProbeError(HidbridgeError):
+    """Opening the board channel found nothing that speaks hidbridge: the port never answered `hello`
+    (unreachable / asleep / not a board / a Pico opened without DTR). NEVER a degraded, capability-less
+    board -- the caller learns the target is wrong or unreachable, not that a driveless 'board' exists.
+    (A board that DOES answer but with legacy/pre-JSON-RPC firmware raises IncompatibleFirmware.)"""
+
+
 class Unsupported(HidbridgeError):
     """The board fundamentally cannot do what was asked (e.g. a second concurrent connection on a
     single-identity backend like the dongle or the Pico)."""

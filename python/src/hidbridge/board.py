@@ -30,7 +30,13 @@ from __future__ import annotations
 import os
 import re
 
-from .bridge import HidbridgeError, NotBonded, Unsupported  # typed errors reused
+from .bridge import (  # typed errors reused
+    HidbridgeError,
+    IncompatibleFirmware,
+    NotBonded,
+    ProbeError,
+    Unsupported,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,30 +103,30 @@ class McuBoard:
             self._tp = self._factory()
         if self._rpc is None:
             from .rpc import RpcClient
-            ch = getattr(self._tp, "_ser", None)
-            if ch is None:                       # nudge the transport to open its channel
-                opener = getattr(self._tp, "_open", None)
-                if opener is not None:
-                    opener()
-                ch = getattr(self._tp, "_ser", None)
+            ch = _transport_channel(self._tp)
             if ch is None:
-                raise HidbridgeError("MCU transport exposes no open JSON-RPC channel (_ser)")
+                raise HidbridgeError("MCU transport exposes no open JSON-RPC channel")
             self._rpc = RpcClient(ch)
         self._probe()
 
     def _probe(self):
-        from .rpc import RpcError
+        from .rpc import RpcProtocolError, RpcTimeout
+        port = getattr(self._tp, "port", None) or "the board"
         try:
             h = self._rpc.hello()
-        except RpcError:
-            # A board that cannot answer `hello` (older/minimal firmware) predates JSON-RPC; report a
-            # degraded, capability-less board so device management + drive verbs fail cleanly (no caps).
-            self._info = {"board": "?", "fw": "", "device": "", "nick": "", "proto": None,
-                          "layouts": []}
-            self.capabilities = {"max_sessions": 1, "per_device_identity": False, "layouts": False,
-                                 "rpc_frames": False, "medium": getattr(self._tp, "BACKEND", "mcu"),
-                                 "caps": []}
-            return
+        except RpcProtocolError as e:
+            # The board ANSWERED but not with JSON-RPC -- legacy / pre-JSON-RPC firmware. Refuse with a
+            # clear, typed error (upgrade the firmware) rather than a degraded, capability-less board
+            # that would only fail cryptically on the first drive verb.
+            raise IncompatibleFirmware(
+                f"{port} runs firmware that does not speak hidbridge JSON-RPC (legacy / pre-RPC "
+                f"build); upgrade the firmware (or pin an older wheel). [{e}]") from e
+        except RpcTimeout as e:
+            # Silence: nothing that speaks hidbridge is here (unreachable / asleep / wrong device / a
+            # Pico opened without DTR). RAISE -- never hand back a driveless board.
+            raise ProbeError(
+                f"no hidbridge board answered at {port} (asleep, unplugged, wrong device, or "
+                f"incompatible firmware). [{e}]") from e
         board = _board_from_device_name(h.get("device", ""))
         self._info = {"board": board, "fw": h.get("fw", ""), "device": h.get("device", ""),
                       "nick": h.get("nick", ""), "proto": h.get("proto"),
@@ -382,11 +388,44 @@ def _classify(location):
     return "net", s                               # host / IP / *.local
 
 
+def _transport_channel(tp):
+    """Return the transport's open JSON-RPC channel (write(bytes)/readline()->bytes), opening it if
+    needed. Prefers the uniform `open_channel()` hook (esp32/net/pico all expose it); falls back to an
+    already-open `_ser` or an `_open()` nudge for a duck-typed fake that has neither."""
+    getter = getattr(tp, "open_channel", None)
+    if getter is not None:
+        return getter()
+    ch = getattr(tp, "_ser", None)
+    if ch is None:
+        opener = getattr(tp, "_open", None)
+        if opener is not None:
+            opener()
+        ch = getattr(tp, "_ser", None)
+    return ch
+
+
+def _is_pico_port(port) -> bool:
+    """True for a Pico native USB-CDC device: a /dev/ttyACM* whose USB idVendor is Raspberry Pi
+    (2e8a). Such a port needs a DTR-ASSERTED open (the Pico's CDC only transmits with DTR up); an
+    ESP32 bridge (/dev/ttyUSB*, CP210x/FT2232) instead needs the reset-free B0 open (DTR de-asserted),
+    so the transport family is keyed off this."""
+    from . import transport_pico as TP
+    base = os.path.basename(str(port or ""))
+    if not base.startswith("ttyACM"):
+        return False
+    try:
+        return TP._tty_usb_vendor(port) == TP._PICO_USB_VENDOR
+    except OSError:
+        return False
+
+
 def _serial_transport_factory(port, *, board_hint=None, **opts):
     def make():
-        # pico's USB-CDC is native (no reset trick); esp32 needs the reset-free open. Pick by hint or
-        # default to esp32's transport (which handles both via serial_link).
-        if board_hint == "pico":
+        # The Pico's native USB-CDC needs a plain DTR-asserted open (transport_pico); the ESP32's
+        # bridge needs the reset-free B0 open (transport_esp32). Honour an explicit board_hint, else
+        # pick by the device (ttyACM + Raspberry Pi VID = a Pico); default to the ESP32 transport.
+        use_pico = board_hint == "pico" or (board_hint is None and _is_pico_port(port))
+        if use_pico:
             from .transport_pico import make_transport as mk
         else:
             from .transport_esp32 import make_transport as mk
@@ -438,14 +477,18 @@ def _candidate_ports(vendor_of=None):
 
 
 def _probe_port(port):
-    """Open `port`, ask the board `hello`, and return {port, board, fw, device} or None. Reset-free."""
-    from .rpc import RpcError
-    from .transport_esp32 import make_transport as mk
+    """Open `port`, ask the board `hello`, and return {port, board, fw, device} or None.
+
+    Opens with the RIGHT style per device: a Pico native USB-CDC (ttyACM + VID 2e8a) needs a
+    DTR-asserted open (transport_pico) or it never transmits its reply; an ESP32 bridge (ttyUSB) needs
+    the reset-free B0 open (transport_esp32) so probing does not reboot it and drop its BLE link. Both
+    are covered by _serial_transport_factory's per-device selection. A non-board tty (or legacy/asleep
+    board) just fails to answer `hello` -> None (dropped from discovery)."""
+    from .rpc import RpcClient
     tp = None
     try:
-        tp = mk(port=port)
-        from .rpc import RpcClient
-        ch = getattr(tp, "_ser", None)
+        tp = _serial_transport_factory(port)()
+        ch = _transport_channel(tp)
         if ch is None:
             return None
         h = RpcClient(ch).hello()
@@ -454,7 +497,7 @@ def _probe_port(port):
             return None
         return {"port": port, "board": _board_from_device_name(dev), "fw": h.get("fw", ""),
                 "device": dev}
-    except (RpcError, Exception):  # noqa: BLE001 -- a non-board tty just fails to answer
+    except Exception:  # noqa: BLE001 -- a non-board tty / legacy / asleep board just fails to answer
         return None
     finally:
         if tp is not None:

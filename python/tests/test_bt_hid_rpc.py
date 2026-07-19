@@ -266,6 +266,22 @@ def test_no_response_raises():
         rpc.RpcClient(RpcFake(handler=None)).wake()   # handler=None -> nothing queued
 
 
+def test_silence_raises_rpc_timeout():
+    # nothing at all comes back (empty readline) -> RpcTimeout: 'nothing there', distinct from a board
+    # that answered with non-JSON (legacy firmware). Both remain RpcError subclasses.
+    with pytest.raises(rpc.RpcTimeout):
+        rpc.RpcClient(RpcFake(handler=None)).hello()
+
+
+def test_non_json_reply_raises_rpc_protocol_error():
+    # a legacy / pre-JSON-RPC board answers `ERR unknowncmd` (not JSON) -> RpcProtocolError, so a
+    # caller can tell 'answered but wrong protocol' from 'unreachable'.
+    fake = RpcFake(handler=None)
+    fake._queue.append("ERR unknowncmd")
+    with pytest.raises(rpc.RpcProtocolError):
+        rpc.RpcClient(fake).hello()
+
+
 # --------------------------------------------------------------------------- #
 # hello / capabilities + auth + target parsing
 # --------------------------------------------------------------------------- #

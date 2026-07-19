@@ -162,12 +162,33 @@ class PicoSerialTransport:
             raise PicoNotFoundError(
                 "no Pico serial port found; flash firmware/pico and plug it in, or set "
                 "BT_HID_PICO_PORT=/dev/ttyACMx")
-        return serial.Serial(port, baud, timeout=timeout)
+        # ASSERT DTR (load-bearing): the Pico's native USB-CDC only transmits while the host has DTR
+        # raised, so we must NOT use the ESP32 reset-free B0 open (which de-asserts DTR and silences a
+        # Pico). Build the port unopened, force DTR/RTS on, then open. A native-USB Pico has no
+        # auto-reset circuit, so asserting the lines does not reboot it (unlike an ESP32 bridge).
+        s = serial.Serial()
+        s.port = port
+        s.baudrate = baud
+        s.timeout = timeout
+        s.dtr = True
+        s.rts = True
+        s.open()
+        return s
 
     def _get(self):
         if self._ser is None:
             self._ser = self._open_factory(self.port, self.baud, self.timeout)
         return self._ser
+
+    def open_channel(self):
+        """Open the port if needed and return the duck-typed serial line (write/readline) that
+        `board.McuBoard` drives JSON-RPC over -- the same hook Esp32Transport/NetTransport expose, so
+        the board relies on ONE transport interface regardless of family.
+
+        The Pico's native USB-CDC only transmits while DTR is ASSERTED, so this uses a plain
+        DTR-asserted pyserial open (the default) -- NOT the ESP32's reset-free B0 open, which leaves
+        DTR de-asserted (correct for an ESP32 auto-reset bridge, but it silences a Pico)."""
+        return self._get()
 
     def close(self):
         if self._ser is not None:
