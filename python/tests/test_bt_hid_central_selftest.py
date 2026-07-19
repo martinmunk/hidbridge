@@ -63,8 +63,8 @@ pytestmark = pytest.mark.skipif(
 # It self-skips unless the board is reachable + provisioned (BT_HID_NET_HOST / net.token).
 BACKENDS = ["pico", "esp32", "dongle", "net"]
 
-# Drive modes for the inject step (docs/bt-hid-modes.md): "frames" = Mode 2 frame relay (host builds
-# the report bytes); "rpc" = Mode 1 JSON-RPC `frames` over the transport's OWN channel (the board
+# Drive modes for the inject step (docs/bt-hid-modes.md): "frames" = raw frame relay (host builds
+# the report bytes); "rpc" = rpc JSON-RPC `frames` over the transport's OWN channel (the board
 # relays the same bytes). Both must land the IDENTICAL GATT notification. mode=rpc needs JSON-RPC
 # firmware, so the dongle backend (a BlueZ daemon) self-skips that combo -- see central.py.
 MODES = ["frames", "rpc"]

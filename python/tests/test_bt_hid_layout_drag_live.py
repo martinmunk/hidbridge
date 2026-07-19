@@ -2,9 +2,9 @@
 
 A transient BLE CENTRAL (a USB dongle or the built-in adapter) connects to the MCU peripheral,
 subscribes to its HID input reports, and byte-verifies the GATT notifications that arrive OVER THE AIR
-while the board is driven over its OWN channel (serial or net) with Mode 1 JSON-RPC. This reuses the
+while the board is driven over its OWN channel (serial or net) with rpc JSON-RPC. This reuses the
 central self-test machinery in hidbridge/central.py (connect-as-central + bond + subscribe + capture),
-extended to capture an ORDERED SEQUENCE of notifications and to drive an arbitrary Mode 1 command
+extended to capture an ORDERED SEQUENCE of notifications and to drive an arbitrary rpc command
 (see central.SCENARIOS + central_core.sequence_verdict).
 
 What each test PROVES (that reports.py alone cannot, offline):
@@ -24,7 +24,7 @@ hard-asserted (usage 0x33 / mod 0; the held-button move frame == [0x01,20,10,0])
 drift nor a reports.py change can slip through. central_core pins the same expectations as pure data
 (danish_ae_expected / hold_drag_expected), unit-tested offline in test_bt_hid_central_core.py.
 
-PRECONDITION: the board must be flashed with the CURRENT firmware -- per-slot `layout` (Mode 1) and
+PRECONDITION: the board must be flashed with the CURRENT firmware -- per-slot `layout` (rpc) and
 the press/release drag commands. If the board rejects a command (older firmware), central.py returns a
 SKIP, not a failure.
 

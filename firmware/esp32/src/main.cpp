@@ -88,12 +88,12 @@
 // the USB path for `unlock` if even the LAN is hostile. See docs/bt-hid-network-backend.md.
 
 #include <Arduino.h>
-#include <ArduinoJson.h>       // Mode 1 wire protocol: JSON-RPC 2.0 over newline-delimited JSON
-#include "hidbridge_mode1.h"   // shared native HID builders + JSON-RPC dispatch (firmware/shared/)
+#include <ArduinoJson.h>       // rpc wire protocol: JSON-RPC 2.0 over newline-delimited JSON
+#include "hidbridge_rpc.h"   // shared native HID builders + JSON-RPC dispatch (firmware/shared/)
 #include <NimBLEDevice.h>
 #include <NimBLEHIDDevice.h>
 #include <NimBLEServer.h>
-#include <Preferences.h>      // NVS: the device nickname (Mode 1) + the network token
+#include <Preferences.h>      // NVS: the device nickname (rpc) + the network token
 
 #ifdef HIDBRIDGE_NET
 #include <ETH.h>
@@ -101,8 +101,8 @@
 #include <NetworkClient.h>
 #include <NetworkServer.h>
 #include <Preferences.h>
-#include <WebServer.h>       // serves the Mode 1 control webpage HTML (:80) -- no /rpc drive endpoint
-#include <WebSocketsServer.h> // Mode 1 WS DRIVE CHANNEL for the control page (port 81) -- see "WS DRIVE"
+#include <WebServer.h>       // serves the rpc control webpage HTML (:80) -- no /rpc drive endpoint
+#include <WebSocketsServer.h> // rpc WS DRIVE CHANNEL for the control page (port 81) -- see "WS DRIVE"
 #include <ArduinoOTA.h>      // network firmware update (over Ethernet/WiFi)
 // The raw JSON-RPC / frame port (3333) is TLS-PSK ONLY -- see the TLS note below. The NVS token is
 // the pre-shared key. arduino-esp32 has no TLS *server* class, and the prebuilt esp_tls has PSK
@@ -201,7 +201,7 @@ static_assert(NUM_SLOTS >= 1 && NUM_SLOTS <= 20,
 // path. The pre-shared key IS the NVS token (the same secret the web `X-Auth-Token` and OTA password
 // reuse), so completing the handshake PROVES the peer holds the token WITHOUT it ever crossing the
 // wire: the handshake is the authentication (`authed` flips true when it finishes, no `@<token>`
-// line needed -- though one is still accepted for the existing Mode 2 client flow). A board with no
+// line needed -- though one is still accepted for the existing raw client flow). A board with no
 // token provisioned opens no TLS port at all (fail-closed). The control webpage stays plain HTTP on
 // :80 (browsers cannot speak TLS-PSK) -- that is the one remaining cleartext surface, LAN-only.
 // arduino-esp32 ships a TLS *client* but no TLS *server*, so we drive esp_tls's async PSK server
@@ -231,9 +231,9 @@ static const int g_pskCiphers[] = { MBEDTLS_TLS_PSK_WITH_AES_128_GCM_SHA256, 0 }
 static NetSession    netSessions[HB_MAX_NET_CLIENTS];
 static Preferences   prefs;
 static bool          ethUp = false;
-static WebServer     webServer(80);          // serves the Mode 1 control page HTML (no /rpc drive route)
+static WebServer     webServer(80);          // serves the rpc control page HTML (no /rpc drive route)
 // WS DRIVE CHANNEL (port 81) -- each browser tab holds ONE WebSocket open while it is open, and drives
-// the board over it (the same Mode 1 JSON-RPC the raw port carries). The point is the LIVE connection:
+// the board over it (the same rpc JSON-RPC the raw port carries). The point is the LIVE connection:
 // when a page closes / the tab dies / the laptop sleeps / the network drops, ITS WebSocket closes and
 // the board deterministically PARKS the slot that page was driving IFF no other session still drives it
 // (ref-counted, see slotClaimCount) -- "no connection without an active customer", with no
@@ -351,7 +351,7 @@ static int                 g_activeTarget = -1;
 static int                 g_serialDrivenSlot = -1;
 static bool                parked = false;   // true = intentionally NOT advertising (host parked it)
 
-// The device NICKNAME (Mode 1). Advertised BLE base name = "HIDBRIDGE-<nick>"; per-slot with a client
+// The device NICKNAME (rpc). Advertised BLE base name = "HIDBRIDGE-<nick>"; per-slot with a client
 // = "HIDBRIDGE-<nick>-<client>". Persisted in NVS; defaults to a unique "esp32-<mac-suffix>" so two
 // boards coexist out of the box. DEVICE_NAME above stays the fixed FIRMWARE tag (banners/ping/host
 // reset-detection) -- only the advertised name follows the nickname.
@@ -782,7 +782,7 @@ static void addrHex(const NimBLEAddress& a, char* out, size_t cap) {
 // Notify ONE report to the ACTIVE target slot's central. Returns true if it actually notified (a
 // central is connected on that slot), false if there was none. Routes via g_activeTarget, which the
 // dispatcher has set to the CALLING SESSION's claimed slot before this line -- so two sessions driving
-// two slots each hit their own central. Shared by Mode 2 (raw frame relay) and Mode 1 (below).
+// two slots each hit their own central. Shared by raw (raw frame relay) and rpc (below).
 static bool notifyTarget(NimBLECharacteristic* chr, const uint8_t* body, size_t len) {
   if (chr == nullptr) return false;
   chr->setValue((uint8_t*)body, len);
@@ -874,7 +874,7 @@ static bool commandAllowed(NetSession* sess, char cmd, Print& out) {
 }
 #endif
 
-// ---- Mode 1 (JSON-RPC): the report builders + dispatch live in ../../shared/hidbridge_mode1.h; the
+// ---- rpc (JSON-RPC): the report builders + dispatch live in ../../shared/hidbridge_rpc.h; the
 // ESP32 provides only the BLE-notify sink + its capabilities (net when the Ethernet build is on). ----
 static bool esp32Notify(uint8_t rid, const uint8_t* body, size_t len) {
   return notifyTarget(charForReportId(rid), body, len);
@@ -893,7 +893,7 @@ static void esp32FillHello(JsonObject r) {
   caps.add("slots"); caps.add("nickname"); caps.add("connect"); caps.add("frames");
   caps.add("layout");                            // per-slot keyboard layout (per-device)
   // The layouts this board accepts -- the control page builds its per-device dropdown from THIS list
-  // (not a hardcoded JS array), so adding a layout in hidbridge_mode1.h is enough. Single-sourced.
+  // (not a hardcoded JS array), so adding a layout in hidbridge_rpc.h is enough. Single-sourced.
   JsonArray la = r["layouts"].to<JsonArray>();
   for (int i = 0; i < hbmode1::LAYOUT_COUNT; i++) la.add(hbmode1::LAYOUT_NAMES[i]);
 #ifdef HIDBRIDGE_NET
@@ -902,7 +902,7 @@ static void esp32FillHello(JsonObject r) {
 #endif
 }
 
-// ---- Mode 1 firmware-specific methods: nickname + connection management BY CLIENT NAME. These touch
+// ---- rpc firmware-specific methods: nickname + connection management BY CLIENT NAME. These touch
 // NVS / the slot+identity system, so they live here (not in the shared header) and are passed to
 // handleJsonRpc as the `custom` handler. ----
 static int findSlotForClient(const char* client) {
@@ -1147,7 +1147,7 @@ static void esp32Custom(const char* method, JsonObjectConst params, JsonObject r
 static void dispatchLine(String line, Print& out, NetSession* sess) {
   line.trim();
   if (line.length() == 0) return;
-  if (line[0] == '{') {                                             // Mode 1: JSON-RPC
+  if (line[0] == '{') {                                             // rpc: JSON-RPC
     bool authed = true;
 #ifdef HIDBRIDGE_NET
     authed = (sess == nullptr || sess->authed);                     // TCP session must authenticate
@@ -1161,7 +1161,7 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
     hbmode1::handleJsonRpc(line, out, authed, esp32Notify, esp32FillHello, esp32Custom);
     return;
   }
-  char cmd = line[0];                                               // Mode 2: single-char frames
+  char cmd = line[0];                                               // raw: single-char frames
   String arg = line.substring(1);
 
 #ifdef HIDBRIDGE_NET
@@ -1285,7 +1285,7 @@ static void dispatchLine(String line, Print& out, NetSession* sess) {
 }
 
 // The single per-session entry for serial + TCP lines. Before dispatch, load THIS session's claimed
-// slot into the routing global g_activeTarget (so its K/M + Mode-1 reports hit ITS target); after
+// slot into the routing global g_activeTarget (so its K/M + rpc reports hit ITS target); after
 // dispatch, store back any claim the line moved (connect/pair/T/disconnect/X) and ref-count-park a
 // released slot (finishRoute). Serial (sess == nullptr) uses the one g_serialDrivenSlot; a TCP session
 // uses its own drivenSlot. This is the SAME before/after-dispatch pattern the WS path (wsOnText) uses.
@@ -1472,7 +1472,7 @@ static void onNetEvent(arduino_event_id_t event) {
 }
 
 // Self-contained control page (one PROGMEM string, no external assets). It drives the board ONLY over
-// its WebSocket (:81), speaking the SAME Mode 1 JSON-RPC the serial/TCP clients speak (there is no HTTP
+// its WebSocket (:81), speaking the SAME rpc JSON-RPC the serial/TCP clients speak (there is no HTTP
 // /rpc drive endpoint -- driving is WS/TCP/serial only, a persistent session per driver). Flow:
 // (1) unlock -- enter the token, verified over the WS; (2) Devices -- pair/connect/disconnect
 // identities by name; the HID controls stay disabled UNTIL a device is connected; (3) live control --

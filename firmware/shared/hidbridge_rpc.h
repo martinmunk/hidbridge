@@ -1,10 +1,10 @@
-// hidbridge_mode1.h -- Mode 1 native HID report layer + JSON-RPC dispatch, SHARED by the ESP32
+// hidbridge_rpc.h -- the "rpc" native HID report layer + JSON-RPC dispatch, SHARED by the ESP32
 // (NimBLE) and Pico (BTstack) firmwares.
 //
 // "Tell the board WHAT; it knows HOW." A deliberate C++ DUPLICATE of
 // python/src/hidbridge/reports.py (keymap + report builders) -- the board owns the HID descriptor and
 // report building, so no host code / no codegen lives in the firmware. The duplication vs reports.py
-// is guarded against drift by a host test (python/tests/test_bt_hid_mode1.py) that dry-runs each
+// is guarded against drift by a host test (python/tests/test_bt_hid_rpc.py) that dry-runs each
 // command and asserts the emitted bytes match reports.py. This header removes the OTHER duplication
 // (esp32 vs pico) by being shared; only the BLE-notify sink + the hello capabilities differ per board
 // and are passed in as callbacks.
@@ -378,7 +378,7 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
   } else if (!strcmp(method, "scroll")) {
     emitScroll(s, params["clicks"] | 0);
   } else if (!strcmp(method, "frames")) {
-    // Mode 2 semantics inside JSON-RPC: the host sends PRE-BUILT report frames ("<ridHex><bodyHex>",
+    // Raw-path semantics inside JSON-RPC: the host sends PRE-BUILT report frames ("<ridHex><bodyHex>",
     // the same shape a dry run returns) and the board just relays them. Unifies "one protocol".
     JsonArrayConst arr = params["frames"].as<JsonArrayConst>();
     if (arr.isNull()) argErr = "missing 'frames'";

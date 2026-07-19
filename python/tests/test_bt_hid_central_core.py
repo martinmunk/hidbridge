@@ -234,11 +234,11 @@ def test_notification_verdict_reports_missing_and_mismatch():
 
 
 # --------------------------------------------------------------------------- #
-# Drive-mode encoding: one KNOWN report as the Mode 1 `frames` hex string
+# Drive-mode encoding: one KNOWN report as the rpc `frames` hex string
 # --------------------------------------------------------------------------- #
 def test_frames_method_hex_encodes_report_id_and_body():
     # the SAME KNOWN drives the central self-test injects (keyboard 'a' down, mouse dx=3), now shaped
-    # as the Mode 1 `frames` string the mode=rpc inject relays: 2-hex report id + body hex.
+    # as the rpc `frames` string the mode=rpc inject relays: 2-hex report id + body hex.
     kbd_body = R.keyboard_report(0, [0x04]).data      # 00 00 04 00 00 00 00 00
     assert C.frames_method_hex(1, kbd_body) == "01" + kbd_body.hex() == "010000040000000000"
     mouse_body = R.mouse_report(dx=3).data            # 00 03 00 00

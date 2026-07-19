@@ -171,34 +171,34 @@ pairing. Registering the pairing agent as the DEFAULT agent (RequestDefaultAgent
 the kernel auto-connect path routes the pairing confirmation to the default agent, and its outcome is
 now recorded in the verdict (`steps.agent`).
 
-## Update 2026-07-17 -- both drive modes (Mode 1 rpc + Mode 2 frames) now exercised
+## Update 2026-07-17 -- both drive modes (rpc rpc + raw frames) now exercised
 
 The central self-test gained a `--mode {frames,rpc}` dimension (env `BT_HID_MODE`, default `frames`),
 so the SAME host-radio-as-central proof runs for BOTH ways of driving the board (docs/bt-hid-modes.md)
 and asserts the identical GATT notification bytes arrive either way:
 
-- **mode=frames** (Mode 2, the original): the host builds the exact report bytes and the transport
+- **mode=frames** (raw, the original): the host builds the exact report bytes and the transport
   relays them (`transport.send`). Unchanged.
-- **mode=rpc** (Mode 1, "smart firmware"): the host sends a JSON-RPC `frames` call over the
-  transport's **already-open** channel (`Mode1Client(transport._ser)`) that relays the SAME pre-built
+- **mode=rpc** (rpc, "smart firmware"): the host sends a JSON-RPC `frames` call over the
+  transport's **already-open** channel (`rpcClient(transport._ser)`) that relays the SAME pre-built
   report bytes; the board's firmware notifies them. Reusing the open channel is deliberate -- a second
   serial connection would reset the board / fight the first. The verdict records `result["mode"]`.
   rpc needs JSON-RPC firmware, so it applies to **esp32 / pico / net** only; the **dongle** backend (a
   local BlueZ daemon with no JSON-RPC) self-SKIPs `mode=rpc` with a clear reason.
 
 The pure `frames`-string encoding (`central_core.frames_method_hex` -- `<reportID hex><body hex>`, the
-shape a Mode 1 dry run returns) is unit-tested offline (`test_bt_hid_central_core.py`,
-`test_bt_hid_mode1.py`), so the frames<->rpc byte-equivalence is pinned with no board.
+shape a rpc dry run returns) is unit-tested offline (`test_bt_hid_central_core.py`,
+`test_bt_hid_rpc.py`), so the frames<->rpc byte-equivalence is pinned with no board.
 
 ### How to run BOTH modes live (once a working central is available)
 
 The pytest wrapper parametrizes over `(backend, mode)`; select a cell with `-k`:
 
 ```
-# Mode 2 (frames) over the ESP32 -- the original path:
+# raw (frames) over the ESP32 -- the original path:
 BT_HID_CENTRAL=1 BT_HID_CENTRAL_ADAPTER=hci1 BT_HID_CONNECT_METHOD=connectdevice \
     sudo -E python -m pytest tests/test_bt_hid_central_selftest.py -k "esp32 and frames" -rs
-# Mode 1 (rpc) over the ESP32 -- the board builds/relays the reports via JSON-RPC:
+# rpc (rpc) over the ESP32 -- the board builds/relays the reports via JSON-RPC:
 BT_HID_CENTRAL=1 BT_HID_MODE=rpc BT_HID_CENTRAL_ADAPTER=hci1 BT_HID_CONNECT_METHOD=connectdevice \
     sudo -E python -m pytest tests/test_bt_hid_central_selftest.py -k "esp32 and rpc" -rs
 

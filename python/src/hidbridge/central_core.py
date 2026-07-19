@@ -525,7 +525,7 @@ def sequence_verdict(received: list, expected: list,
 # Live layout + click-and-drag scenario expectations (PURE -- offline-testable)
 # --------------------------------------------------------------------------- #
 # The two hardware-in-the-loop live tests (tests/test_bt_hid_layout_drag_live.py) drive the board over
-# its OWN channel (Mode 1 JSON-RPC) while a transient BLE central captures the HID input-report
+# its OWN channel (rpc JSON-RPC) while a transient BLE central captures the HID input-report
 # notifications. Each test asserts the captured GATT notification SEQUENCE equals the reports.py builder
 # output. The expected byte sequences are pinned here as PURE data so they are unit-testable offline
 # (no board), and the live tests additionally cross-check them against reports.py directly so a drift
@@ -559,17 +559,17 @@ def hold_drag_expected() -> list[bytes]:
 
 
 # --------------------------------------------------------------------------- #
-# Drive-mode encoding -- one KNOWN report as a Mode 1 `frames` hex string
+# Drive-mode encoding -- one KNOWN report as a rpc `frames` hex string
 # --------------------------------------------------------------------------- #
 def frames_method_hex(report_id: int, body: bytes) -> str:
-    """Encode one report as the Mode 1 `frames` method's hex string: '<reportID hex><body hex>'.
+    """Encode one report as the rpc `frames` method's hex string: '<reportID hex><body hex>'.
 
     The central self-test drives each KNOWN report body over the board TWO ways and asserts the SAME
     GATT notification bytes arrive (see docs/bt-hid-modes.md):
-      * mode=frames -- the Mode 2 frame transport (`transport.send`), the host builds the report;
-      * mode=rpc    -- a Mode 1 JSON-RPC `frames` call over the transport's OWN open channel, which
+      * mode=frames -- the raw frame transport (`transport.send`), the host builds the report;
+      * mode=rpc    -- a rpc JSON-RPC `frames` call over the transport's OWN open channel, which
                        RELAYS these pre-built report bytes.
-    A `frames` entry is a 2-hex report id followed by the body as hex -- the exact shape a Mode 1
+    A `frames` entry is a 2-hex report id followed by the body as hex -- the exact shape a rpc
     dry run returns and `rpc.RpcClient.frames()` relays. Pure so the offline suite pins the
     encoding both modes share without a board.
     """

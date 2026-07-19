@@ -1,7 +1,7 @@
 """Device-gated: the BLE ADVERTISED name tracks the board's naming state (idle / paired / renamed).
 
 The HW-in-loop check for the NAMING surface -- the gap that let the board report a name it could not
-actually advertise. It drives the board through states with the Mode1 client and, at each state, scans
+actually advertise. It drives the board through states with the rpc client and, at each state, scans
 with a USB dongle as central (hidbridge.name_probe) and asserts the OVER-THE-AIR Complete Local Name
 equals what the board REPORTS it advertises. It also asserts an over-budget label is rejected (the
 31-byte advertising limit), and -- best effort, since LE-connect stalls on this host -- reads the GAP

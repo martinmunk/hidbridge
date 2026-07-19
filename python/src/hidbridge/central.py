@@ -12,8 +12,8 @@ Powered state is recorded + restored, the transient bond is removed on cleanup, 
 never touched. A BLE peripheral serves ONE central at a time, so if the MCU is already connected to
 another central (e.g. an iPad) we SKIP rather than disturb it.
 
-The inject step runs in either DRIVE MODE (--mode, docs/bt-hid-modes.md): "frames" (Mode 2 -- the
-host builds the report bytes and the board relays them, `transport.send`) or "rpc" (Mode 1 -- a
+The inject step runs in either DRIVE MODE (--mode, docs/bt-hid-modes.md): "frames" (raw -- the
+host builds the report bytes and the board relays them, `transport.send`) or "rpc" (a
 JSON-RPC `frames` call over the transport's OWN open channel; the board relays the same pre-built
 bytes). Both modes must land the IDENTICAL GATT notification, so this proves BOTH firmware paths carry
 HID over the air. mode=rpc needs JSON-RPC firmware, so it applies to esp32/pico/net only (the dongle
@@ -114,16 +114,16 @@ KNOWN_DRIVES = {
 
 
 # --------------------------------------------------------------------------- #
-# Live SCENARIOS -- Mode 1 (JSON-RPC) driven, ORDERED-notification-sequence verify.
+# Live SCENARIOS -- rpc (JSON-RPC) driven, ORDERED-notification-sequence verify.
 # --------------------------------------------------------------------------- #
 # Backs tests/test_bt_hid_layout_drag_live.py: instead of injecting ONE fixed frame and checking one
-# notification (the self-test above), a scenario drives a Mode 1 COMMAND SEQUENCE over the transport's
+# notification (the self-test above), a scenario drives a rpc COMMAND SEQUENCE over the transport's
 # OWN open channel while the central captures the ORDERED sequence of GATT input-report notifications on
 # a single report characteristic, and byte-verifies that sequence against reports.py (via central_core).
-# Each scenario declares: the canonical reports.py report id to capture on; an optional `setup` Mode 1
-# call (e.g. set the target slot's layout); the `drive` Mode 1 call(s) whose reports are captured; an
-# optional `teardown` Mode 1 call (run in cleanup, e.g. restore the layout); and whether the firmware's
-# mouse-body trailing-zero padding is tolerated. Mode 1 only, so the daemon (dongle) backend self-skips.
+# Each scenario declares: the canonical reports.py report id to capture on; an optional `setup` rpc
+# call (e.g. set the target slot's layout); the `drive` rpc call(s) whose reports are captured; an
+# optional `teardown` rpc call (run in cleanup, e.g. restore the layout); and whether the firmware's
+# mouse-body trailing-zero padding is tolerated. rpc only, so the daemon (dongle) backend self-skips.
 _AE_CHAR = "æ"   # U+00E6 LATIN SMALL LETTER AE -- the real Danish 'ae' character
 
 SCENARIOS = {
@@ -258,7 +258,7 @@ class CentralSelfTest:
         self.central_path = f"/org/bluez/{central_hci}"
         self.central_hci = central_hci
         self.transport = transport
-        # Optional live SCENARIO (SCENARIOS): when set, the fixed inject/verify is REPLACED by a Mode 1
+        # Optional live SCENARIO (SCENARIOS): when set, the fixed inject/verify is REPLACED by a rpc
         # command sequence whose ORDERED input-report notifications are captured + byte-verified. None
         # keeps the classic self-test path.
         self.scenario = scenario
@@ -266,8 +266,8 @@ class CentralSelfTest:
         # "scan" (direct Connect during active scan) or "connectdevice" (Adapter1.ConnectDevice
         # direct create-connection -- the hci0 auto-connect-stall escape). See central_core.
         self.connect_method = connect_method
-        # Drive mode for the INJECT step (docs/bt-hid-modes.md): "frames" = Mode 2 frame relay
-        # (transport.send, host builds the report bytes); "rpc" = Mode 1 JSON-RPC `frames` call over
+        # Drive mode for the INJECT step (docs/bt-hid-modes.md): "frames" = raw frame relay
+        # (transport.send, host builds the report bytes); "rpc" = rpc JSON-RPC `frames` call over
         # the transport's OWN open channel (the board relays the same pre-built bytes). Both must land
         # the IDENTICAL notification; the verify path is unchanged either way.
         self.mode = mode
@@ -693,7 +693,7 @@ class CentralSelfTest:
             if v["report_type"] != CC.REPORT_TYPE_INPUT:
                 return self._fail(f"{label} report {rid} is not an INPUT report "
                                   f"(type={v['report_type']})")
-        # 4a. LIVE SCENARIO path: drive a Mode 1 command sequence + capture the ordered notifications.
+        # 4a. LIVE SCENARIO path: drive a rpc command sequence + capture the ordered notifications.
         if self.scenario is not None:
             return self._run_scenario()
         # 4b. classic self-test: build the drive/verify targets (every present report we can drive)
@@ -754,15 +754,15 @@ class CentralSelfTest:
 
     def _inject(self):
         self.result["steps"]["inject"] = f"sending ({self.mode})"
-        # Inject the SAME KNOWN report bodies either as Mode 2 frames (transport.send) or, for
-        # mode=rpc, as a Mode 1 JSON-RPC `frames` call over the transport's OWN already-open channel.
+        # Inject the SAME KNOWN report bodies either as raw frames (transport.send) or, for
+        # mode=rpc, as a rpc JSON-RPC `frames` call over the transport's OWN already-open channel.
         # One report per target so the per-report ack ("notified" vs "noconn") stays visible.
         try:
             client = self._rpc_client() if self.mode == "rpc" else None
             for fw_id, kind, body in self._drive_targets:
                 if client is not None:
-                    # Mode 1: relay the pre-built report bytes; a real send returns {sent, conn}
-                    # (conn:false = accepted but no central on the target slot -- the Mode 2 "noconn").
+                    # rpc: relay the pre-built report bytes; a real send returns {sent, conn}
+                    # (conn:false = accepted but no central on the target slot -- the raw "noconn").
                     res = client.frames([CC.frames_method_hex(fw_id, body)])
                     self.result["steps"].setdefault("inject_resp", {})[str(fw_id)] = res
                     if res.get("sent", 1) == 0:
@@ -826,9 +826,9 @@ class CentralSelfTest:
         map_ok = self.result.get("report_map", {}).get("ok", False)
         self.result["status"] = "pass" if (v["ok"] and map_ok) else "fail"
 
-    # ---- live scenario: drive a Mode 1 command sequence + capture ordered notifications ----
+    # ---- live scenario: drive a rpc command sequence + capture ordered notifications ----
     def _run_scenario(self):
-        """Arm notifications on ONE report char, drive the scenario's Mode 1 sequence, capture the
+        """Arm notifications on ONE report char, drive the scenario's rpc sequence, capture the
         ordered notifications, and byte-verify them against reports.py (via central_core)."""
         spec = self.scenario_spec
         canon = spec["canon_report_id"]
@@ -881,7 +881,7 @@ class CentralSelfTest:
             # the board is not on the current firmware -- a PRECONDITION miss, so SKIP (never fail): a
             # real byte mismatch is decided later, in the verdict, only on notifications that ARRIVED.
             return self._skip(
-                f"scenario {self.scenario!r}: board rejected a Mode 1 command (needs the current "
+                f"scenario {self.scenario!r}: board rejected a rpc command (needs the current "
                 f"firmware -- per-slot layout + press/release drag): {e}")
         except Exception as e:  # noqa: BLE001
             return self._fail(f"scenario drive raised: {e}")
@@ -1006,14 +1006,14 @@ def main(argv=None):
                         "auto-connect-stall escape), or auto (connectdevice if available, else scan)")
     p.add_argument("--mode", default=os.environ.get("BT_HID_MODE", "frames"),
                    choices=("frames", "rpc"),
-                   help="inject mode: frames (Mode 2 frame relay -- the host builds the report bytes) "
-                        "or rpc (Mode 1 JSON-RPC `frames` over the transport's OWN channel -- the "
+                   help="inject mode: frames (raw frame relay -- the host builds the report bytes) "
+                        "or rpc (a JSON-RPC `frames` call over the transport's OWN channel -- the "
                         "board relays the same bytes). Both must deliver identical GATT notifications")
     p.add_argument("--scenario", default=None, choices=sorted(SCENARIOS),
-                   help="run a live SCENARIO instead of the fixed self-test: drive a Mode 1 command "
+                   help="run a live SCENARIO instead of the fixed self-test: drive a rpc command "
                         "sequence over the transport's OWN channel and byte-verify the ORDERED "
                         "input-report notifications (danish-ae = Danish layout end-to-end; hold-drag "
-                        "= a held mouse button survives motion). Mode 1 only -- daemon backend skips.")
+                        "= a held mouse button survives motion). rpc only -- daemon backend skips.")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
@@ -1025,7 +1025,7 @@ def main(argv=None):
         print(json.dumps(out) if args.json else f"SKIP: {out['reason']}")
         return 2
 
-    # mode=rpc drives the board via Mode 1 JSON-RPC, which only the MCU firmwares (esp32/pico/net)
+    # mode=rpc drives the board via rpc JSON-RPC, which only the MCU firmwares (esp32/pico/net)
     # speak. The dongle backend is a local BlueZ daemon with no JSON-RPC channel -- skip clearly
     # rather than fail (mode=frames still covers it).
     if args.mode == "rpc" and profile.driver == "daemon":
@@ -1036,7 +1036,7 @@ def main(argv=None):
         print(json.dumps(out) if args.json else f"SKIP: {reason}")
         return 2
 
-    # A live SCENARIO is Mode 1 (JSON-RPC) driven, so the daemon (dongle) backend cannot run it.
+    # A live SCENARIO is rpc (JSON-RPC) driven, so the daemon (dongle) backend cannot run it.
     if args.scenario is not None and profile.driver == "daemon":
         reason = (f"scenario {args.scenario!r} needs JSON-RPC firmware; the dongle backend is a BlueZ "
                   "daemon (no JSON-RPC) -- skipping")

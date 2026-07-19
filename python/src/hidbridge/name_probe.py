@@ -5,7 +5,7 @@ bytes + notification bytes over BLE, but never that the board ADVERTISES the nam
 the GAP Device Name characteristic (0x2A00) read after connecting -- exactly the surface that once
 showed two different names (advertised "HIDBRIDGE-<nick>-<client>" while scanning, then a stale fixed
 "HIDBRIDGE-esp32" once connected). test_bt_hid_naming_live.py drives the board through states with the
-Mode1 client and calls this to assert the over-the-air name at each state.
+rpc client and calls this to assert the over-the-air name at each state.
 
 SCAN vs CONNECT on this host: scanning works even where the built-in adapter's LE auto-connect stalls
 (docs/bt-hid-central-selftest-status.md), so the advertised-name half is runnable; the optional

@@ -1,19 +1,19 @@
-# Two ways to drive a board: Mode 1 (smart firmware) and Mode 2 (radio)
+# Two ways to drive a board: rpc (smart firmware) and raw (radio)
 
 hidbridge's MCU firmware (ESP32 / Pico) can be driven two ways over the same channel (USB serial or
-TCP). A line is routed by its first character: a `{` is Mode 1 (JSON-RPC); anything else is a Mode 2
+TCP). A line is routed by its first character: a `{` is rpc (JSON-RPC); anything else is a raw
 frame/management command. Both modes coexist on one board at one time.
 
-## Mode 1 -- "tell the board WHAT; it knows HOW" (the smart-firmware path)
+## rpc -- "tell the board WHAT; it knows HOW" (the smart-firmware path)
 
 The board owns everything about the HID: the report descriptor and the report *building*. The host
 sends high-level INTENT and the firmware turns it into HID reports and BLE notifications.
 
 - Wire format: **JSON-RPC 2.0**, one JSON object per line.
-- The report layer is written **natively in C++** in `firmware/shared/hidbridge_mode1.h`, shared by
+- The report layer is written **natively in C++** in `firmware/shared/hidbridge_rpc.h`, shared by
   both firmwares. It is a deliberate DUPLICATE of `python/src/hidbridge/reports.py` (keymap + report
   builders) -- the firmware carries no host code and no codegen. The duplication is guarded against
-  drift by `python/tests/test_bt_hid_mode1.py`, which dry-runs every command and asserts the bytes
+  drift by `python/tests/test_bt_hid_rpc.py`, which dry-runs every command and asserts the bytes
   the firmware builds equal `reports.py`'s.
 
 ### Protocol
@@ -42,7 +42,7 @@ Methods:
 - Any method with a `"dry": true` param returns `result.frames` (the built report bytes as
   `<reportID hex><body hex>` strings) WITHOUT notifying -- the verification / no-BLE path.
 - `result` for a real send is `{sent: <n>, conn: <bool>}` (`conn:false` = accepted but no central
-  connected -- the Mode 2 "OK noconn" equivalent).
+  connected -- the raw "OK noconn" equivalent).
 - Errors use standard JSON-RPC codes: `-32700` parse error, `-32601` method not found, `-32602`
   invalid params, `-32001` auth required (an unauthenticated TCP session may only call `hello`).
 
@@ -52,7 +52,7 @@ capabilities handshake, so the host adapts to older firmware instead of assuming
 ### Using it
 
 ```bash
-# CLI: --rpc routes the normal verbs through Mode 1 (the board builds the reports)
+# CLI: --rpc routes the normal verbs through rpc (the board builds the reports)
 hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 type "hello world"
 hidbridge --rpc --backend esp32 --port /dev/ttyUSB3 move 40 0
 hidbridge --rpc --backend net --host hidbridge-<nick>.local status   # shows the hello handshake
@@ -66,7 +66,7 @@ with open_client("esp32:/dev/ttyUSB3") as c:
     c.move(40, 0)
 ```
 
-## Mode 2 -- "just a radio" (the frame-relay path)
+## raw -- "just a radio" (the frame-relay path)
 
 The host builds the exact report bytes (`reports.py` + `controller.py`) and the board relays them as
 BLE notifications -- the board is a dumb pipe. This is the original path and it is unchanged.
@@ -83,9 +83,9 @@ hidbridge --backend esp32 --port /dev/ttyUSB3 type "hello"    # host builds fram
 
 ## Which to use
 
-- **Mode 2** is the default and the one to use for the multi-backend guarantee (identical bytes from
+- **raw** is the default and the one to use for the multi-backend guarantee (identical bytes from
   BlueZ / Pico / ESP32), for host-side-only logic, and for the lowest firmware surface.
-- **Mode 1** makes a single board self-contained: it can be driven by anything that speaks JSON-RPC
+- **rpc** makes a single board self-contained: it can be driven by anything that speaks JSON-RPC
   over a socket/serial with no host report layer at all. Useful when the board is the whole product,
   or for a non-Python client.
 

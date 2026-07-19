@@ -22,15 +22,15 @@ and `uk` (British ISO). The modifier byte carries **Shift** (`MOD_LSHIFT` `0x02`
 layouts, **AltGr** (`MOD_RALT` `0x40`, the third "European" shift level -- it reaches `@ [ ] { } \ |`
 on Danish, and `€` on British).
 
-The firmware Mode-1 layer (`firmware/shared/hidbridge_mode1.h`) mirrors the same three tables (the
+The firmware rpc layer (`firmware/shared/hidbridge_rpc.h`) mirrors the same three tables (the
 deliberate `reports.py` duplicate), keyed on the Unicode **codepoint** (the Danish letters and `£`/`€`/`¬`
 arrive as multi-byte UTF-8, so `emitType` UTF-8-decodes each char before mapping).
 
 ### Selection / persistence
 
-- **Mode 2 (host builds bytes), CLI:** `hidbridge --layout da type "..."`. The host expands the text
-  with `reports.py` and sends pre-built frames, so it works across every Mode-2 backend.
-- **Mode 1 (board builds bytes), ESP32:** the layout is **per BLE identity slot** (per device), stored
+- **raw (host builds bytes), CLI:** `hidbridge --layout da type "..."`. The host expands the text
+  with `reports.py` and sends pre-built frames, so it works across every raw backend.
+- **rpc (board builds bytes), ESP32:** the layout is **per BLE identity slot** (per device), stored
   in NVS (`lay<n>`, alongside the client label `cli<n>`), default `us`. The active layout for
   `type`/`key` is the **current target slot's**. Set it with the `layout` JSON-RPC method
   (`{"method":"layout","params":{"slot":2,"name":"uk"}}` -- address by `slot` index or `client` name,
@@ -132,7 +132,7 @@ This proves **byte-level self-consistency** two ways. Offline (no board), `test_
 parses the firmware's `daUsage`/`ukUsage` tables straight out of the header and asserts, char by char,
 that each equals `reports.char_to_usage(ch, <layout>)` -- so a `da` or `uk` drift between the two
 duplicated tables fails a plain `pytest` run. With hardware,
-`test_bt_hid_mode1.py::test_firmware_dry_run_matches_reports_py` (`BT_HID_MODE1=1`) dry-runs the board
+`test_bt_hid_rpc.py::test_firmware_dry_run_matches_reports_py` (`BT_HID_RPC=1`) dry-runs the board
 and checks the same equality end to end. Both rest on a **research-sourced** mapping; whether `æ` (da)
 or `£` (uk) actually appears on the host must still be confirmed by a person typing to a
 correspondingly-configured device -- not something the offline suite can assert.

@@ -1,10 +1,10 @@
 """Offline host<->firmware parity for the non-US keyboard layouts (Danish + British).
 
-The Mode 1 firmware (`firmware/shared/hidbridge_mode1.h`) carries a byte-for-byte C++ DUPLICATE of the
+The rpc firmware (`firmware/shared/hidbridge_rpc.h`) carries a byte-for-byte C++ DUPLICATE of the
 `reports.py` keymaps (deliberate, no codegen -- see CLAUDE.md). For the `us` layer, the report-map and
 dry-run guards already pin parity. For the `da` (Danish ISO) and `uk` (British ISO) layers, the ONLY
-end-to-end check today is `test_bt_hid_mode1.py::test_firmware_dry_run_matches_reports_py`, which is
-gated on `BT_HID_MODE1=1` and needs a flashed board -- so on an offline box a drift between the two
+end-to-end check today is `test_bt_hid_rpc.py::test_firmware_dry_run_matches_reports_py`, which is
+gated on `BT_HID_RPC=1` and needs a flashed board -- so on an offline box a drift between the two
 tables goes unnoticed.
 
 This test closes that gap WITHOUT hardware: it PARSES the firmware header's `daUsage`/`ukUsage` tables
@@ -17,7 +17,7 @@ without the other, this fails.
 import pathlib
 import re
 
-HEADER = pathlib.Path(__file__).resolve().parents[2] / "firmware/shared/hidbridge_mode1.h"
+HEADER = pathlib.Path(__file__).resolve().parents[2] / "firmware/shared/hidbridge_rpc.h"
 
 from hidbridge import reports as R  # noqa: E402
 
@@ -32,7 +32,7 @@ def _mod_constants(src: str) -> dict[str, int]:
 
 
 def test_firmware_layout_names_match_reports():
-    """The firmware's enumerable LAYOUT_NAMES[] (hidbridge_mode1.h) is the SINGLE source for "which
+    """The firmware's enumerable LAYOUT_NAMES[] (hidbridge_rpc.h) is the SINGLE source for "which
     layouts exist" -- it drives both the `layout`-method validation and the control page's dropdown
     (via hello.layouts). It must list exactly the layouts reports.py knows, or the page would offer a
     layout the host can't build (or hide one it can). Parse the C array and compare to reports.LAYOUTS."""

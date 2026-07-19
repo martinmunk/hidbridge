@@ -46,8 +46,8 @@
  */
 
 #include <Arduino.h>
-#include <ArduinoJson.h>       // Mode 1 wire protocol: JSON-RPC 2.0 over newline-delimited JSON
-#include "hidbridge_mode1.h"   // shared native HID builders + JSON-RPC dispatch (firmware/shared/)
+#include <ArduinoJson.h>       // rpc wire protocol: JSON-RPC 2.0 over newline-delimited JSON
+#include "hidbridge_rpc.h"   // shared native HID builders + JSON-RPC dispatch (firmware/shared/)
 #include <KeyboardBLE.h>
 #include <MouseBLE.h>
 #include <HID_Bluetooth.h>
@@ -191,7 +191,7 @@ static void addr_hex(const bd_addr_t a, char *out, size_t cap) {
     snprintf(out, cap, "%02x%02x%02x%02x%02x%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
 }
 
-#define LINE_MAX 1024   // >= a JSON-RPC line (Mode 1); Mode 2 frames are tiny
+#define LINE_MAX 1024   // >= a JSON-RPC line (rpc); raw frames are tiny
 static char line_buf[LINE_MAX];
 static int  line_len = 0;
 
@@ -227,7 +227,7 @@ static void send_report(uint8_t report_id, const uint8_t *body, int body_len) {
     Serial.println(ok ? "OK" : "ERR notconnected");
 }
 
-// ---- Mode 1 (JSON-RPC): builders + dispatch live in ../../shared/hidbridge_mode1.h; the Pico
+// ---- rpc (JSON-RPC): builders + dispatch live in ../../shared/hidbridge_rpc.h; the Pico
 // provides only the BLE-notify sink + its capabilities. Serial-only, so always authenticated. ----
 static bool picoNotify(uint8_t rid, const uint8_t *body, size_t len) {
     uint8_t report[1 + 8];
@@ -246,7 +246,7 @@ static void handle_line(char *line) {
     while (*line == ' ' || *line == '\t') line++;
     if (line[0] == 0) return;
 
-    if (line[0] == '{') {                       // Mode 1: JSON-RPC (serial is trusted -> authed=true)
+    if (line[0] == '{') {                       // rpc: JSON-RPC (serial is trusted -> authed=true)
         // The active keyboard layout is the TARGET slot's, so `type`/`key` map to the right chars.
         hbmode1::setActiveLayout((tgt_slot >= 0 && tgt_slot < NUM_SLOTS) ? slot_layout[tgt_slot]
                                                                          : hbmode1::LAYOUT_US);

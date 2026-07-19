@@ -43,7 +43,7 @@ subscription, `EVT ready` / `EVT unsubscribed` (the host wrote/cleared the repor
 `EVT ready` (or `subscribed=1`) as the **readiness** signal so the first keystroke after (re)connect
 is not dropped.
 
-The ESP32 firmware can also be driven with a higher-level **JSON-RPC 2.0** protocol (Mode 1) over the
+The ESP32 firmware can also be driven with a higher-level **JSON-RPC 2.0** protocol (rpc) over the
 same channel -- the board owns the report building; the host sends intent. See
 [`../docs/bt-hid-modes.md`](../docs/bt-hid-modes.md).
 

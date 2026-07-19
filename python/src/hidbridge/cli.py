@@ -331,8 +331,8 @@ def cmd_type(args):
     layout = _layout_of(args)
     if layout != R.DEFAULT_LAYOUT:
         # Non-US layout: expand HOST-SIDE with reports.py (the single source of truth) and send the
-        # pre-built frames -- works uniformly across every Mode 2 backend (dongle daemon / MCU serial)
-        # without teaching each one about layouts. For --rpc (Mode 1) the board owns the layout,
+        # pre-built frames -- works uniformly across every raw backend (dongle daemon / MCU serial)
+        # without teaching each one about layouts. For --rpc mode the board owns the layout,
         # selected PER SLOT with `hidbridge --rpc ... ` + the board's `layout` method / web UI.
         try:
             frames = [{"kind": "keyboard", "hex": r.data.hex()}
@@ -591,11 +591,11 @@ def build_parser():
     p.add_argument("--layout", default=os.environ.get("BT_HID_LAYOUT", R.DEFAULT_LAYOUT),
                    choices=sorted(R.LAYOUTS),
                    help="keyboard layout the TARGET host uses ('us' default, 'da' Danish, 'uk' British). Decides "
-                        "which scancode+modifier each character maps to for type/key/unlock (Mode 2). "
-                        "For --rpc/Mode 1 the board owns the layout, set PER DEVICE with its `layout` "
+                        "which scancode+modifier each character maps to for type/key/unlock (raw). "
+                        "For --rpc/rpc the board owns the layout, set PER DEVICE with its `layout` "
                         "method / web UI.")
     p.add_argument("--rpc", action="store_true", default=bool(os.environ.get("BT_HID_RPC")),
-                   help="Mode 1: tell the BOARD what to do (JSON-RPC); it builds the HID reports "
+                   help="rpc: tell the BOARD what to do (JSON-RPC); it builds the HID reports "
                         "itself, instead of the host building frames. Needs an MCU backend "
                         "(--backend esp32/pico/net + --port/--host).")
     sub = p.add_subparsers(dest="cmd", required=True)

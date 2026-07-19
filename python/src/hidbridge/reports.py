@@ -370,7 +370,7 @@ def key_reports(name: str, modifiers: int = 0, layout: str = DEFAULT_LAYOUT) -> 
     `name` is a named key ("enter", "tab", "f5", ...) OR a single printable char ("c", "/") so that
     modifier shortcuts work -- key_reports("c", MOD_LGUI) is Cmd+C. For the single-char form the
     passed `modifiers` are authoritative and the char's own shift is ignored (mirrors the firmware
-    hidbridge_mode1.h `key` handler)."""
+    hidbridge_rpc.h `key` handler)."""
     key = name.lower()
     if key in KEY_NAME_TO_USAGE:
         usage = KEY_NAME_TO_USAGE[key]
