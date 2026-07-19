@@ -56,12 +56,21 @@ def _slot(rpc, slot) -> dict:
 
 
 def _wait_conn(rpc, slot, want=True, timeout=40.0, poll=1.0) -> bool:
+    # A readiness POLL: a board mid-BLE-(re)connect can transiently not answer an `identities` poll
+    # (a RpcTimeout inside the post-connect window) -- that just means "not confirmed this cycle",
+    # so keep polling rather than propagating. A genuinely stuck board still fails via the deadline.
+    from hidbridge.rpc import RpcError
     end = time.time() + timeout
+    last = None
     while time.time() < end:
-        if bool(_slot(rpc, slot).get("conn")) == want:
+        try:
+            last = bool(_slot(rpc, slot).get("conn"))
+        except RpcError:
+            last = None
+        if last == want:
             return True
         time.sleep(poll)
-    return bool(_slot(rpc, slot).get("conn")) == want
+    return last == want
 
 
 @pytest.fixture()

@@ -354,6 +354,31 @@ def test_call_noise_after_stall_still_raises_protocol_error():
         rpc.RpcClient(ch).wake()
 
 
+def test_call_skips_plaintext_evt_event_lines():
+    # The firmware's async events are PLAIN TEXT ("EVT ready"/"EVT connected"/"EVT net up ..."), NOT
+    # JSON. They interleave with replies and must be SKIPPED -- not recorded as `noise` (which would
+    # wrongly raise RpcProtocolError). This is the exact post-connect live failure on esp32eth.
+    reply = _line({"jsonrpc": "2.0", "id": 1, "result": {"ok": 9}})
+    ch = QueueChannel([b"EVT connected\n", b"EVT ready\n", b"", reply])
+    assert rpc.RpcClient(ch).wake() == {"ok": 9}
+
+
+def test_call_evt_lines_do_not_mask_a_genuine_legacy_error():
+    # skipping EVT must NOT swallow a real legacy `ERR` reply that follows: still RpcProtocolError.
+    ch = QueueChannel([b"EVT ready\n", b"ERR unknowncmd\n", b""])
+    with pytest.raises(rpc.RpcProtocolError):
+        rpc.RpcClient(ch).wake()
+
+
+def test_call_evt_then_long_stall_is_timeout_not_protocol_error():
+    # THE live symptom: the board emits an async `EVT ready`, then stalls past max_empty with no reply.
+    # EVT is not "answered-wrong" firmware, so this is a TRANSIENT RpcTimeout (a poller retries), NOT
+    # an RpcProtocolError. (Recording EVT as noise wrongly reported RpcProtocolError here.)
+    ch = QueueChannel([b"EVT ready\n"] + [b""] * 10)
+    with pytest.raises(rpc.RpcTimeout):
+        rpc.RpcClient(ch).wake()
+
+
 # --------------------------------------------------------------------------- #
 # hello / capabilities + auth + target parsing
 # --------------------------------------------------------------------------- #

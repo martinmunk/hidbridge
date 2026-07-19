@@ -91,9 +91,9 @@ class RpcClient:
         req = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": p}
         self._ch.write((json.dumps(req, separators=(",", ":")) + "\n").encode("ascii"))
         want = self._id
-        # Demux robustly. During the post-connect window the board emits a burst of async `EVT`
-        # notifications (id=None) and can briefly stall (an empty read) BEFORE the real reply, so we
-        # must not let any of that starve the response:
+        # Demux robustly. During the post-connect window the board emits a burst of async events
+        # (unsolicited plain-text `EVT ...` lines, and/or id-less JSON notifications) and can briefly
+        # stall (an empty read) BEFORE the real reply, so we must not let any of that starve it:
         #   * async notifications, mismatched-id (pipelined) replies, and noise lines are SKIPPED and
         #     do NOT consume the response budget the way a fixed loop count did;
         #   * a TRANSIENT stall (a bounded run of empty reads -- each is one full channel-timeout
@@ -121,8 +121,13 @@ class RpcClient:
             empty_run = 0                     # data flowed -- the stall (if any) is over
             line = raw.decode("ascii", "replace").strip()
             if not line.startswith("{"):
-                if line:
-                    noise = line              # a raw-path banner / boot / ERR line -- remember it
+                # `EVT ...` lines (ready/connected/disconnected/unsubscribed/net ...) are UNSOLICITED
+                # async events the firmware broadcasts to serial + net -- skip them: neither a reply
+                # NOR legacy-firmware noise. Recording one as noise wrongly turned a post-connect stall
+                # into RpcProtocolError instead of a transient RpcTimeout. Any OTHER non-JSON line (a
+                # boot banner, a legacy `ERR unknowncmd`) is still noise -> RpcProtocolError.
+                if line and not line.startswith("EVT "):
+                    noise = line
                 continue
             try:
                 msg = json.loads(line)
