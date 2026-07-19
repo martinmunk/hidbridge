@@ -26,11 +26,14 @@ reliably where BlueZ stalls -- for a ~USD 5-6 board and a USB cable.
 ## Wire protocol: one versioned JSON-RPC 2.0 protocol (host -> MCU, 115200 baud / TCP, newline ASCII)
 
 The MCU wire is **one JSON-RPC 2.0 protocol** over the same channel (serial or TCP): the board builds
-every HID report AND owns device management, and the host sends **intent**. (The earlier host-built
-`K<hex>`/`M<hex>` frame relay AND the single-char device commands `P/A/I/T/S/N/V/W/X/O` were folded
-into JSON-RPC and **removed** -- the only non-JSON line still accepted is `@<token>`, a TCP session's
-auth line.) The full method vocabulary + params, the `caps` list, the `proto` version, and the
-version-independence policy live in [`../docs/bt-hid-protocol.md`](../docs/bt-hid-protocol.md).
+every HID report AND owns device management, and the host sends **intent**. Since **proto 2** the wire
+is uniformly JSON -- requests, replies, errors, and async `event` notifications are all JSON objects; a
+non-JSON line yields a JSON-RPC parse error `{id:null}`. (The earlier host-built `K<hex>`/`M<hex>` frame
+relay AND the single-char device commands `P/A/I/T/S/N/V/W/X/O` were folded into JSON-RPC and
+**removed**; the plain-text `EVT`/`ERR` frames and the TCP `@<token>` auth line were removed at proto 2 --
+the TLS-PSK handshake is now the sole network auth.) The full method vocabulary + params, the `caps`
+list, the `proto` version, and the version-independence policy live in
+[`../docs/bt-hid-protocol.md`](../docs/bt-hid-protocol.md).
 
 Request `{"jsonrpc":"2.0","id":<n>,"method":<m>,"params":{...}}` -> `{..,"result":{...}}` or
 `{..,"error":{"code":..,"message":..}}`. A params `"dry":true` returns the built report bytes as hex
@@ -54,10 +57,11 @@ net_status                     Ethernet/TCP state: {eth,ip,port,mdns,token,clien
 provision {token}              set the network auth token -- SERIAL ONLY, refused over TCP (was W)
 ```
 
-Async link events arrive unsolicited as `EVT connected` / `EVT disconnected` and, for the HID report
-subscription, `EVT ready` / `EVT unsubscribed` (the host wrote/cleared the report CCCDs). The host uses
-`EVT ready` (or `ping`'s `subscribed`) as the **readiness** signal so the first keystroke after
-(re)connect is not dropped.
+Async link/readiness state arrives unsolicited as an id-less JSON-RPC **notification**
+`{"jsonrpc":"2.0","method":"event","params":{"event":"connected|disconnected|ready|unsubscribed","slot":N}}`
+(`ready`/`unsubscribed` = the host wrote/cleared the report CCCDs). The host uses `event:"ready"` (or
+`ping`'s `subscribed`) as the **readiness** signal so the first keystroke after (re)connect is not
+dropped. (proto 1 firmware emitted these as plain-text `EVT ...` lines; the wheel still reads both.)
 
 ## Per-bond identity ("host slots")
 
