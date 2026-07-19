@@ -314,7 +314,22 @@ def test_firmware_dry_run_matches_reports_py():
 
     This is the drift guard for the deliberate reports.py <-> firmware duplication."""
     c = rpc.open_client("esp32:" + os.environ.get("BT_HID_ESP32_PORT", "/dev/ttyUSB3"))
+    prev_tgt = None
+    borrowed = None
     try:
+        # Claim a send-target OURSELVES so this works from a CLEAN board (tgt=-1, no pre-claimed slot):
+        # `layout` with no slot arg addresses the CURRENT TARGET slot, so without a target the layout
+        # round-trip below would have nothing to set. Borrow a KNOWN-UNUSED slot (no client/bond) so we
+        # never clobber a real device's persisted layout; restore the prior target in the finally.
+        ident = c.identities()
+        prev_tgt = ident.get("tgt")
+        slots = ident.get("slots", [])
+        borrowed = next((s["slot"] for s in slots
+                         if not s.get("client") and not s.get("bonded") and not s.get("conn")), None)
+        if borrowed is None:
+            borrowed = max((s["slot"] for s in slots), default=0)
+        c.target(borrowed)
+
         def frames(rl):
             return ["%02x" % r.report_id + r.data.hex() for r in rl]
         checks = [
@@ -346,4 +361,10 @@ def test_firmware_dry_run_matches_reports_py():
         assert c.type_text("aA@'", dry=True).get("frames") == frames(R.type_text("aA@'")), \
             "drift: firmware default-us type != reports.type_text() after layout round-trip"
     finally:
+        # Restore the board's prior send-target (a clean board had none: tgt=-1 -> leave the borrow).
+        if prev_tgt is not None and prev_tgt >= 0 and prev_tgt != borrowed:
+            try:
+                c.target(prev_tgt)
+            except rpc.RpcError:
+                pass
         c.close()
