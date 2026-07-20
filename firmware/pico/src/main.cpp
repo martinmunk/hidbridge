@@ -185,6 +185,7 @@ static void select_slot_advertise(int n, const char *name) {
     gap_scan_response_set_data(n_sr, slot_scan_rsp_buf);                     // constant across slots
     adv_slot = n;
     gap_advertisements_enable(1);
+    hbmode1::logSlotf(hbmode1::LOG_INFO, n, "advertising as %s", slot_name[n]);
 }
 
 // Format a BTstack bd_addr_t (big-endian) as 12 hex chars, MSB first.
@@ -204,6 +205,11 @@ static bool picoNotify(uint8_t rid, const uint8_t *body, size_t len) {
     memcpy(report + 1, body, len);
     return PicoBluetoothBLEHID.send(report, 1 + len);
 }
+// The firmware log SINK (see hbmode1::setLogSink): the Pico is serial-only, so a structured `log`
+// notification is just the formatted JSON line printed to the USB-CDC channel -- same wire as replies
+// and `event` notifications. Shared level enum/filter/formatting live in the header (one implementation
+// for both boards); the board provides only this sink, mirroring the report notify sink above.
+static void picoLogSink(const char *line) { Serial.println(line); }
 static void picoFillHello(JsonObject r) {
     r["device"] = BASE_NAME;
     r["fw"] = HB_FW_VERSION;                      // firmware SemVer (release version)
@@ -217,6 +223,7 @@ static void picoFillHello(JsonObject r) {
     caps.add("keyboard"); caps.add("mouse"); caps.add("slots");
     caps.add("connect"); caps.add("target"); caps.add("advertise"); caps.add("park");
     caps.add("layout"); caps.add("ping");
+    caps.add("logs");                            // structured `log` notifications + set_log_level filter
     JsonArray la = r["layouts"].to<JsonArray>();
     for (int i = 0; i < hbmode1::LAYOUT_COUNT; i++) la.add(hbmode1::LAYOUT_NAMES[i]);
 }
@@ -333,6 +340,9 @@ static void handle_line(char *line) {
 
 void setup() {
     Serial.begin(115200);
+    hbmode1::setLogSink(picoLogSink);            // structured logging over serial -- register FIRST
+    hbmode1::logMsgf(hbmode1::LOG_INFO, "boot HIDBRIDGE-pico fw=%s proto=%d",
+                     HB_FW_VERSION, hbmode1::PROTO_VERSION);
     // Per-slot default names (until the host sets a target-scoped one via I<n>:name). Slot 0 keeps
     // the legacy "HIDBRIDGE-pico" so an EXISTING bond still sees a familiar name; slots >=1 = -sN.
     for (int i = 0; i < NUM_SLOTS; i++) {
@@ -345,8 +355,12 @@ void setup() {
     PicoBluetoothBLEHID.setOpenedCB([](uint8_t, uint16_t, uint8_t *packet, uint16_t) {
         conn_slot = adv_slot;
         pico_con_handle = hids_subevent_input_report_enable_get_con_handle(packet);
+        // onOpened fires on HID input-report-enable == connected AND subscribed, so this is the Pico's
+        // slot-ready signal (info): the single-conn wrapper has no separate per-report CCCD callback.
+        hbmode1::logSlotf(hbmode1::LOG_INFO, conn_slot, "central connected + subscribed (slot ready)");
     });
     PicoBluetoothBLEHID.setClosedCB([](uint8_t, uint16_t, uint8_t *, uint16_t) {
+        hbmode1::logSlotf(hbmode1::LOG_INFO, conn_slot, "central disconnected");
         conn_slot = -1;
         pico_con_handle = HCI_CON_HANDLE_INVALID;
     });

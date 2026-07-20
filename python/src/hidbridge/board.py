@@ -138,6 +138,7 @@ class McuBoard:
             "max_sessions": max_sessions,
             "per_device_identity": "connect" in caps,
             "layouts": "layout" in caps,
+            "logs": "logs" in caps,
             "rpc_frames": "frames" in caps,
             "medium": getattr(self._tp, "BACKEND", board),
             "caps": sorted(caps),
@@ -274,6 +275,11 @@ class McuBoard:
     def provision(self, token: str) -> dict:
         """Set the network auth token (SERIAL ONLY -- the firmware refuses `provision` over TCP)."""
         return self._rpc.provision(token)
+
+    def set_log_level(self, level: str) -> dict:
+        """Set the board's runtime log filter ('error'|'warn'|'info'|'debug'); board `log`
+        notifications route to the `hidbridge.mcu` logger (see rpc._route_log)."""
+        return self._rpc.set_log_level(level)
 
     # ---- raw frame transport: NOT the drive path; kept for the offline byte-parity tests + the
     #      central self-test's encodability check. NOT a live MCU drive path (the board builds reports). ----

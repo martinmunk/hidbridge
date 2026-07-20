@@ -28,10 +28,19 @@ Stdlib only (json + the injected channel), so this imports and unit-tests fully 
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from dataclasses import dataclass, field
 
 DEFAULT_BAUD = 115200
+
+# Structured logs the board streams as id-less JSON-RPC `log` notifications are routed to THIS logger
+# (a child of the package logger), at the level named in the notification. The application configures
+# handlers/levels on "hidbridge.mcu" (or a parent) as it wishes -- by default Python's last-resort
+# handler shows WARNING+ only, so info/debug board logs stay quiet until the app opts in.
+_MCU_LOG = logging.getLogger("hidbridge.mcu")
+_LOG_LEVELS = {"error": logging.ERROR, "warn": logging.WARNING,
+               "info": logging.INFO, "debug": logging.DEBUG}
 
 # The protocol version THIS client knows. The firmware bakes in one version and reports it (+ a
 # capability list) in `hello`; the host is the flexible party. We DON'T branch on the version number
@@ -82,6 +91,7 @@ class RpcClient:
         self._max_reads = max_reads
         self._info: ServerInfo | None = None
         self.last_event: dict | None = None   # latest async `event` notification's params (proto>=2)
+        self.last_log: dict | None = None     # latest async `log` notification's params (the "logs" cap)
 
     # -- JSON-RPC core --
     def call(self, method: str, params: dict | None = None, *, dry: bool = False) -> dict:
@@ -138,11 +148,17 @@ class RpcClient:
                 noise = line
                 continue
             if msg.get("id") is None:
-                # An id-less JSON-RPC notification (async event), not a reply. On proto>=2 the firmware
-                # sends {"method":"event","params":{"event":..,"slot":N}} for link/readiness state --
-                # expose the latest for observability, then keep waiting for the pending reply.
-                if msg.get("method") == "event":
+                # An id-less JSON-RPC notification (async event OR log), not a reply. On proto>=2 the
+                # firmware sends {"method":"event","params":{...}} for link/readiness state and
+                # {"method":"log","params":{"level":..,"msg":..,"slot":N?}} for diagnostics -- surface
+                # both, then keep waiting for the pending reply. NOTE: notifications are drained only
+                # while call() reads the channel (no background reader), so a board log surfaces on the
+                # NEXT call -- fine for now.
+                notif = msg.get("method")
+                if notif == "event":
                     self.last_event = msg.get("params") or {}
+                elif notif == "log":
+                    self._route_log(msg.get("params") or {})
                 continue
             if msg.get("id") != want:
                 continue                      # a different (pipelined) reply -- skip
@@ -155,6 +171,20 @@ class RpcClient:
                 f"no JSON-RPC response to {method!r}; board replied {noise!r} (legacy/incompatible "
                 f"firmware?)")
         raise RpcTimeout(f"no response to {method!r} (timeout)")
+
+    def _route_log(self, params: dict) -> None:
+        """Route a firmware `log` notification to the `hidbridge.mcu` logger at its mapped level.
+
+        error->ERROR, warn->WARNING, info->INFO, debug->DEBUG. Includes the slot when the board tagged
+        one. Also cached as `last_log` for a caller that wants the raw record."""
+        self.last_log = params
+        level = _LOG_LEVELS.get(str(params.get("level", "info")).lower(), logging.INFO)
+        msg = params.get("msg", "")
+        slot = params.get("slot")
+        if slot is not None:
+            _MCU_LOG.log(level, "[slot %s] %s", slot, msg)
+        else:
+            _MCU_LOG.log(level, "%s", msg)
 
     # -- capabilities handshake + version handling --
     def hello(self) -> dict:
@@ -332,6 +362,14 @@ class RpcClient:
         never echoes it back."""
         self.require_cap("provision")
         return self.call("provision", {"token": token})
+
+    def set_log_level(self, level: str) -> dict:
+        """Set the board's runtime log filter ('error'|'warn'|'info'|'debug') -- returns {level:...}.
+
+        Capability-gated on 'logs': error/warn/info emit by default, debug is suppressed until raised.
+        Board `log` notifications route to the `hidbridge.mcu` logger (see _route_log)."""
+        self.require_cap("logs")
+        return self.call("set_log_level", {"level": level})
 
     def layout(self, name: str | None = None, *, slot: int | None = None,
                client: str | None = None) -> dict:

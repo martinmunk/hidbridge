@@ -519,20 +519,44 @@ static void netCloseSession(NetSession& s) {
 // producer (evtEvent) / single consumer (loop drain); a full queue drops the event (the page also polls
 // every 3s, so a lost push is self-healing).
 #ifdef HIDBRIDGE_NET
-#define WS_EVT_Q   8
-#define WS_EVT_LEN 96                          // one JSON `event` notification line (+ NUL) fits easily
-// The queue now carries the FORMATTED JSON line (it holds a dynamic slot number), copied in by the
-// producer, so it is a small ring of fixed buffers rather than static string pointers.
+#define WS_EVT_Q   16                          // depth: logs are MORE frequent than events, so deeper
+#define WS_EVT_LEN 200                         // one JSON `event` OR `log` notification line (+ NUL)
+// The queue carries the FORMATTED JSON line (event OR log -- both hold dynamic content), copied in by
+// the producer, so it is a small ring of fixed buffers rather than static string pointers. MULTI-
+// PRODUCER: events fire from the NimBLE HOST task, logs from the host task (subscribe/connect
+// callbacks), the LOOP task (dispatch), AND the network-event task (onNetEvent) -- so the tail advance
+// is guarded by a portMUX spinlock (works across tasks + cores). The consumer (loop/drainEvts) is
+// single, so the head needs no lock. A full queue DROPS (drop-on-full is acceptable; the page also
+// polls, and drainEvts emits a `warn` once when drops occur).
 static char             g_wsEvtQ[WS_EVT_Q][WS_EVT_LEN];
 static volatile uint8_t g_wsEvtHead = 0, g_wsEvtTail = 0;
+static volatile uint16_t g_wsEvtDropped = 0;
+static portMUX_TYPE     g_wsEvtMux = portMUX_INITIALIZER_UNLOCKED;
 static void wsEnqueueEvt(const char* msg) {
+  portENTER_CRITICAL(&g_wsEvtMux);
   uint8_t nt = (uint8_t)((g_wsEvtTail + 1) & (WS_EVT_Q - 1));
-  if (nt == g_wsEvtHead) return;               // full -> drop (polling backstops it)
-  strncpy(g_wsEvtQ[g_wsEvtTail], msg, WS_EVT_LEN - 1);
-  g_wsEvtQ[g_wsEvtTail][WS_EVT_LEN - 1] = '\0';
-  g_wsEvtTail = nt;
+  if (nt == g_wsEvtHead) {                      // full -> drop (polling + a drainEvts warn backstop it)
+    g_wsEvtDropped++;
+  } else {
+    strncpy(g_wsEvtQ[g_wsEvtTail], msg, WS_EVT_LEN - 1);
+    g_wsEvtQ[g_wsEvtTail][WS_EVT_LEN - 1] = '\0';
+    g_wsEvtTail = nt;
+  }
+  portEXIT_CRITICAL(&g_wsEvtMux);
 }
 #endif
+
+// The firmware log SINK (see hbmode1::setLogSink): print the formatted JSON `log` line to serial AND --
+// on the network build -- enqueue a COPY for the loop-task drain to the WS pages + TCP sessions, EXACTLY
+// like an async event. Serial is a raw UART (safe from any task); the enqueue is the cross-task-safe
+// path, so a log emitted from a BLE callback never touches a net session's ssl directly (the SSLEOF
+// hazard). Works on the serial-only build too (the enqueue compiles out).
+static void esp32LogSink(const char* line) {
+  Serial.println(line);
+#ifdef HIDBRIDGE_NET
+  wsEnqueueEvt(line);
+#endif
+}
 
 // ---- async events: broadcast to serial + every AUTHENTICATED network client ----------------- //
 // An async event is UNSOLICITED: it is not a reply to any one channel's command, so it must reach
@@ -554,7 +578,7 @@ static void wsEnqueueEvt(const char* msg) {
 // FORMATS the JSON line and ENQUEUES a COPY of it; loop() drains it to BOTH the WS pages AND the TCP
 // sessions (drainEvts), where every ssl touch is single-threaded. Serial is a raw UART and stays direct.
 static void evtEvent(const char* event, int slot) {
-  char buf[96];                              // matches WS_EVT_LEN (the NET queue's per-slot buffer)
+  char buf[96];                              // an event line is short; the NET queue slot (WS_EVT_LEN) holds it
   snprintf(buf, sizeof(buf),
            "{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"%s\",\"slot\":%d}}",
            event, slot);
@@ -607,6 +631,8 @@ class ServerCB : public NimBLEServerCallbacks {
     // The central connected on whatever identity we were advertising -> record it against advSlot.
     if (advSlot >= 0 && advSlot < NUM_SLOTS) slotConn[advSlot] = info.getConnHandle();
     evtEvent("connected", advSlot);
+    hbmode1::logSlotf(hbmode1::LOG_INFO, advSlot, "central connected on %s",
+                      (advSlot >= 0 && advSlot < NUM_SLOTS) ? slotName[advSlot] : "?");
   }
   void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
     int slot = slotOfHandle(info.getConnHandle());
@@ -617,6 +643,7 @@ class ServerCB : public NimBLEServerCallbacks {
       slotSub[slot] = false;              // combined readiness clears with them
     }
     evtEvent("disconnected", slot);
+    hbmode1::logSlotf(hbmode1::LOG_INFO, slot, "central disconnected (reason=%d)", reason);
     // Resume advertising the slot the HOST currently has selected (advSlot) -- do NOT hijack the
     // single legacy advertiser to the dropped slot. (The old code re-pointed advertising to the
     // dropped slot, so a mini6 flap while we were advertising slot1 for mini5's pair switched the
@@ -641,22 +668,28 @@ static void updateSlotSub(int slot) {
   if (now != slotSub[slot]) {
     slotSub[slot] = now;
     evtEvent(now ? "ready" : "unsubscribed", slot);
+    hbmode1::logSlotf(hbmode1::LOG_INFO, slot, "slot %s", now ? "ready" : "unsubscribed");
   }
 }
-// One callback per input report; `flag` points at that report's per-slot record (slotKbdSub/slotMouseSub).
+// One callback per input report; `flag` points at that report's per-slot record (slotKbdSub/slotMouseSub)
+// and `reportName` names it ("keyboard"/"mouse") for the debug log -- the signal that would have made
+// the readiness bug (macOS subscribing the MOUSE report first/only) obvious at a glance.
 class ReportSubCB : public NimBLECharacteristicCallbacks {
   volatile bool* flag;
+  const char*    reportName;
  public:
-  explicit ReportSubCB(volatile bool* f) : flag(f) {}
+  ReportSubCB(volatile bool* f, const char* name) : flag(f), reportName(name) {}
   void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
     int slot = slotOfHandle(info.getConnHandle());
     if (slot < 0) return;
     flag[slot] = (subValue != 0);
+    hbmode1::logSlotf(hbmode1::LOG_DEBUG, slot, "%s report %s",
+                      reportName, subValue ? "subscribed" : "unsubscribed");
     updateSlotSub(slot);              // readiness = keyboard OR mouse subscribed on this slot
   }
 };
-static ReportSubCB kbdSubCB(slotKbdSub);
-static ReportSubCB mouseSubCB(slotMouseSub);
+static ReportSubCB kbdSubCB(slotKbdSub, "keyboard");
+static ReportSubCB mouseSubCB(slotMouseSub, "mouse");
 
 static void startAdvertisingSlot() {
   // Build the advertising payload EXPLICITLY + FRESH each slot. (The earlier auto-build path called
@@ -693,6 +726,8 @@ static void startAdvertisingSlot() {
   adv->setScanResponseData(sr);
   adv->enableScanResponse(true);
   adv->start();
+  hbmode1::logSlotf(hbmode1::LOG_INFO, advSlot, "advertising as %s", advName);
+  hbmode1::logSlotf(hbmode1::LOG_DEBUG, advSlot, "adv gap-name=%s scanrsp=hid", slotName[advSlot]);
 }
 
 // Select host slot n as the advertising identity (set its address + name) and (re)start advertising.
@@ -739,6 +774,9 @@ static void deriveSlotAddresses() {
 void setup() {
   Serial.begin(115200);
   delay(100);
+  hbmode1::setLogSink(esp32LogSink);           // structured logging over serial (+ net on drain) -- FIRST
+  hbmode1::logMsgf(hbmode1::LOG_INFO, "boot HIDBRIDGE-esp32 fw=%s proto=%d",
+                   HB_FW_VERSION, hbmode1::PROTO_VERSION);
 
   for (int i = 0; i < NUM_SLOTS; i++) {
     slotConn[i] = BLE_HS_CONN_HANDLE_NONE;
@@ -849,6 +887,7 @@ static void esp32FillHello(JsonObject r) {
   caps.add("park");                              // O: stop advertising, keep connections + bonds
   caps.add("net_status");                        // N: Ethernet/TCP state (answered on serial-only too)
   caps.add("ping");                              // P: liveness + readiness of the session's target slot
+  caps.add("logs");                              // structured `log` notifications + set_log_level filter
   // The layouts this board accepts -- the control page builds its per-device dropdown from THIS list
   // (not a hardcoded JS array), so adding a layout in hidbridge_rpc.h is enough. Single-sourced.
   JsonArray la = r["layouts"].to<JsonArray>();
@@ -1259,7 +1298,7 @@ static bool netTlsSetup() {
                               (const unsigned char*)"hidbridge", 9);
   }
   if (rc != 0) {
-    Serial.print("ERR tls config "); Serial.println(rc);
+    hbmode1::logMsgf(hbmode1::LOG_ERROR, "tls config failed rc=%d", rc);
     return false;
   }
   mbedtls_ssl_conf_authmode(&g_tlsConf, MBEDTLS_SSL_VERIFY_NONE);  // PSK carries no certificate
@@ -1269,7 +1308,7 @@ static bool netTlsSetup() {
   mbedtls_ssl_conf_max_tls_version(&g_tlsConf, MBEDTLS_SSL_VERSION_TLS1_2);
 
   g_listenFd = socket(AF_INET, SOCK_STREAM, 0);
-  if (g_listenFd < 0) { Serial.println("ERR tls socket"); return false; }
+  if (g_listenFd < 0) { hbmode1::logMsg(hbmode1::LOG_ERROR, "tls socket() failed"); return false; }
   int one = 1;
   setsockopt(g_listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   struct sockaddr_in addr;
@@ -1279,7 +1318,7 @@ static bool netTlsSetup() {
   addr.sin_port = htons(HB_NET_PORT);
   if (bind(g_listenFd, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
       listen(g_listenFd, HB_MAX_NET_CLIENTS) != 0) {
-    Serial.println("ERR tls bind/listen");
+    hbmode1::logMsg(hbmode1::LOG_ERROR, "tls bind/listen failed");
     close(g_listenFd);
     g_listenFd = -1;
     return false;
@@ -1391,6 +1430,7 @@ static void onNetEvent(arduino_event_id_t event) {
       Serial.print("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"event\":\"net\",\"link\":true,\"ip\":\"");
       Serial.print(hbLocalIP().toString());
       Serial.println("\"}}");
+      hbmode1::logMsgf(hbmode1::LOG_INFO, "net link up ip=%s", hbLocalIP().toString().c_str());
       break;
     case ARDUINO_EVENT_ETH_DISCONNECTED:
     case ARDUINO_EVENT_ETH_STOP:
@@ -1750,6 +1790,14 @@ static void drainEvts() {
     for (uint8_t i = 0; i < WEBSOCKETS_SERVER_CLIENT_MAX; i++)
       if (wsAuthed[i]) wsServer.sendTXT(i, msg);
   }
+  // Surface queue overflow ONCE per burst as a warn (loop-task -- safe to re-enqueue; it drains next
+  // loop). Logs are more frequent than events, so a flood could fill the ring; a lost push is dropped,
+  // not blocked, and the operator sees how many. Reset the counter so each new burst warns afresh.
+  static uint16_t reported = 0;
+  if (g_wsEvtDropped != reported) {
+    uint16_t d = g_wsEvtDropped; g_wsEvtDropped = 0; reported = 0;
+    hbmode1::logMsgf(hbmode1::LOG_WARN, "event/log queue overflow: dropped %u", (unsigned)d);
+  }
 }
 
 static void netSetup() {
@@ -1780,7 +1828,7 @@ static void netSetup() {
 #else
   if (!ETH.begin(HB_ETH_PHY_TYPE, HB_ETH_PHY_ADDR, HB_ETH_PIN_MDC, HB_ETH_PIN_MDIO,
                  HB_ETH_PIN_POWER, HB_ETH_CLK_MODE)) {
-    Serial.println("ERR eth init");            // wrong PHY/pins for this board, or no PHY at all
+    hbmode1::logMsg(hbmode1::LOG_ERROR, "eth init failed (wrong PHY/pins, or no PHY)");
     return;
   }
   ETH.setHostname(g_mdnsHost);

@@ -18,6 +18,7 @@
 #pragma once
 #include <Arduino.h>
 #include <strings.h>
+#include <stdarg.h>
 #include <ArduinoJson.h>
 
 namespace hbmode1 {
@@ -25,6 +26,84 @@ namespace hbmode1 {
 static const int      PROTO_VERSION   = 2;   // 2: uniform JSON-RPC wire (JSON `event` notifications +
                                              // JSON-RPC errors; the plain-text EVT/ERR frames + the
                                              // @<token> auth line were removed). 1: legacy text frames.
+
+// ---- structured LOGGING (shared by both firmwares) ------------------------------------------- //
+// The board streams diagnostics to the host as id-less JSON-RPC `log` NOTIFICATIONS on the SAME channel
+// as everything else (serial AND net/TLS), so the operator gets error/warn/info/debug whether driving
+// over the cable or the LAN -- one uniform JSON wire, no plain-text frames. The level enum, the level
+// name<->value mapping, the "is this level enabled" gate, and the JSON formatting all live HERE so both
+// boards share one implementation; each firmware only registers a SINK (mirroring how the report
+// builders take a firmware-provided notify callback). Wire shape (advertised by the "logs" cap):
+//   {"jsonrpc":"2.0","method":"log","params":{"level":"info","msg":"...","slot":N?}}   (slot optional)
+enum { LOG_ERROR = 0, LOG_WARN = 1, LOG_INFO = 2, LOG_DEBUG = 3 };   // higher = more verbose
+// Runtime filter: emit a log iff its level <= g_logLevel. DEFAULT info, so error/warn/info emit and
+// debug is SUPPRESSED (avoids per-keystroke/per-dispatch spam) until `set_log_level debug` raises it.
+static int g_logLevel = LOG_INFO;
+inline const char* logLevelName(int l) {
+  switch (l) { case LOG_ERROR: return "error"; case LOG_WARN: return "warn";
+               case LOG_DEBUG: return "debug"; default: return "info"; }
+}
+inline int logLevelFromName(const char* n) {
+  if (n) {
+    if (!strcasecmp(n, "error")) return LOG_ERROR;
+    if (!strcasecmp(n, "warn"))  return LOG_WARN;
+    if (!strcasecmp(n, "info"))  return LOG_INFO;
+    if (!strcasecmp(n, "debug")) return LOG_DEBUG;
+  }
+  return -1;                                   // unknown level name
+}
+inline bool logEnabled(int level) { return level <= g_logLevel; }
+
+// The firmware-provided log SINK: receives ONE fully-formatted JSON `log` line (no trailing newline)
+// and fans it out its own way -- esp32: Serial.println + enqueue for the loop-task drain to WS/TCP
+// (cross-task-safe, EXACTLY like async events); pico: Serial.println. Kept a plain function pointer so
+// the shared header stays free of any BLE/net dependency (same shape as the report notify sink).
+typedef void (*LogSinkFn)(const char* jsonLine);
+static LogSinkFn g_logSink = nullptr;
+inline void setLogSink(LogSinkFn fn) { g_logSink = fn; }
+
+// Copy `src` into `dst` as JSON-string-safe content (no surrounding quotes), escaping " \ and control
+// chars, so a dynamic msg (a name/IP/state) can never break the JSON line. Truncates to fit `cap`.
+inline void logEscape(char* dst, size_t cap, const char* src) {
+  size_t o = 0;
+  for (const char* p = src; *p && o + 2 < cap; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '"' || c == '\\') { dst[o++] = '\\'; dst[o++] = (char)c; }
+    else if (c == '\n')        { dst[o++] = '\\'; dst[o++] = 'n'; }
+    else if (c == '\r')        { dst[o++] = '\\'; dst[o++] = 'r'; }
+    else if (c >= 0x20)        { dst[o++] = (char)c; }   // drop other control chars
+  }
+  dst[o] = '\0';
+}
+
+// Emit a log notification through the sink IFF the level passes the runtime gate. `slot` < 0 omits the
+// "slot" field. The gate is checked FIRST so a suppressed (e.g. debug) log costs nothing but a compare.
+inline void logJson(int level, const char* msg, int slot) {
+  if (!logEnabled(level) || !g_logSink) return;
+  char em[176];
+  logEscape(em, sizeof(em), msg);
+  char buf[288];                                 // must hold the JSON wrapper + the fully-escaped msg
+  if (slot >= 0)
+    snprintf(buf, sizeof(buf),
+      "{\"jsonrpc\":\"2.0\",\"method\":\"log\",\"params\":{\"level\":\"%s\",\"slot\":%d,\"msg\":\"%s\"}}",
+      logLevelName(level), slot, em);
+  else
+    snprintf(buf, sizeof(buf),
+      "{\"jsonrpc\":\"2.0\",\"method\":\"log\",\"params\":{\"level\":\"%s\",\"msg\":\"%s\"}}",
+      logLevelName(level), em);
+  g_logSink(buf);
+}
+inline void logMsg(int level, const char* msg) { logJson(level, msg, -1); }
+inline void logMsgf(int level, const char* fmt, ...) {
+  if (!logEnabled(level) || !g_logSink) return;   // build the message only when it will actually emit
+  char m[176]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof(m), fmt, ap); va_end(ap);
+  logJson(level, m, -1);
+}
+inline void logSlotf(int level, int slot, const char* fmt, ...) {
+  if (!logEnabled(level) || !g_logSink) return;
+  char m[176]; va_list ap; va_start(ap, fmt); vsnprintf(m, sizeof(m), fmt, ap); va_end(ap);
+  logJson(level, m, slot);
+}
 static const uint8_t  MOD_LSHIFT_BIT  = 0x02;
 static const uint8_t  MOD_ALTGR_BIT   = 0x40;   // Right-Alt: the 3rd (European) shift level (Danish @ [ ] { } \ | ...)
 static const uint8_t  RID_KEYBOARD    = 1;
@@ -338,6 +417,7 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
   if (!strcmp(method, "hello")) {                        // capabilities -- always allowed
     JsonObject r = resp["result"].to<JsonObject>();
     r["proto"] = PROTO_VERSION;
+    r["log_level"] = logLevelName(g_logLevel);           // the board's CURRENT runtime log filter
     JsonArray modes = r["modes"].to<JsonArray>(); modes.add("frames"); modes.add("rpc");
     if (fillHello) fillHello(r);
     serializeJson(resp, out); out.println(); return;
@@ -346,6 +426,14 @@ inline void handleJsonRpc(const String& line, Print& out, bool authed,
     resp["error"]["code"] = -32001; resp["error"]["message"] = "auth required";
     serializeJson(resp, out); out.println(); return;
   }
+  if (!strcmp(method, "set_log_level")) {                // runtime log-level filter (the "logs" cap)
+    const char* lvl = params["level"] | (const char*)nullptr;
+    int nl = lvl ? logLevelFromName(lvl) : -1;
+    if (nl < 0) { resp["error"]["code"] = -32602; resp["error"]["message"] = "unknown 'level' (error|warn|info|debug)"; }
+    else        { g_logLevel = nl; resp["result"]["level"] = logLevelName(g_logLevel); }
+    serializeJson(resp, out); out.println(); return;
+  }
+  logMsgf(LOG_DEBUG, "rpc %s", method);                  // debug: which method the host dispatched
 
   ReportSink s; s.dry = dry; s.notify = notify;
   bool known = true; const char* argErr = nullptr;
