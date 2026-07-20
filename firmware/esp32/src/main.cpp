@@ -317,13 +317,18 @@ static NimBLEServer*       server = nullptr;
 
 // ---- per-slot identity + connection state (host slots) ----
 // slotAddr[0] = native public address (captured at setup); slotAddr[k>=1] = derived static-random.
-// slotConn[k] = the conn handle of the central connected on slot k (or NONE). slotSub[k] = iOS has
-// enabled the keyboard report CCCD on slot k (readiness). advSlot = the slot currently ADVERTISING;
-// g_activeTarget = the slot the IN-FLIGHT dispatch notifies reports to (see below). slotName[k] = that
-// slot's advertised name.
+// slotConn[k] = the conn handle of the central connected on slot k (or NONE). slotSub[k] = the host has
+// enabled >=1 input report CCCD on slot k (readiness = keyboard OR mouse). advSlot = the slot currently
+// ADVERTISING; g_activeTarget = the slot the IN-FLIGHT dispatch notifies reports to (see below).
+// slotName[k] = that slot's advertised name.
 static NimBLEAddress       slotAddr[NUM_SLOTS];
 static uint16_t            slotConn[NUM_SLOTS];
 static volatile bool       slotSub[NUM_SLOTS];
+// Per-slot record of EACH input report's CCCD (readiness = their OR). Tracked separately because some
+// hosts (notably macOS) subscribe the MOUSE report first/only -- keying readiness on the keyboard report
+// alone left them stuck conn=true, sub=false ("connecting") forever even though mouse control worked.
+static volatile bool       slotKbdSub[NUM_SLOTS];
+static volatile bool       slotMouseSub[NUM_SLOTS];
 static char                slotName[NUM_SLOTS][40];   // advertised LocalName = HIDBRIDGE-<nick>[-<client>]
 static char                slotClient[NUM_SLOTS][24]; // per-slot CLIENT label (empty = unassigned)
 static int                 slotLayout[NUM_SLOTS];     // per-slot keyboard LAYOUT (hbmode1::LAYOUT_US/DA)
@@ -607,7 +612,9 @@ class ServerCB : public NimBLEServerCallbacks {
     int slot = slotOfHandle(info.getConnHandle());
     if (slot >= 0) {
       slotConn[slot] = BLE_HS_CONN_HANDLE_NONE;
-      slotSub[slot] = false;              // link gone -> reports no longer enabled on this slot
+      slotKbdSub[slot] = false;           // link gone -> both input reports no longer enabled on this slot
+      slotMouseSub[slot] = false;
+      slotSub[slot] = false;              // combined readiness clears with them
     }
     evtEvent("disconnected", slot);
     // Resume advertising the slot the HOST currently has selected (advSlot) -- do NOT hijack the
@@ -622,19 +629,34 @@ class ServerCB : public NimBLEServerCallbacks {
   }
 };
 
-// ---- characteristic callbacks: track when iOS SUBSCRIBES to the keyboard input report, PER slot --
-class KbdSubCB : public NimBLECharacteristicCallbacks {
+// ---- characteristic callbacks: track when the host SUBSCRIBES to an input report, PER slot ----------
+// Readiness ("ready") is a COARSE signal: it means >=1 input report (keyboard OR mouse) is enabled on
+// the slot -- a reasonable proxy that the host activated the HID link. We track EACH report's CCCD per
+// slot (slotKbdSub / slotMouseSub) and derive slotSub = kbd || mouse, emitting `ready` on the slot's
+// FIRST report subscription (false->true of the OR) and `unsubscribed` on its LAST (true->false) -- never
+// one event per report. (Keying readiness on the keyboard report alone left macOS, which subscribes the
+// mouse report first/only, stuck reading sub=false forever even though its mouse CCCD was enabled.)
+static void updateSlotSub(int slot) {
+  bool now = slotKbdSub[slot] || slotMouseSub[slot];
+  if (now != slotSub[slot]) {
+    slotSub[slot] = now;
+    evtEvent(now ? "ready" : "unsubscribed", slot);
+  }
+}
+// One callback per input report; `flag` points at that report's per-slot record (slotKbdSub/slotMouseSub).
+class ReportSubCB : public NimBLECharacteristicCallbacks {
+  volatile bool* flag;
+ public:
+  explicit ReportSubCB(volatile bool* f) : flag(f) {}
   void onSubscribe(NimBLECharacteristic* chr, NimBLEConnInfo& info, uint16_t subValue) override {
     int slot = slotOfHandle(info.getConnHandle());
     if (slot < 0) return;
-    bool nowSub = (subValue != 0);
-    if (nowSub != slotSub[slot]) {
-      slotSub[slot] = nowSub;
-      evtEvent(nowSub ? "ready" : "unsubscribed", slot);
-    }
+    flag[slot] = (subValue != 0);
+    updateSlotSub(slot);              // readiness = keyboard OR mouse subscribed on this slot
   }
 };
-static KbdSubCB kbdSubCB;
+static ReportSubCB kbdSubCB(slotKbdSub);
+static ReportSubCB mouseSubCB(slotMouseSub);
 
 static void startAdvertisingSlot() {
   // Build the advertising payload EXPLICITLY + FRESH each slot. (The earlier auto-build path called
@@ -721,6 +743,8 @@ void setup() {
   for (int i = 0; i < NUM_SLOTS; i++) {
     slotConn[i] = BLE_HS_CONN_HANDLE_NONE;
     slotSub[i] = false;
+    slotKbdSub[i] = false;
+    slotMouseSub[i] = false;
     slotClient[i][0] = 0;
     slotLayout[i] = hbmode1::LAYOUT_US;         // default each slot to US until set (loadSlotLayouts)
   }
@@ -735,8 +759,9 @@ void setup() {
 
   hid = new NimBLEHIDDevice(server);
   inputKbd = hid->getInputReport(KBD_REPORT_ID);
-  inputKbd->setCallbacks(&kbdSubCB);           // track iOS enabling the keyboard report (readiness)
+  inputKbd->setCallbacks(&kbdSubCB);           // track the host enabling the keyboard report (readiness)
   inputMouse = hid->getInputReport(MOUSE_REPORT_ID);
+  inputMouse->setCallbacks(&mouseSubCB);       // ...and the mouse report (macOS enables it first/only)
 
   hid->setManufacturer("hidbridge");
   hid->setPnp(0x02, 0x05AC, 0x820A, 0x0001);   // Apple vendor id, keyboard-ish product

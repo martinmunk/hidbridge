@@ -303,3 +303,26 @@ def test_firmware_gap_name_and_advertised_name_share_one_source():
         "the advertised name must derive from slotName[advSlot] (capped to fit the advert packet)")
     assert "setName(advName)" in body, (
         "startAdvertisingSlot must advertise the length-capped per-slot name")
+
+
+def test_readiness_tracks_both_kbd_and_mouse_reports():
+    """Readiness (slotSub -> identities `sub` / ping `subscribed`) must be set from BOTH input-report
+    CCCDs, not the keyboard alone. Some hosts (notably macOS) subscribe the MOUSE report first/only, so a
+    keyboard-only readiness signal left them stuck reading conn=true, sub=false ("connecting") forever
+    even though mouse control worked. Guard: the mouse input report ALSO gets a subscribe callback, and
+    readiness combines keyboard OR mouse; onDisconnect clears BOTH per-report flags."""
+    raw = (ROOT / "firmware/esp32/src/main.cpp").read_text()
+    src = _strip_ws(raw)
+    # (1) the mouse input report gets a subscribe callback (mirror of inputKbd's) -- not left callback-less.
+    assert "inputMouse->setCallbacks(" in raw, (
+        "inputMouse must get a subscribe callback so a host that enables the MOUSE report (macOS) is "
+        "recognised as ready -- tracking the keyboard report alone leaves it stuck sub=false")
+    # (2) readiness is keyboard OR mouse, tracked from per-report flags (not slotSub written directly by
+    #     the keyboard callback alone).
+    assert "slotKbdSub[slot]||slotMouseSub[slot]" in src, (
+        "slotSub (readiness) must combine keyboard OR mouse subscription, not the keyboard report alone")
+    # (3) onDisconnect clears BOTH per-report flags for the dropped slot (else a stale flag survives a
+    #     reconnect). The `[slot]=false` literal (indexed by `slot`, not the setup init loop's `i`) is
+    #     onDisconnect-specific.
+    assert "slotKbdSub[slot]=false" in src and "slotMouseSub[slot]=false" in src, (
+        "onDisconnect must clear BOTH per-report subscription flags for the dropped slot")
