@@ -60,7 +60,11 @@ target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
-extend-select = ["W"]            # pycodestyle warnings on top of the default (E4/E7/E9 + F)
+# EXPLICIT select (not extend-select): pin the exact rule scope so a ruff release that BROADENS its
+# default set (0.16 did -- it started pulling RUF/S/SIM/UP/I/... and lit up 160 house-style "errors")
+# cannot silently expand what CI enforces. This is pyflakes correctness (F) + the E4/E7/E9 + W subset,
+# and nothing else; the dense one-liner report/bit style stays tolerated (see the ignore list below).
+select = ["E4", "E7", "E9", "F", "W"]
 ignore = [
     "E701", "E702", "E703",      # multi-statement one-liners: deliberate in the report/bit code
     "E401",                       # `import a,b,c`: deliberate house style
