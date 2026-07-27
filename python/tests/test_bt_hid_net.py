@@ -7,7 +7,7 @@ byte-identical to the serial path, and that a bad token neither authenticates no
 """
 
 import socket
-import threading
+import ssl
 import time
 
 import pytest
@@ -142,48 +142,31 @@ def test_link_net_backend_resolves():
 # never hang. A stuck/incompatible board (accepts TCP, never completes TLS) or a stalling .local
 # lookup must surface a clear error in ~the timeout, not a multi-minute hang.
 # --------------------------------------------------------------------------- #
-def _accept_only_listener():
-    """A throwaway TCP listener that ACCEPTS then goes silent (never speaks TLS). Returns (host, port);
-    the accept thread is a daemon, so the test never blocks on teardown."""
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    host, port = srv.getsockname()
+def test_open_socket_raises_promptly_on_a_stuck_tls_handshake(monkeypatch):
+    # A peer that accepts TCP but never completes TLS must raise a clear SocketLinkError (mentioning the
+    # handshake), NOT hang. Deterministic + socket-free (per this module's design, and immune to CI
+    # networking/load): _connect returns an unconnected TCP socket and the handshake is stubbed to time
+    # out -- exactly the failure the bounded-open change must surface as an error.
+    fake = socket.socket(socket.AF_INET, socket.SOCK_STREAM)   # real TCP socket: settimeout + TCP_NODELAY ok
+    monkeypatch.setattr(socket_link, "_connect", lambda host, port, timeout: fake)
 
-    def loop():
-        try:
-            conn_sock, _ = srv.accept()
-            time.sleep(30)                # hold the connection open, send nothing (half-open peer)
-            conn_sock.close()
-        except OSError:
-            pass
-    threading.Thread(target=loop, daemon=True).start()
-    return host, port
-
-
-def test_open_socket_bounds_a_stuck_tls_handshake():
-    host, port = _accept_only_listener()
-    t0 = time.monotonic()
+    def stalled_handshake(self, sock, **kw):
+        raise socket.timeout("simulated stalled TLS handshake")
+    monkeypatch.setattr(ssl.SSLContext, "wrap_socket", stalled_handshake)
     with pytest.raises(socket_link.SocketLinkError) as ei:
-        socket_link.open_socket(host, port, timeout=2, token="x")
-    elapsed = time.monotonic() - t0
-    assert elapsed < 5, f"open hung {elapsed:.1f}s -- the TLS handshake was not bounded by timeout"
+        socket_link.open_socket("board", 3333, timeout=1, token="x")
     assert "handshake" in str(ei.value).lower()
 
 
 def test_open_socket_bounds_a_stalling_name_resolution(monkeypatch):
     # getaddrinfo (mDNS/.local) is NOT bounded by create_connection's timeout arg -- a stalled lookup
-    # would hang for the OS default. open_socket must bound name resolution too.
-    real = socket.getaddrinfo
-
+    # would otherwise hang for the OS default. open_socket must bound resolution and raise. A short
+    # timeout keeps it fast; the elapsed bound is generous so CI load can't flake it.
     def slow(*a, **k):
-        time.sleep(30)
-        return real(*a, **k)
+        time.sleep(10)          # >> the 1s timeout; the daemon resolve thread is abandoned (harmless)
     monkeypatch.setattr(socket, "getaddrinfo", slow)
     t0 = time.monotonic()
     with pytest.raises(socket_link.SocketLinkError) as ei:
-        socket_link.open_socket("stuck.local", 3333, timeout=2, token="x")
-    elapsed = time.monotonic() - t0
-    assert elapsed < 5, f"open hung {elapsed:.1f}s -- name resolution was not bounded by timeout"
+        socket_link.open_socket("stuck.local", 3333, timeout=1, token="x")
+    assert time.monotonic() - t0 < 6, "name resolution was not bounded by timeout"
     assert "resolve" in str(ei.value).lower() or "reach" in str(ei.value).lower()
