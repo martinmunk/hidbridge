@@ -382,16 +382,33 @@ def _is_mac(s: str) -> bool:
                                    for p in parts)
 
 
+# Explicit backend prefixes, mirroring rpc._split_target's grammar, so a location can NAME its family
+# instead of relying on shape alone. `hint` pins the serial transport family (pico vs esp32) when the
+# caller was explicit; None leaves it to the by-device autodetect (_is_pico_port).
+_PREFIXES = (("net:", "net", None), ("esp32:", "serial", "esp32"), ("pico:", "serial", "pico"),
+             ("serial:", "serial", None), ("dongle:", "dongle", None))
+
+
 def _classify(location):
-    """Map a location to a family: 'auto' | 'serial' | 'dongle' | 'net' (+ the normalised arg)."""
+    """Map a location to (family, arg, hint): family is 'auto'|'serial'|'dongle'|'net', `arg` is the
+    normalised (prefix-stripped) location, `hint` is 'esp32'|'pico'|None (a serial board pin).
+
+    An explicit `net:`/`esp32:`/`pico:`/`serial:`/`dongle:` prefix (matching rpc.open_client's target
+    grammar) picks the family and is STRIPPED -- otherwise the literal 'net:host' would be handed to
+    getaddrinfo and fail DNS. Without a prefix the location's SHAPE decides (bare path -> serial, hciN/
+    MAC -> dongle, host/IP/*.local -> net)."""
     if location is None:
-        return "auto", None
+        return "auto", None, None
     s = str(location).strip()
+    low = s.lower()
+    for prefix, fam, hint in _PREFIXES:
+        if low.startswith(prefix):
+            return fam, (s[len(prefix):] or None), hint
     if s.startswith("/dev/") or s.startswith("./") or s.startswith("/") or os.path.exists(s):
-        return "serial", s
+        return "serial", s, None
     if _HCI_RE.match(s) or _is_mac(s):
-        return "dongle", s
-    return "net", s                               # host / IP / *.local
+        return "dongle", s, None
+    return "net", s, None                          # host / IP / *.local
 
 
 def _transport_channel(tp):
@@ -452,12 +469,12 @@ def _net_transport_factory(host, *, token=None, **opts):
 
 def resolve_board(location, *, token=None, allow_builtin=False, **opts):
     """Return a real board object for `location` (see module docstring). Lazy-imports the drivers."""
-    family, arg = _classify(location)
+    family, arg, hint = _classify(location)
     if family == "auto":
         arg = _autodetect_port()
         family = "serial"
     if family == "serial":
-        return McuBoard(transport_factory=_serial_transport_factory(arg, **opts))
+        return McuBoard(transport_factory=_serial_transport_factory(arg, board_hint=hint, **opts))
     if family == "net":
         return McuBoard(transport_factory=_net_transport_factory(arg, token=token, **opts))
     if family == "dongle":

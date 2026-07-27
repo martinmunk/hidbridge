@@ -27,24 +27,50 @@ from hidbridge.controller import HidController, RecordingTransport
 # --------------------------------------------------------------------------- #
 # location classification + resolver dispatch (no board TYPE passed in)
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("loc,family", [
-    (None, "auto"),
-    ("/dev/ttyUSB3", "serial"),
-    ("/dev/ttyACM0", "serial"),
-    ("hci1", "dongle"),
-    ("AA:BB:CC:DD:EE:FF", "dongle"),
-    ("192.0.2.102", "net"),
-    ("hidbridge-espeth.local", "net"),
-    ("espeth", "net"),
+@pytest.mark.parametrize("loc,family,arg,hint", [
+    (None, "auto", None, None),
+    # bare forms: shape decides
+    ("/dev/ttyUSB3", "serial", "/dev/ttyUSB3", None),
+    ("/dev/ttyACM0", "serial", "/dev/ttyACM0", None),
+    ("hci1", "dongle", "hci1", None),
+    ("AA:BB:CC:DD:EE:FF", "dongle", "AA:BB:CC:DD:EE:FF", None),
+    ("192.0.2.102", "net", "192.0.2.102", None),
+    ("hidbridge-espeth.local", "net", "hidbridge-espeth.local", None),
+    ("espeth", "net", "espeth", None),
+    # explicit backend prefixes: family named + prefix stripped (+ a serial board pin)
+    ("net:hidbridge-esp32up.local", "net", "hidbridge-esp32up.local", None),
+    ("net:192.0.2.140", "net", "192.0.2.140", None),
+    ("net:192.0.2.140:3333", "net", "192.0.2.140:3333", None),
+    ("esp32:/dev/ttyUSB3", "serial", "/dev/ttyUSB3", "esp32"),
+    ("pico:/dev/ttyACM0", "serial", "/dev/ttyACM0", "pico"),
+    ("serial:/dev/ttyUSB9", "serial", "/dev/ttyUSB9", None),
 ])
-def test_classify(loc, family):
-    fam, _arg = B._classify(loc)
-    assert fam == family
+def test_classify(loc, family, arg, hint):
+    fam, a, h = B._classify(loc)
+    assert (fam, a, h) == (family, arg, hint)
 
 
 def test_resolve_serial_and_net_build_mcu_boards_without_io():
     assert isinstance(B.resolve_board("/dev/ttyUSB3"), B.McuBoard)
     assert isinstance(B.resolve_board("192.0.2.102", token="secrettoken"), B.McuBoard)
+
+
+def test_resolve_strips_prefix_and_pins_serial_board(monkeypatch):
+    # net: prefix -> net family, host stripped (no more DNS on the literal 'net:host')
+    seen = {}
+    monkeypatch.setattr(B, "_net_transport_factory",
+                        lambda host, **k: seen.update(net_host=host) or (lambda: None))
+    B.resolve_board("net:hidbridge-esp32up.local", token="t")
+    assert seen["net_host"] == "hidbridge-esp32up.local"
+    # pico: prefix -> serial family, path stripped, board pinned to pico
+    monkeypatch.setattr(B, "_serial_transport_factory",
+                        lambda port, *, board_hint=None, **k:
+                        seen.update(ser_port=port, ser_hint=board_hint) or (lambda: None))
+    B.resolve_board("pico:/dev/ttyACM0")
+    assert seen["ser_port"] == "/dev/ttyACM0" and seen["ser_hint"] == "pico"
+    # esp32: prefix pins esp32
+    B.resolve_board("esp32:/dev/ttyUSB3")
+    assert seen["ser_port"] == "/dev/ttyUSB3" and seen["ser_hint"] == "esp32"
 
 
 def test_resolve_dongle_builds_dongle_board():
