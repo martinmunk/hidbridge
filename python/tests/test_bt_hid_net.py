@@ -6,10 +6,15 @@ that are pure logic -- host:port parsing, the auth handshake, that report frames
 byte-identical to the serial path, and that a bad token neither authenticates nor leaks the secret.
 """
 
+import socket
+import threading
+import time
+
 import pytest
 
 from hidbridge import conn, controller
 from hidbridge import reports as R
+from hidbridge import socket_link
 from hidbridge import transport_net as TN
 
 
@@ -130,3 +135,55 @@ def test_link_net_backend_resolves():
     assert be.capabilities["medium"] == "tcp"
     assert be.capabilities["per_device_identity"] is True     # inherited from the esp32 backend
     assert "board.local" in be.describe()
+
+
+# --------------------------------------------------------------------------- #
+# the OPEN (resolve + connect + handshake) must be BOUNDED by `timeout` and raise SocketLinkError --
+# never hang. A stuck/incompatible board (accepts TCP, never completes TLS) or a stalling .local
+# lookup must surface a clear error in ~the timeout, not a multi-minute hang.
+# --------------------------------------------------------------------------- #
+def _accept_only_listener():
+    """A throwaway TCP listener that ACCEPTS then goes silent (never speaks TLS). Returns (host, port);
+    the accept thread is a daemon, so the test never blocks on teardown."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    host, port = srv.getsockname()
+
+    def loop():
+        try:
+            conn_sock, _ = srv.accept()
+            time.sleep(30)                # hold the connection open, send nothing (half-open peer)
+            conn_sock.close()
+        except OSError:
+            pass
+    threading.Thread(target=loop, daemon=True).start()
+    return host, port
+
+
+def test_open_socket_bounds_a_stuck_tls_handshake():
+    host, port = _accept_only_listener()
+    t0 = time.monotonic()
+    with pytest.raises(socket_link.SocketLinkError) as ei:
+        socket_link.open_socket(host, port, timeout=2, token="x")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5, f"open hung {elapsed:.1f}s -- the TLS handshake was not bounded by timeout"
+    assert "handshake" in str(ei.value).lower()
+
+
+def test_open_socket_bounds_a_stalling_name_resolution(monkeypatch):
+    # getaddrinfo (mDNS/.local) is NOT bounded by create_connection's timeout arg -- a stalled lookup
+    # would hang for the OS default. open_socket must bound name resolution too.
+    real = socket.getaddrinfo
+
+    def slow(*a, **k):
+        time.sleep(30)
+        return real(*a, **k)
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    t0 = time.monotonic()
+    with pytest.raises(socket_link.SocketLinkError) as ei:
+        socket_link.open_socket("stuck.local", 3333, timeout=2, token="x")
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5, f"open hung {elapsed:.1f}s -- name resolution was not bounded by timeout"
+    assert "resolve" in str(ei.value).lower() or "reach" in str(ei.value).lower()

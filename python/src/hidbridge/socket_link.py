@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import socket
 import ssl
+import threading
+import time
 
 DEFAULT_PORT = 3333
 DEFAULT_TIMEOUT = 5.0
@@ -44,6 +46,68 @@ _PSK_CIPHER = "PSK-AES128-GCM-SHA256"
 
 class SocketLinkError(RuntimeError):
     """The TLS channel could not be opened (host unreachable, no token, or handshake/auth rejected)."""
+
+
+def _resolve(host: str, port: int, timeout: float) -> list:
+    """Resolve `host` to a list of getaddrinfo tuples, BOUNDED by `timeout`.
+
+    `socket.getaddrinfo` has no timeout parameter and `socket.create_connection` runs it BEFORE it ever
+    applies its own timeout -- so a stalled mDNS/`.local` lookup (an unreachable resolver, a board that
+    went away) hangs for the OS default (often ~30s+), which is the multi-minute-open bug. Run the
+    lookup in a daemon thread and give up on it at the deadline: the thread may linger harmlessly, but
+    the OPEN returns control to the caller on time with a clear SocketLinkError."""
+    result: dict = {}
+
+    def work():
+        try:
+            result["ok"] = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        except Exception as e:  # noqa: BLE001 -- surface any resolver error to the caller thread
+            result["err"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise SocketLinkError(
+            f"could not resolve the hidbridge board name {host!r} within {timeout:.0f}s (the mDNS/DNS "
+            f"lookup stalled). Check the name, or pass the board's IP instead (e.g. 192.168.x.y)")
+    if "err" in result:
+        raise SocketLinkError(
+            f"could not resolve the hidbridge board name {host!r} ({result['err']}); pass the board's "
+            f"IP instead (e.g. 192.168.x.y)") from result["err"]
+    return result.get("ok") or []
+
+
+def _connect(host: str, port: int, timeout: float) -> socket.socket:
+    """Resolve + TCP-connect within `timeout`, distinguishing an unreachable/refused peer from a
+    connect that timed out (a silently-dropped SYN). Returns a connected socket in timeout mode."""
+    deadline = time.monotonic() + timeout
+    addrs = _resolve(host, port, timeout)
+    err: Exception | None = None
+    for af, socktype, proto, _canon, sa in addrs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        s = socket.socket(af, socktype, proto)
+        try:
+            s.settimeout(remaining)
+            s.connect(sa)
+            return s
+        except (socket.timeout, TimeoutError) as e:
+            err = e
+            s.close()
+        except OSError as e:
+            err = e
+            s.close()
+    if isinstance(err, (socket.timeout, TimeoutError)):
+        raise SocketLinkError(
+            f"connecting to the hidbridge board at {host}:{port} timed out after {timeout:.0f}s "
+            f"(no response to the TCP connect -- host down, wrong IP, or a firewall dropping the "
+            f"SYN)") from err
+    raise SocketLinkError(
+        f"cannot reach the hidbridge board at {host}:{port} ({err}). Check the network link + that "
+        f"the firmware was flashed with the network build (pio run -e esp32-ethernet-kit); if the "
+        f"mDNS name does not resolve, pass the board's IP instead (--host 192.168.x.y)") from err
 
 
 def _psk_context(token: str) -> ssl.SSLContext:
@@ -84,26 +148,40 @@ class SocketLine:
                 "key); provision one with `hidbridge net-provision` and set BT_HID_NET_TOKEN or "
                 "~/.config/bt_hid/net.token")
         ctx = _psk_context(token)
-        try:
-            raw = socket.create_connection((host, self.tcp_port), timeout=timeout)
-        except OSError as e:
-            raise SocketLinkError(
-                f"cannot reach the hidbridge board at {host}:{self.tcp_port} ({e}). Check the "
-                f"network link + that the firmware was flashed with the network build "
-                f"(pio run -e esp32-ethernet-kit); if the mDNS name does not resolve, pass the "
-                f"board's IP instead (--host 192.168.x.y)") from e
+        # The WHOLE open -- name resolution + TCP connect + TLS handshake -- is bounded by `timeout`
+        # (resolve/connect in _connect, the handshake below) so a stuck/half-open or incompatible board
+        # RAISES a clear SocketLinkError instead of hanging for minutes. Each phase gets a full budget;
+        # normal boards complete every phase in well under a second, so this does not slow the happy path.
+        deadline = time.monotonic() + timeout
+        raw = _connect(host, self.tcp_port, timeout)
         # HID frames are tiny and latency-sensitive (a keystroke is 2 frames of ~20 bytes, each
         # awaiting an OK). Nagle would coalesce them into ~40ms round trips; turn it off.
         raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # The TLS handshake is bounded by the socket timeout (Python's do_handshake uses it as an
+        # overall deadline). Set it EXPLICITLY on the remaining budget so a peer that accepts the TCP
+        # connection but never speaks TLS (an old/incompatible firmware without the TLS-PSK net build,
+        # or a half-open peer) times out here rather than blocking forever.
+        raw.settimeout(max(0.5, deadline - time.monotonic()))
         try:
             self._sock = ctx.wrap_socket(raw, server_hostname=None)
-        except (ssl.SSLError, OSError) as e:
+        except (socket.timeout, TimeoutError) as e:
             raw.close()
             raise SocketLinkError(
-                f"TLS-PSK handshake with {host}:{self.tcp_port} failed ({e}); the token likely does "
-                f"not match the board's provisioned token (they must be identical -- the token is "
-                f"the pre-shared key)") from e
-        self._sock.settimeout(timeout)
+                f"timed out during the TLS handshake with {host}:{self.tcp_port} after "
+                f"{timeout:.0f}s -- the board accepted the connection but never completed TLS "
+                f"(incompatible/old firmware without the TLS-PSK net build, or an unresponsive "
+                f"board)") from e
+        except ssl.SSLError as e:
+            raw.close()
+            raise SocketLinkError(
+                f"TLS-PSK handshake with {host}:{self.tcp_port} was rejected ({e}); the token likely "
+                f"does not match the board's provisioned token (they must be identical -- the token "
+                f"is the pre-shared key)") from e
+        except OSError as e:
+            raw.close()
+            raise SocketLinkError(
+                f"TLS-PSK handshake with {host}:{self.tcp_port} failed ({e})") from e
+        self._sock.settimeout(self.timeout)
 
     # Display name; `Esp32Transport` reports `self.port` in its status dicts.
     @property
