@@ -141,3 +141,34 @@ one HID service). Some iOS versions only accept a touchscreen digitizer as a DED
 standalone-digitizer device flips this negative is unproven. It is a real but lower-odds avenue that
 costs one more the maintainer re-pair; deferred unless prioritised. (The absolute MOUSE is not worth retrying
 -- iPadOS pointer is fundamentally relative.)
+
+## VERDICT 2 -- STANDALONE dedicated devices (2026-07-28, iPad, on-glass observation)
+
+The one open hypothesis above is now TESTED and also NEGATIVE. Built two throwaway Pico research
+firmwares (firmware/pico-abspointer/, off main), each a DEDICATED single-report HID device -- no
+keyboard, no relative mouse alongside:
+- absmouse: only the absolute-mouse report, GAP appearance 0x03C2 (Mouse).
+- digitizer: only the touchscreen report, GAP appearance 0x03C5 (Digitizer Tablet).
+Each auto-sweeps to the 4 corners + centre on subscribe. Flashed to the spare Pico (5BEDFC28), fresh
+forget/re-pair per variant.
+
+Result:
+- Standalone ABS-MOUSE: pairs, but iPadOS shows NO CURSOR at all -- it does not enable a pointer for a
+  pure-absolute mouse (the pointer is relative-driven, so a device with no relative axis gives it
+  nothing to show). No coordinate control.
+- Standalone DIGITIZER (dedicated, digitizer appearance): pairs, but NO taps register on glass.
+- On the Pico serial (the firmware sweeps/taps only after the report CCCD is subscribed) NEITHER
+  variant emitted a sweep/tap log, i.e. iOS never subscribed to either report -- the device is
+  accepted at pairing but not ENGAGED.
+
+Caveat on rigor: this round had NO independent over-the-air delivery proof -- the Pico's USB-CDC serial
+is DTR-gated + flaky, and none of the host BLE controllers would power on for a btmon capture. So the
+"nothing" rests on the on-glass observation (+ the silent-serial subscription signal), not a btsnoop.
+But it matches VERDICT 1, which DID have btmon delivery proof, so the conclusion holds.
+
+CONCLUSION (final): a DEDICATED/standalone device does NOT flip the negative. iPadOS honours neither an
+absolute mouse nor a HID digitizer for exact-coordinate control -- combined map or standalone. The
+absolute-pointer-on-iPad question is CLOSED: there is no absolute on-screen (x,y) control of an iPad
+over BLE HID with these descriptors. Keep the relative + closed-loop webcam approach. The
+firmware/pico-abspointer/ project is throwaway (kept off main); the spare Pico was reflashed back to
+the shipping 2.0.0 firmware afterward.
