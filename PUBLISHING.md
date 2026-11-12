@@ -148,9 +148,9 @@ cut after this file landed trigger public releases.
 
 ## Status (summary)
 
-- [ ] GitHub repo `martinmunk/hidbridge` created empty (no README/licence) and a fine-grained PAT (Contents + Workflows read/write).
-- [ ] Forgejo push mirror, branch filter `main`; first sync done, GitHub `test` workflow green.
+- [x] GitHub repo `martinmunk/hidbridge` created empty (no README/licence) and a fine-grained PAT (Contents + Workflows read/write).
+- [x] Forgejo push mirror, branch filter `main`; first sync done 2026-11-12, GitHub `test` workflow green.
 - [ ] Forgejo repo variables `HB_REGISTRY_BASE` (and, for `hil.yml`, `HB_BENCH_NET_HOST`, `HB_BENCH_OTA_HOST`, `HB_BENCH_ESP32_PORT`) set.
-- [ ] PyPI pending publisher for `hidbridge` (workflow `pypi.yml`, environment `pypi`) and the `pypi` environment on GitHub.
-- [ ] First public wheel release (a new `wheel/release/X.Y.Z` tag) on PyPI from one tag push.
-- [ ] First public firmware release (a new `fw/release/X.Y.Z` tag) as a GitHub Release.
+- [x] PyPI pending publisher for `hidbridge` (workflow `pypi.yml`, environment `pypi`) and the `pypi` environment on GitHub.
+- [x] First public wheel release: 1.2.3 on PyPI 2026-11-12 (MIT), from one `wheel/release/1.2.3` tag push.
+- [x] First public firmware release: `fw/release/2.0.1` GitHub Release 2026-11-12 (esp32dev, esp32-wifi, esp32-ethernet-kit, pico .bin/.uf2).
