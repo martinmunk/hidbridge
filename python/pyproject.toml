@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hidbridge"
-# Version is single-sourced from src/hidbridge/_version.py (baseline 1.0.0). The `wheel-v<X.Y.Z>`
+# Version is single-sourced from src/hidbridge/_version.py (baseline 1.0.0). The `wheel/release/<X.Y.Z>`
 # release build rewrites that file from the git tag before `uv build` -- the tag is the source of
 # truth. See docs/releasing.md.
 dynamic = ["version"]
@@ -42,7 +42,9 @@ dev = ["pytest>=7.0", "ruff>=0.4", "build>=1.0", "pyserial>=3.5"]
 hidbridge = "hidbridge.cli:main"
 
 [project.urls]
-Homepage = "https://forgejo.example.com/martinmunk/HIDBridge"
+Homepage = "https://github.com/martinmunk/hidbridge"
+Repository = "https://github.com/martinmunk/hidbridge"
+Issues = "https://github.com/martinmunk/hidbridge/issues"
 
 [tool.hatch.version]
 # Single-source the version from the package (release build rewrites this file from the git tag).

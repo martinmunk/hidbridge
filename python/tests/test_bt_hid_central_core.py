@@ -423,8 +423,8 @@ def test_advert_name_matches_real_profiles():
     # against the shipped profiles: each family's nick-suffixed name matches its own profile only
     esp = C.BACKEND_PROFILES["esp32"].advert_name
     pico = C.BACKEND_PROFILES["pico"].advert_name
-    assert C.advert_name_matches(esp + "-9216", esp)
-    assert not C.advert_name_matches(esp + "-9216", pico)
+    assert C.advert_name_matches(esp + "-ee03", esp)
+    assert not C.advert_name_matches(esp + "-ee03", pico)
 
 
 # --------------------------------------------------------------------------- #

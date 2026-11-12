@@ -240,7 +240,7 @@ class PairingAgent(dbus.service.Object):
     registered agent to authorize the incoming pairing; without one the bond never completes
     (device stays paired=False). This agent auto-accepts, but ONLY for devices under the dongle
     adapter path -- any pairing on the built-in adapter is REJECTED so we never silently authorize
-    something on the maintainer's built-in BT.
+    something on the user's built-in BT.
     """
 
     def __init__(self, bus, adapter_path, agent_path=AGENT_PATH):
@@ -436,7 +436,7 @@ class BleHidDaemon:
         # is REQUIRED: BlueZ elevates the HID characteristics to need authentication (a plain
         # Just-Works/NoInputNoOutput bond gets "Insufficient Authentication" on the HID report reads,
         # so iOS refuses to subscribe and the keyboard never activates). Our agent auto-confirms the
-        # numeric code (RequestConfirmation), so the only human step is the maintainer tapping "Pair" once.
+        # numeric code (RequestConfirmation), so the only human step is the user tapping "Pair" once.
         default_io = "NoInputNoOutput" if os.environ.get("BT_HID_INSECURE") else "DisplayYesNo"
         self.io_capability = os.environ.get("BT_HID_IO", default_io)
         self.agent = PairingAgent(self.bus, self.adapter_path, self.agent_path)

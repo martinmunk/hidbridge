@@ -6,7 +6,7 @@ connects, and subscribes to our BLE HID report characteristics on hci1 (dongle);
 known keyboard report + a known mouse report through the normal `HidController` -> daemon path and
 confirm the central receives the exact bytes over GATT notifications.
 
-Using the built-in adapter as the CENTRAL here is deliberate + the maintainer-sanctioned for the self-test;
+Using the built-in adapter as the CENTRAL here is deliberate + maintainer-sanctioned for the self-test;
 it is non-destructive: we RemoveDevice (drop the bond) from the built-in on cleanup, restoring it.
 
 Runs under the SYSTEM python (needs dbus + gi) and needs root (adapter control) + the daemon up on

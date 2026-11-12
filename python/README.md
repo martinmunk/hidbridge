@@ -24,19 +24,16 @@ truth for the HID report descriptor), so behaviour is identical regardless of tr
 
 ## Install
 
-**As a consumer** (released wheels live on this LAN's Forgejo PyPI registry):
+**As a consumer** (released wheels are on PyPI):
 
 ```bash
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the serial backend
+pip install "hidbridge[mcu]"      # + pyserial for the Pico/ESP32 serial backend
+pip install hidbridge             # core only: reports + the net (TCP) backend
 ```
 
-Persist the index with an `--extra-index-url` line in `requirements.txt`, a `pip.conf` entry, or
-`[[tool.uv.index]]` + `uv add --index ...`. The registry is assumed **public-read** (like this
-instance's Debian registry); if read is token-gated, use the credentialed index URL
-`http://<user>:<token>@forgejo.example.com:3000/...`. Plain `http://` is required
-(HTTPS/443 is unreachable on this LAN; add `--trusted-host` if pip warns). Full detail +
-the release flow: [`../docs/releasing.md`](../docs/releasing.md).
+Source, issues and firmware releases: <https://github.com/martinmunk/hidbridge>. The release flow
+(wheel and firmware version independently; the git tag is the version):
+[`docs/releasing.md`](https://github.com/martinmunk/hidbridge/blob/main/docs/releasing.md).
 
 **From source** (this checkout):
 

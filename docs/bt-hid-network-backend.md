@@ -68,7 +68,7 @@ hidbridge --backend net --host hidbridge-esp32.local net-status   # link / IP / 
 
 # or via HidSession (interchangeable with the dongle / esp32 backends)
 python -c 'from hidbridge.conn import HidSession
-with HidSession("net:hidbridge-esp32.local", "the maintainer'\''s iPad") as h: h.type_text("hi")'
+with HidSession("net:hidbridge-esp32.local", "My iPad") as h: h.type_text("hi")'
 ```
 
 Token resolution order: `--token` > `BT_HID_NET_TOKEN` > `~/.config/bt_hid/net.token`. Host:

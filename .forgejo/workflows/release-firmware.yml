@@ -1,15 +1,20 @@
 # Release the firmware -- triggered by a `fw/release/<X.Y.Z>` tag (the version SOURCE OF TRUTH).
 #
 # Flow: derive the version from the tag -> build both firmwares with -DHB_FW_VERSION injected (so
-# hello.fw reports the release version) -> publish the .bin/.uf2 artifacts to this Forgejo's GENERIC
+# hello.fw reports the release version) -> publish the .bin/.uf2 artifacts to the private Forgejo GENERIC
 # package registry. The wheel releases separately (release-wheel.yml, `wheel/release/*` tags).
 #
 # CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
-# actions/checkout; registry over HTTP :3000 (HTTPS/443 unreachable on this LAN); upload is idempotent
-# (200/201 ok, 409/"already exists" non-fatal); needs the PACKAGE_REGISTRY_TOKEN secret (write:package).
+# actions/checkout; registry over HTTP :3000 (HTTPS/443 unreachable on this LAN; the base URL comes
+# from the HB_REGISTRY_BASE repo variable); upload is idempotent (200/201 ok, 409/"already exists"
+# non-fatal); needs the PACKAGE_REGISTRY_TOKEN secret (write:package).
+#
+# PUBLIC HALF: the Forgejo push mirror carries the same tag to GitHub, where
+# .github/workflows/firmware-release.yml builds the same envs and attaches the same versioned files to
+# a GitHub Release. See PUBLISHING.md.
 #
 # CONSUMERS download an artifact with (see docs/releasing.md):
-#   curl -O http://forgejo.example.com:3000/api/packages/martinmunk/generic/hidbridge-firmware/<version>/hidbridge-esp32-ethernet-kit-<version>.bin
+#   curl -O <registry>/api/packages/martinmunk/generic/hidbridge-firmware/<version>/hidbridge-esp32-ethernet-kit-<version>.bin
 name: release-firmware
 
 on:
@@ -26,7 +31,10 @@ jobs:
     container:
       image: python:3.13-slim
     env:
-      REG_BASE: http://forgejo.example.com:3000
+      # The registry base URL is a Forgejo repo VARIABLE, not a literal (the repo is public via the
+      # GitHub mirror). It must be an address the runner reaches -- the plain-HTTP :3000 listener,
+      # which differs from github.server_url (ROOT_URL) -- so server_url is only the fallback.
+      REG_BASE: ${{ vars.HB_REGISTRY_BASE || github.server_url }}
     steps:
       - name: Install Node.js + git (checkout + the PlatformIO git-hosted pico platform need them)
         run: |

@@ -1,17 +1,18 @@
 # Release the Python wheel -- triggered by a `wheel/release/<X.Y.Z>` tag (the version SOURCE OF TRUTH).
 #
 # Flow: derive the version from the tag -> stamp it into src/hidbridge/_version.py -> run the offline
-# gate (ruff + pytest) -> `uv build` -> publish the wheel + sdist to this Forgejo's PyPI registry.
+# gate (ruff + pytest) -> `uv build` -> publish the wheel + sdist to the private Forgejo PyPI registry.
 # The firmware releases separately (release-firmware.yml, `fw/release/*` tags); the two version independently.
 #
 # CONVENTIONS (match the repo's deb.yml): runs-on docker + a container; nodejs installed BEFORE
-# actions/checkout; registry over HTTP :3000 (HTTPS/443 is unreachable on this LAN); publish is
-# idempotent (re-pushing an existing version is not a failure); needs the PACKAGE_REGISTRY_TOKEN
-# secret (write:package).
+# actions/checkout; registry over HTTP :3000 (HTTPS/443 is unreachable on this LAN; the base URL
+# comes from the HB_REGISTRY_BASE repo variable); publish is idempotent (re-pushing an existing
+# version is not a failure); needs the PACKAGE_REGISTRY_TOKEN secret (write:package).
 #
-# CONSUMERS install the published wheel with:
-#   pip install --index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ hidbridge
-# (see docs/releasing.md + README).
+# PUBLIC HALF: the Forgejo push mirror carries the same tag to GitHub, where .github/workflows/pypi.yml
+# publishes the same version to public PyPI (Trusted Publishing). One tag, both registries -- see
+# PUBLISHING.md. Consumers: `pip install "hidbridge[mcu]"` (PyPI) or the private registry's
+# /api/packages/martinmunk/pypi/simple/ index (docs/releasing.md).
 name: release-wheel
 
 on:
@@ -29,7 +30,10 @@ jobs:
     container:
       image: python:3.13-slim
     env:
-      REG_BASE: http://forgejo.example.com:3000
+      # The registry base URL is a Forgejo repo VARIABLE, not a literal (the repo is public via the
+      # GitHub mirror). It must be an address the runner reaches -- the plain-HTTP :3000 listener,
+      # which differs from github.server_url (ROOT_URL) -- so server_url is only the fallback.
+      REG_BASE: ${{ vars.HB_REGISTRY_BASE || github.server_url }}
     steps:
       # NOTE: no job-level working-directory -- this step runs BEFORE checkout (python/ does not exist
       # yet). The post-checkout steps set working-directory: python individually.

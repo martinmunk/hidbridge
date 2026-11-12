@@ -4,8 +4,10 @@
 #   * python   -- ruff + the offline pytest suite (the exact commands validated locally)
 #   * firmware -- compile-only builds of both firmwares (no flashing)
 # The hardware-in-the-loop tests live in hil.yml (a self-hosted stub).
+# The public GitHub mirror runs the python half via .github/workflows/test.yml instead (Forgejo ignores
+# .github/ when .forgejo/ exists, so the two never both run on one platform). See PUBLISHING.md.
 #
-# CONVENTIONS (match the repo's other .forgejo pipelines -- see any a private project*/.forgejo/deb.yml):
+# CONVENTIONS (shared with the maintainer's other Forgejo pipelines):
 #   * runs-on: docker  == the label this LAN's Forgejo runner advertises. Change it only if you
 #     register the runner under a different label (docs/releasing.md).
 #   * The job runs INSIDE a `container:`; that image has NO Node, and actions/checkout is a JS

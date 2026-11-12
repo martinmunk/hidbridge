@@ -10,7 +10,7 @@ Bluetooth **dongle**, so we can programmatically:
 - and, on an unlocked device, drive a **software reboot** (Settings > General > Shut Down, or
   AssistiveTouch) to clear wedges.
 
-This removes the "the maintainer must physically poke the iPad" dependency.
+This removes the "a person must physically poke the iPad" dependency.
 
 > **Connecting an iPad/iPhone + the required iOS setup** (pairing per backend, Full Keyboard Access,
 > AssistiveTouch + Pointer Devices, Mouse Keys, the "Restart" Shortcut, the no-touch reboot recipe):
@@ -149,7 +149,7 @@ python/src/hidbridge/bt_hid --backend esp32 --port /dev/ttyUSB1 click left
 Set `BT_HID_ESP32_PORT=/dev/ttyUSB1` to omit `--port` (the port is also auto-detected among
 `/dev/ttyUSB*` / `/dev/ttyACM*`, preferring a CP210x/CH340 bridge).
 
-**One-time pairing (physical -- the maintainer taps once):** with the board powered (advertising as
+**One-time pairing (physical -- the user taps once):** with the board powered (advertising as
 `HIDBRIDGE-esp32`), on the iPad/iPhone open **Settings > Bluetooth**, tap **`HIDBRIDGE-esp32`** under
 *Other Devices*, and tap **Pair** (Just Works -- nothing to type). After that it reconnects on its
 own and `type/key/move/click` register.
@@ -222,7 +222,7 @@ The unit installs to `/etc/systemd/system/bt-hid@<NAME>.service` and runs
 `bt_hid pair-mode --name <NAME>`. For a quick throwaway run without installing, use
 `sudo python/src/hidbridge/pair-mode.sh` (foreground, Ctrl-C to stop).
 
-## Pairing (the maintainer does this ONCE per device -- physical)
+## Pairing (the user does this ONCE per device -- physical)
 
 1. Make sure the daemon is running (see above); the dongle advertises as **`HIDBRIDGE-dongle`**.
 2. On the **iPad/iPhone**: **Settings > Bluetooth**.
@@ -487,7 +487,7 @@ take effect. Full evidence + the one untested (dedicated-digitizer) hypothesis:
 
 ## Security
 
-This tool types a **device passcode / Apple-ID password** on **the maintainer's own devices** for his own
+This tool types a **device passcode / Apple-ID password** on **the user's own devices** for their own
 workflow -- legitimate. Safeguards:
 
 - `unlock <passcode>` expands the passcode to HID frames **locally in the CLI** and sends only the

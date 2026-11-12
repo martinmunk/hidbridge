@@ -70,11 +70,11 @@ def _resolve(host: str, port: int, timeout: float) -> list:
     if t.is_alive():
         raise SocketLinkError(
             f"could not resolve the hidbridge board name {host!r} within {timeout:.0f}s (the mDNS/DNS "
-            f"lookup stalled). Check the name, or pass the board's IP instead (e.g. 192.168.x.y)")
+            f"lookup stalled). Check the name, or pass the board's IP instead (--host <board-ip>)")
     if "err" in result:
         raise SocketLinkError(
             f"could not resolve the hidbridge board name {host!r} ({result['err']}); pass the board's "
-            f"IP instead (e.g. 192.168.x.y)") from result["err"]
+            f"IP instead (--host <board-ip>)") from result["err"]
     return result.get("ok") or []
 
 
@@ -107,7 +107,7 @@ def _connect(host: str, port: int, timeout: float) -> socket.socket:
     raise SocketLinkError(
         f"cannot reach the hidbridge board at {host}:{port} ({err}). Check the network link + that "
         f"the firmware was flashed with the network build (pio run -e esp32-ethernet-kit); if the "
-        f"mDNS name does not resolve, pass the board's IP instead (--host 192.168.x.y)") from err
+        f"mDNS name does not resolve, pass the board's IP instead (--host <board-ip>)") from err
 
 
 def _psk_context(token: str) -> ssl.SSLContext:

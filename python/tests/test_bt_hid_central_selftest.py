@@ -41,7 +41,7 @@ NOT on this code (full write-up: docs/bt-hid-central-selftest-status.md):
      picks it when available); (b) --central hciN pins a USB DONGLE as the central instead of the
      built-in; (c) a clean host reboot. Pass BT_HID_CONNECT_METHOD / BT_HID_CENTRAL_ADAPTER to steer.
   2. ESP32 NOT CLEANLY FREE -- it prints "EVT connected" within ~5s of every boot: mini5's STALE
-     ESP32 bond auto-reconnecting. Freeing it needs mini5 to Forget the ESP32 (a the maintainer tap).
+     ESP32 bond auto-reconnecting. Freeing it needs mini5 to Forget the ESP32 (a user tap).
 """
 
 import json

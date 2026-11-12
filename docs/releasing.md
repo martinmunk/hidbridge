@@ -1,4 +1,7 @@
-# Releasing hidbridge (SemVer + Forgejo Actions)
+# Releasing hidbridge (SemVer + Forgejo Actions, mirrored to GitHub)
+
+> The public half -- the GitHub mirror, public PyPI via Trusted Publishing, GitHub Releases for the
+> firmware -- and its one-time setup are in [`../PUBLISHING.md`](../PUBLISHING.md).
 
 hidbridge is a **monorepo** with two independently-shipped artifacts:
 
@@ -27,11 +30,23 @@ firmware 1.1.0 against `proto` 1 simultaneously -- three numbers, three clocks.
 
 | Tag | Triggers | Publishes |
 | --- | --- | --- |
-| `wheel/release/1.0.0` | `.forgejo/workflows/release-wheel.yml` | wheel + sdist -> Forgejo PyPI registry |
-| `fw/release/1.0.0` | `.forgejo/workflows/release-firmware.yml` | esp32 + pico `.bin`/`.uf2` -> Forgejo generic registry |
+| `wheel/release/1.0.0` | `.forgejo/workflows/release-wheel.yml` (Forgejo) | wheel + sdist -> private Forgejo PyPI registry |
+| | `.github/workflows/pypi.yml` (GitHub mirror) | wheel + sdist -> **public PyPI** (Trusted Publishing) |
+| `fw/release/1.0.0` | `.forgejo/workflows/release-firmware.yml` (Forgejo) | esp32 + pico `.bin`/`.uf2` -> private Forgejo generic registry |
+| | `.github/workflows/firmware-release.yml` (GitHub mirror) | the same files -> a **GitHub Release** |
 
 Prefixed tags are what make one repo serve two release lines: a `wheel/release/*` tag never triggers a
 firmware build and vice versa.
+
+### The public half (GitHub mirror)
+
+Forgejo is the source of truth. Its push mirror carries `main` **and the tags** to
+<https://github.com/martinmunk/hidbridge>, so one tag push to Forgejo releases to both the private
+registry (the `.forgejo/` workflow) and the public side (the `.github/` workflow on GitHub). Forgejo
+ignores `.github/` when `.forgejo/` exists, and GitHub only runs `.github/`, so each platform runs
+only its own half. The one-time setup (GitHub repo, PAT, push mirror, PyPI pending publisher) is in
+[`../PUBLISHING.md`](../PUBLISHING.md). A version on PyPI can never be re-uploaded, so a botched
+public release is fixed with a new version, not by re-tagging.
 
 ### Wheel version wiring
 
@@ -60,8 +75,10 @@ git push origin wheel/release/1.0.0
 ```
 
 `release-wheel.yml` then: stamps `_version.py` from the tag -> `ruff check .` + offline `pytest -q` ->
-`uv build` -> `twine check` -> `twine upload` to the Forgejo PyPI registry. Re-pushing an
-already-published version is idempotent (a "file already exists" upload is treated as success).
+`uv build` -> `twine check` -> `twine upload` to the private Forgejo PyPI registry, while on the
+GitHub mirror `pypi.yml` publishes the same version to public PyPI. Re-pushing an
+already-published version is idempotent on Forgejo (a "file already exists" upload is treated as
+success); `pypi.yml` publishes with `skip-existing`, so re-running it on GitHub is a no-op too.
 
 ### Firmware
 
@@ -75,53 +92,46 @@ with `-DHB_FW_VERSION` injected and PUTs the versioned artifacts
 (`hidbridge-esp32-ethernet-kit-1.0.0.bin`, `hidbridge-pico-1.0.0.uf2`, ...) to the generic registry.
 Upload is idempotent (`200/201` ok, `409` "already exists" non-fatal).
 
-> Tags are the source of truth, so a botched release is fixed by deleting the tag + registry package
-> and re-tagging, not by hand-editing versions.
+> Tags are the source of truth, so a botched private release is fixed by deleting the tag + registry package
+> and re-tagging, not by hand-editing versions. (Public PyPI never accepts a version twice: there, cut a
+> new version.)
 
 ## Consuming a release
 
-### The wheel (Forgejo PyPI registry)
+### The wheel (public PyPI)
 
 ```bash
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
+pip install "hidbridge[mcu]"      # + pyserial for the Pico/ESP32 serial backend
+pip install hidbridge             # core only: reports + the net (TCP) backend
 ```
 
-Persist it in a project instead of typing the index each time:
+or `uv add "hidbridge[mcu]"`, or a `hidbridge[mcu]` line in `requirements.txt`.
 
-`requirements.txt`
-```
---extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
---trusted-host forgejo.example.com
-hidbridge[mcu]
-```
+### The wheel (the private Forgejo registry)
 
-`pip.conf` (`~/.config/pip/pip.conf`)
-```ini
-[global]
-extra-index-url = http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
-trusted-host = forgejo.example.com
+The same versions are on the private Forgejo PyPI registry, served over plain HTTP on port 3000
+(HTTPS/443 is unreachable on that LAN). With `<registry>` = the Forgejo base URL (the same value as
+the `HB_REGISTRY_BASE` repo variable) and `<host>` its hostname:
+
+```bash
+pip install --extra-index-url <registry>/api/packages/martinmunk/pypi/simple/ --trusted-host <host> "hidbridge[mcu]"
 ```
 
-`uv` (`pyproject.toml`)
-```toml
-[[tool.uv.index]]
-name = "forgejo"
-url = "http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/"
-```
-then `uv add --index forgejo hidbridge`.
+Persist it with an `--extra-index-url` + `--trusted-host` pair in `requirements.txt`/`pip.conf`, or a
+`[[tool.uv.index]]` entry (plus `[tool.uv] allow-insecure-host = ["<host>"]`) and
+`uv add --index <name> hidbridge`. The registry is assumed **public-read**; if read is token-gated,
+use the credentialed index URL `http://<user>:<token>@<host>:3000/api/packages/martinmunk/pypi/simple/`
+or a `~/.netrc` entry.
 
-> **Auth assumption:** these examples assume the registry is **public-read** (like this instance's
-> Debian registry). If read is gated behind a token, use the credentialed index URL
-> `http://<user>:<token>@forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/`
-> or add a `~/.netrc` entry for the host. The plain `http://` (not `https://`) is required: HTTPS/443
-> is unreachable on this LAN; add the host to pip's `trusted-host` if pip warns.
+### The firmware
 
-### The firmware (Forgejo generic registry)
+Public: download the versioned files from the GitHub Release for the tag
+(<https://github.com/martinmunk/hidbridge/releases>, e.g. `hidbridge-esp32-ethernet-kit-1.0.0.bin`,
+`hidbridge-pico-1.0.0.uf2`). Private: the Forgejo generic registry holds the same files:
 
 ```bash
 V=1.0.0
-BASE=http://forgejo.example.com:3000/api/packages/martinmunk/generic/hidbridge-firmware/$V
+BASE=<registry>/api/packages/martinmunk/generic/hidbridge-firmware/$V
 curl -O "$BASE/hidbridge-esp32-ethernet-kit-$V.bin"
 curl -O "$BASE/hidbridge-pico-$V.uf2"
 ```
@@ -133,13 +143,13 @@ mass-storage device.
 
 ### Register a Forgejo runner (for `ci.yml` + the two release workflows)
 
-These workflows use `runs-on: docker` and run inside a container -- the same convention as the repo's
-other `.forgejo/workflows/deb.yml` pipelines. Register a runner that advertises the `docker` label:
+These workflows use `runs-on: docker` and run inside a container -- the same convention as the
+maintainer's other Forgejo pipelines. Register a runner that advertises the `docker` label:
 
 ```bash
 # on the runner host (needs Docker)
 forgejo-runner register \
-  --instance  http://forgejo.example.com:3000 \
+  --instance  <registry> \
   --token     <RUNNER_REGISTRATION_TOKEN_from_the_repo/org_Actions_settings> \
   --name      hidbridge-ci \
   --labels    docker:docker://python:3.13-slim
@@ -157,8 +167,20 @@ Both release workflows publish with `${{ secrets.PACKAGE_REGISTRY_TOKEN }}` (a F
 Add it under the repo's *Settings -> Actions -> Secrets* as `PACKAGE_REGISTRY_TOKEN`. The workflows
 fail with a clear message if it is unset.
 
-> The workflows use only the standard `${{ github.* }}` context (`github.ref_name`, `github.sha`,
-> `github.event_name`) plus that one secret -- no Forgejo-specific context is required.
+### Set the repo variables (infra addresses live here, not in the tree)
+
+The repo is public via the GitHub mirror, so LAN addresses are never committed. The Forgejo workflows
+read them from repo **variables** (*Settings -> Actions -> Variables*):
+
+| Variable | Read by | Value |
+| --- | --- | --- |
+| `HB_REGISTRY_BASE` | `release-wheel.yml`, `release-firmware.yml` | the Forgejo base URL the runner can reach (the plain-HTTP `:3000` listener; falls back to `github.server_url` if unset) |
+| `HB_BENCH_NET_HOST` | `hil.yml` | the Ethernet bench board's IP (`BT_HID_NET_HOST`) |
+| `HB_BENCH_OTA_HOST` | `hil.yml` | the board the OTA loop reflashes (`BT_HID_ESP32_OTA_HOST`) |
+| `HB_BENCH_ESP32_PORT` | `hil.yml` | that board's serial port (`BT_HID_ESP32_PORT`; defaults to `/dev/ttyUSB3`) |
+
+> Apart from those, the workflows use only the standard `${{ github.* }}` context
+> (`github.ref_name`, `github.sha`, `github.event_name`) plus that one secret.
 
 ### Future: the hardware-in-the-loop runner (`hil.yml`)
 
@@ -169,11 +191,11 @@ directly on the bench host (not in a container, so it reaches the USB serial por
 bonded iPad) with the labels `self-hosted,hidbridge-bench`:
 
 ```bash
-forgejo-runner register --instance http://forgejo.example.com:3000 \
+forgejo-runner register --instance <registry> \
   --token <TOKEN> --name hidbridge-bench --labels self-hosted,hidbridge-bench
 ```
 
-Then edit the `env:` block in `hil.yml` to the live ports/IPs (they drift between sessions) and ensure
+Then set the `HB_BENCH_*` repo variables `hil.yml` reads (above; ports drift between sessions) and ensure
 the net token is present at `~/.config/bt_hid/net.token` (it is the TLS-PSK + OTA password, **not** a
 CI secret). Gating env vars the tests read: `BT_HID_CENTRAL=1`, `BT_HID_OTA=1`, `BT_HID_ESP32_PORT`,
 `BT_HID_ESP32_OTA_HOST`/`BT_HID_NET_HOST`, and the per-test `BT_HID_LIVE_*` vars.

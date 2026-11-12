@@ -9,9 +9,9 @@ Tool: `python/src/hidbridge/dismiss_trust.py` (pure plan builders + a HidSession
 the plan). Tests: `python/tests/test_bt_hid_dismiss_trust.py` (offline + a `BT_HID_DISMISS_LIVE`
 device-gated live test).
 
-## KEY FINDING -- arrow keys DO dismiss "Trust" (the maintainer, LIVE 2026-07-14)
+## KEY FINDING -- arrow keys DO dismiss "Trust" (the user, LIVE 2026-07-14)
 
-**Arrow keys CAN move the highlight onto "Trust" and activate it over BT HID.** the maintainer
+**Arrow keys CAN move the highlight onto "Trust" and activate it over BT HID.** The user
 live-verified this on mini5 after a KVM switch to dev-usb threw a fresh Trust prompt: a bonded BT
 keyboard moved the highlight from "Don't Trust" onto "Trust" with ARROW keys and activated it.
 
@@ -87,7 +87,7 @@ Confirming/repairing trust is left to the USB/`idevicepair` route (reserved for 
 * Drives every HID answer path we have and returns a structured, passcode-free result:
   - `--method trust`: ARROW toward "Trust" (`--arrow-direction right`, `--arrow-presses N`) +
     activate (`--activate-key space`) + the PIN confirm from `~/.config/bt_hid/idevice.pin` (never
-    logged) -- **the working path** (the maintainer live 2026-07-14).
+    logged) -- **the working path** (the user, live 2026-07-14).
   - `--method dialog` / `decline`: Tab(s) + activate (answers ORDINARY dialogs, e.g. Sidecar
     "Mistet forbindelse"; on the Trust alert the Tab-focused button is "Don't Trust").
   - `--method trust-pointer`: relative-pointer click at `--pointer-frac x,y` (+ PIN confirm) -- a
@@ -105,12 +105,12 @@ LIVE wsb rig (probed 2026-07-13): **mini6 = ESP32 `HIDBRIDGE-esp32` on `/dev/tty
 
 ## Alternatives (BT HID via `--method trust` is now the primary answer)
 
-* **`--method trust` (arrow + activate) -- the working BT-HID answer for "Trust"** (the maintainer live
+* **`--method trust` (arrow + activate) -- the working BT-HID answer for "Trust"** (the user, live
   2026-07-14). No physical tap needed. Requires the iPad AWAKE + reconnected to its bonded board
   (a sleeping iPad tears down the peripheral link -- see the wake-blocker note above).
 * Remove the USB trigger (stop the `usbmuxd`/lockdown pairing attempt) so iOS auto-dismisses -- not
   "via BT HID", and risks disturbing the banked mini5 USB state.
-* A physical tap (the maintainer) -- still available, but no longer the ONLY way to answer "Trust".
+* A physical tap (the user) -- still available, but no longer the ONLY way to answer "Trust".
 * USB / `idevicepair pair` -- the lockdown-trust route (orthogonal to the on-glass dialog).
 
 ## STILL NOT live-verified on wsb + a KVM'd iPad (2026-07-14, night) -- two hard blockers
@@ -118,7 +118,7 @@ LIVE wsb rig (probed 2026-07-13): **mini6 = ESP32 `HIDBRIDGE-esp32` on `/dev/tty
 Attempted to LIVE-VERIFY `--method trust` on mini6 during the dev-usb/Ubuntu Sidecar work (mini6 on
 the KVM to dev-usb, showing a fresh "Trust This Computer?" modal; the ESP32/Pico boards stay wired to
 wsb and reach mini6 over BLE regardless of which host owns the USB). The verify was **BLOCKED** and
-the tool's "not yet live-verified" status STANDS (the maintainer's 2026-07-14 daytime live-verify note above
+the tool's "not yet live-verified" status STANDS (the user's 2026-07-14 daytime live-verify note above
 is the only positive evidence; this night session could not reproduce it). Two independent walls:
 
 ### 1. mini6 will NOT re-initiate its bonded BLE link (peripheral-side reconnect wall)
@@ -140,7 +140,7 @@ with both boards listed under "My Devices" (= bonded)**. Exhausted, all conn=0 t
 So the modal is NOT what suspends the reconnect; mini6 (the BLE central) simply is not re-initiating
 the link to the advertising peripheral. This is the SAME class as the mini5 sleeping-iPad wake-blocker
 above, but here mini6 is fully awake -- so an awake+bonded iPad is ALSO not guaranteed to reconnect.
-Untried levers that need the maintainer physically: a manual Bluetooth toggle / tapping the board in the BT
+Untried levers that need the user physically: a manual Bluetooth toggle / tapping the board in the BT
 list on mini6, or a physical re-pair. Over BT HID alone, the peripheral cannot force it.
 
 ### 2. The "Trust This Computer?" modal on a KVM'd iPad is INSULATED from host-side USB disconnects
