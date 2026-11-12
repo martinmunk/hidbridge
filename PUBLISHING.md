@@ -102,7 +102,7 @@ push mirror; nobody pushes to GitHub directly. Because the workflows already liv
 ### Setup
 
 1. **GitHub repo** `martinmunk/hidbridge`, created **empty** and public: no README, no
-   `.gitignore`, and licence set to *None* (the repo already carries `LICENSE` + `NOTICE`; letting
+   `.gitignore`, and licence set to *None* (the repo already carries `LICENSE`; letting
    GitHub add a file would create a commit the mirror cannot fast-forward onto).
 2. **GitHub fine-grained PAT**, repository access limited to `hidbridge`, with
    **Contents: read and write** *and* **Workflows: read and write**. The second permission is

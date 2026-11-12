@@ -66,7 +66,7 @@ parity test guards it.
 ```
 hidbridge/
   README.md            <- you are here (what it is, architecture, quick start)
-  LICENSE  NOTICE      Apache-2.0  (see "License" -- confirm choice)
+  LICENSE              MIT
   python/              the Python package + tests  (has its own README)
     pyproject.toml     buildable to a wheel; console_script `hidbridge`
     src/hidbridge/     the package
@@ -156,11 +156,7 @@ the boards.
 
 ## License
 
-**Apache-2.0** (see [`LICENSE`](LICENSE) + [`NOTICE`](NOTICE)).
-
-> **TODO(maintainer): confirm the license.** Apache-2.0 is the default chosen here (patent grant, common
-> for hardware-adjacent tooling). Switch to **MIT** (simpler/shorter) or another license if you
-> prefer before the repo is published.
+**MIT** (see [`LICENSE`](LICENSE)).
 
 ## Status
 
