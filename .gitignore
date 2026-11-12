@@ -34,3 +34,4 @@ targets.json
 # block it anywhere in case it is ever copied into a tree.
 net.token
 *.token
+.claude/worktrees/
