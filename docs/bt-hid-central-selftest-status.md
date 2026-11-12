@@ -81,7 +81,7 @@ The ESP32 prints `EVT connected` from a central within ~5s of every boot, but NO
 exists on hci0 OR hci1 -- i.e. a THIRD central is grabbing it. Diagnosis: **mini5's STALE ESP32 bond
 auto-reconnecting** (the abs-esp32 subagent is idle/done; no other active central). A BLE peripheral
 serves one central, so mini5 holding the ESP32 fights the hci0 connect regardless of blocker #1.
-Freeing it needs **mini5 to Forget the ESP32** (a the maintainer tap on the iPad). Also note: opening the
+Freeing it needs **mini5 to Forget the ESP32** (a user tap on the iPad). Also note: opening the
 ESP32's USB serial RESETS the chip (expected for this backend; the transport's `_wait_ready` handles
 it), so its BLE link state is fragile during testing.
 

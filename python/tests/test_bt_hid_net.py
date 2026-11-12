@@ -142,6 +142,15 @@ def test_link_net_backend_resolves():
 # never hang. A stuck/incompatible board (accepts TCP, never completes TLS) or a stalling .local
 # lookup must surface a clear error in ~the timeout, not a multi-minute hang.
 # --------------------------------------------------------------------------- #
+# The bounded-open tests drive open_socket() past the TLS-PSK context, which needs Python 3.13+
+# (ssl.set_psk_client_callback). On an older interpreter open_socket refuses up front with a clear
+# error before resolving/handshaking, so these paths do not exist there -- skip, don't fail (the
+# package supports 3.11+; only the net backend is 3.13+).
+needs_tls_psk = pytest.mark.skipif(not hasattr(ssl.SSLContext, "set_psk_client_callback"),
+                                   reason="TLS-PSK needs Python 3.13+")
+
+
+@needs_tls_psk
 def test_open_socket_raises_promptly_on_a_stuck_tls_handshake(monkeypatch):
     # A peer that accepts TCP but never completes TLS must raise a clear SocketLinkError (mentioning the
     # handshake), NOT hang. Deterministic + socket-free (per this module's design, and immune to CI
@@ -158,6 +167,7 @@ def test_open_socket_raises_promptly_on_a_stuck_tls_handshake(monkeypatch):
     assert "handshake" in str(ei.value).lower()
 
 
+@needs_tls_psk
 def test_open_socket_bounds_a_stalling_name_resolution(monkeypatch):
     # getaddrinfo (mDNS/.local) is NOT bounded by create_connection's timeout arg -- a stalled lookup
     # would otherwise hang for the OS default. open_socket must bound resolution and raise. A short

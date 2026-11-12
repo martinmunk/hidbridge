@@ -1,6 +1,6 @@
 """bt_hid target registry -- map a friendly iOS-device name to a backend target + bond identity.
 
-the maintainer's ask (task #34): "some way to switch the bt device to control a specific paired device" --
+The user's ask (task #34): "some way to switch the bt device to control a specific paired device" --
 so a test or a user can say `bt_hid --device mini6 click back` and NOT have to remember that mini6
 lives on `hci1` bonded as `mini6`, while mini5 lives on `hci2`. This module is the small persisted
 map behind that + a PURE resolver:

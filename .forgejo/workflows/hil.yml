@@ -28,16 +28,18 @@ jobs:
       run:
         working-directory: python
     env:
-      # The bench boards (see the project bench notes). Adjust to the live ports/IPs before enabling.
-      #   espeth (Ethernet): /dev/ttyUSB3, 192.0.2.102, env esp32-ethernet-kit
-      #   wifi board:        /dev/ttyUSB1, 192.0.2.120, env esp32-wifi
-      # Ports drift between sessions -- re-identify with a serial `N` query. The net token lives at
+      # The bench boards. Their LAN addresses are deliberately NOT committed (the repo is public via
+      # the GitHub mirror); they come from Forgejo repo variables (Settings -> Actions -> Variables):
+      #   HB_BENCH_NET_HOST    -- the Ethernet board (env esp32-ethernet-kit): the net backend host
+      #   HB_BENCH_OTA_HOST    -- the board the OTA loop reflashes (normally that same Ethernet board)
+      #   HB_BENCH_ESP32_PORT  -- that board's USB serial port (falls back to /dev/ttyUSB3)
+      # Ports drift between sessions -- re-identify with a serial `hello`. The net token lives at
       # ~/.config/bt_hid/net.token (0600) and is the TLS-PSK + OTA password; it is NOT a CI secret.
       BT_HID_CENTRAL: "1"           # on-host BLE-central HID self-test (needs the built-in adapter + an MCU)
-      BT_HID_ESP32_PORT: "/dev/ttyUSB3"
-      BT_HID_NET_HOST: "192.0.2.102"
+      BT_HID_ESP32_PORT: ${{ vars.HB_BENCH_ESP32_PORT || '/dev/ttyUSB3' }}
+      BT_HID_NET_HOST: ${{ vars.HB_BENCH_NET_HOST }}
       BT_HID_OTA: "1"               # over-the-air reflash loop (REFLASHES the board -- see the test's warning)
-      BT_HID_ESP32_OTA_HOST: "192.0.2.102"
+      BT_HID_ESP32_OTA_HOST: ${{ vars.HB_BENCH_OTA_HOST }}
       # Live-host tests (a real bonded iPad) opt in with their own BT_HID_LIVE_* vars; enable per run.
     steps:
       - name: Checkout
@@ -51,7 +53,7 @@ jobs:
       - name: Hardware-gated tests (the HIL gate)
         # STUB: this runs the hardware/live tests -- the *_live.py files plus any test that self-gates
         # on the BT_HID_* env vars set above (central self-test, OTA loop). It will FAIL until the
-        # bench runner + boards are wired and the env above points at the live ports/IPs. Narrow the
+        # bench runner + boards are wired and the HB_BENCH_* repo variables are set. Narrow the
         # selection per run as needed (e.g. drop BT_HID_OTA to skip the reflash loop).
         run: |
           pytest -q tests/ -k "live or ota or central" || {

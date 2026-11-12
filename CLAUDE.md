@@ -14,9 +14,10 @@ and digitizer/touch reports were removed on purpose: they made desktop hosts (GN
 the device as a touchscreen and hide the cursor, and were proven-negative on the tested hosts. The
 code + git history keep the door open to revisit an absolute path later.
 
-`hidbridge` is a **placeholder name pending a rename**. The code predates it: modules, env vars
-(`BT_HID_*`), config paths (`~/.config/bt_hid/`), and docstrings still say `bt_hid`. That mismatch is
-expected -- don't "fix" it piecemeal.
+The name is final: `hidbridge` (the PyPI package and the GitHub repo). The code predates it: modules,
+env vars (`BT_HID_*`), config paths (`~/.config/bt_hid/`), and docstrings still say `bt_hid`. That
+mismatch is legacy and intentional (renaming env vars/config paths would break existing setups) --
+don't "fix" it piecemeal.
 
 ## Working practices (read this first)
 
@@ -70,7 +71,11 @@ pio run -t upload                # compile + flash (port auto-detected)
 pio device monitor -b 115200
 ```
 
-There is no CI yet.
+CI: `.forgejo/workflows/` runs on Forgejo (the source of truth: `ci.yml` offline gate + firmware
+compile, tag-driven `release-wheel.yml`/`release-firmware.yml` to the private registry, `hil.yml`
+bench stub); `.github/workflows/` runs only on the public GitHub mirror (`test.yml` 3.11-3.13 matrix,
+`pypi.yml` Trusted Publishing, `firmware-release.yml` GitHub Releases). Each platform ignores the
+other's directory. Release flow: `docs/releasing.md`.
 
 ## Test gating
 
@@ -199,6 +204,15 @@ into one big commit. Keep messages descriptive; note what was verified live. A p
 confusable Unicode (em/en dashes, smart quotes) -- use ASCII `--` and straight quotes. `git commit -m`
 with backticks/`$()` in the message gets shell-mangled, and a local bash guard trips on the words
 `until`/`while` in a command; write the message to a file and use `git commit -F <file>` to avoid both.
+
+## Publishing
+
+The repo is **public via the GitHub mirror** (Forgejo push-mirrors `main` + tags to
+github.com/martinmunk/hidbridge; the wheel goes to public PyPI from there). Setup + flow:
+`PUBLISHING.md`. **Rule: nothing personal/infra in tracked files** -- no LAN IPs, internal hostnames,
+device MACs, or personal names (commits, docs, tests, code defaults, workflow files). Use `192.0.2.x`
+(RFC 5737) and `AA:BB:CC:DD:EE:xx` placeholders; real addresses for Forgejo CI go in repo variables
+(`vars.HB_*`), secrets in secrets. Private work stays on non-mirrored branches (`feat/*`).
 
 ## Further reading
 

@@ -93,7 +93,7 @@ source of truth. X/Y are u16 little-endian in `0..32767` (a screen-fraction full
 The host side of this protocol is `python/src/hidbridge/transport_pico.py`; you normally never type these
 lines by hand -- use the `bt_hid` CLI (below).
 
-## One-time pairing (the maintainer, physical -- on the iPad)
+## One-time pairing (the user, physical -- on the iPad)
 
 While the Pico is powered it advertises `HIDBRIDGE-pico` automatically (no daemon on the host). Pair
 once:

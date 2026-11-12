@@ -86,40 +86,18 @@ straightforward if desired.
 
 ## Install in your project (consumers)
 
-Released wheels are published to this LAN's Forgejo **PyPI registry**. To use `hidbridge` from
-another Python project, install it from that index:
+Released wheels are published to **PyPI** as `hidbridge`. Install the extra for the backend you use:
 
 ```bash
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com hidbridge
-pip install --extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/ --trusted-host forgejo.example.com "hidbridge[mcu]"   # + pyserial for the Pico/ESP32 serial backend
+pip install "hidbridge[mcu]"      # Pico / ESP32 over USB serial (pulls pyserial)
+pip install hidbridge             # core only: reports + the net (TCP) backend, stdlib-only
+pip install "hidbridge[dongle]"   # BlueZ backend; needs dbus + PyGObject (see python/README.md)
 ```
 
-Persist the index in a project rather than typing it each time:
-
-```text
-# requirements.txt
---extra-index-url http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/
---trusted-host forgejo.example.com
-hidbridge[mcu]
-```
-
-```toml
-# pyproject.toml (uv)
-[[tool.uv.index]]
-name = "forgejo"
-url = "http://forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/"
-
-# plain-HTTP registry -> allow it explicitly
-[tool.uv]
-allow-insecure-host = ["forgejo.example.com"]
-```
-then `uv add --index forgejo hidbridge`.
-
-> **Auth:** these examples assume the registry is **public-read** (like this instance's Debian
-> registry). If read is token-gated, use the credentialed index URL
-> `http://<user>:<token>@forgejo.example.com:3000/api/packages/martinmunk/pypi/simple/`
-> (or a `~/.netrc` entry). The plain `http://` is deliberate -- HTTPS/443 is unreachable on this LAN;
-> pass `--trusted-host forgejo.example.com` if pip warns.
+or with uv: `uv add "hidbridge[mcu]"`. Firmware images for the boards are attached to the
+[GitHub Releases](https://github.com/martinmunk/hidbridge/releases) (`fw/release/<X.Y.Z>` tags).
+The maintainer's private Forgejo registry carries the same versions; see
+[`docs/releasing.md`](docs/releasing.md).
 
 Then drive a target in a few lines (the board self-identifies from the location you pass):
 
@@ -180,14 +158,17 @@ the boards.
 
 **Apache-2.0** (see [`LICENSE`](LICENSE) + [`NOTICE`](NOTICE)).
 
-> **TODO(the maintainer): confirm the license.** Apache-2.0 is the default chosen here (patent grant, common
+> **TODO(maintainer): confirm the license.** Apache-2.0 is the default chosen here (patent grant, common
 > for hardware-adjacent tooling). Switch to **MIT** (simpler/shorter) or another license if you
 > prefer before the repo is published.
 
 ## Status
 
-A self-contained copy of the BT-HID toolbox with no dependency on its source project. CI + releases
-run on this LAN's Forgejo (`.forgejo/workflows/`): an offline gate on every push/PR, plus tag-driven
-release pipelines that publish the wheel (`wheel/release/*`) and firmware (`fw/release/*`) **independently**, both
-starting at 1.0.0. See [`docs/releasing.md`](docs/releasing.md) for the SemVer scheme, the tag
-conventions, and the one-time runner + `PACKAGE_REGISTRY_TOKEN` setup.
+A self-contained copy of the BT-HID toolbox with no dependency on its source project. Development
+happens on the maintainer's Forgejo, which is the source of truth; this GitHub repository is a push
+mirror of `main` (please file issues here). CI runs on both: `.forgejo/workflows/` on Forgejo (an
+offline gate on every push/PR, firmware compile checks, tag-driven releases to the private registry)
+and `.github/workflows/` on GitHub (the offline test matrix, plus the public releases). The wheel
+(`wheel/release/*` tags -> PyPI) and the firmware (`fw/release/*` tags -> GitHub Releases) release
+**independently**, both starting at 1.0.0. See [`docs/releasing.md`](docs/releasing.md) for the
+SemVer scheme and tag conventions, and [`PUBLISHING.md`](PUBLISHING.md) for the public half.

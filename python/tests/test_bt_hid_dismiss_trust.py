@@ -4,7 +4,7 @@ The plan builders + runner are PURE (no hardware): a plan is a list of step dict
 maps onto a HidController, so we drive it against a RecordingTransport and assert the exact frames.
 Asserts:
   * build_dialog_dismiss_plan is the proven Tab(s)+activate recipe (wake -> tab*n -> activate);
-  * build_trust_arrow_plan is arrow(toward Trust) -> activate -> passcode (the maintainer live 2026-07-14);
+  * build_trust_arrow_plan is arrow(toward Trust) -> activate -> passcode (the user, live 2026-07-14);
   * plan_summary NEVER leaks the passcode (redacted) -- security invariant;
   * run_plan emits the right HID frames for keys/click/aim, and REQUIRES a pin for a passcode step;
   * resolve() accepts explicit target+bond OR a registry device, and errors when given neither;
@@ -42,7 +42,7 @@ def test_dialog_plan_multi_tab():
 
 
 def test_trust_arrow_plan_is_arrow_then_activate():
-    # the maintainer live-verified 2026-07-14: arrow toward "Trust" (right button) + activate DOES answer it.
+    # The user live-verified 2026-07-14: arrow toward "Trust" (right button) + activate DOES answer it.
     plan = D.build_trust_arrow_plan(direction="right", presses=2, activate_key="space",
                                     with_passcode=True)
     ops = [s["op"] for s in plan if s["op"] != "sleep"]
@@ -166,7 +166,7 @@ def test_live_dialog_dismiss_connects_and_runs():
 
     Gated: needs the paired backend (ESP32/Pico/dongle) + the iPad awake. Asserts the session
     connects and the plan runs end-to-end (delivery). To actually answer a live "Trust" alert use
-    method="trust" (arrow + activate, the maintainer live 2026-07-14) and webcam-confirm the highlight moves
+    method="trust" (arrow + activate, the user, live 2026-07-14) and webcam-confirm the highlight moves
     onto "Trust" by comparing the two buttons' relative brightness -- see the module docstring.
     """
     device = os.environ["BT_HID_DISMISS_LIVE"]

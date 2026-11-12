@@ -81,7 +81,7 @@ Whether iOS honours an ABSOLUTE mouse axis and/or a HID digitizer is unknown and
 real glass, webcam-verified.
 
 Procedure (dongle = hci1 only; coordinate device access first):
-1. iOS caches the GATT report map PER BOND -> the maintainer must FORGET the bt_hid device on the iPad and
+1. iOS caches the GATT report map PER BOND -> the user must FORGET the bt_hid device on the iPad and
    RE-PAIR so it reads the new report map (reportIDs 3 + 4).
 2. Run the daemon (`sudo python/src/hidbridge/bt_hid pair-mode`) on the dongle; confirm the iPad connects.
 3. Command a KNOWN target and webcam-verify (`tools/webcam_ipad.sh`) where the tap LANDS:
@@ -134,12 +134,12 @@ on-screen verification: move a relative step, snap the webcam (`tools/webcam_ipa
 -- rather than open-loop absolute coordinates. For fixed dialogs (e.g. "Trust"), a
 relative-nudge-from-a-known-anchor + webcam-confirm is the reliable path.
 
-### One untested hypothesis (would need another forget/re-pair -- the maintainer's physical tap)
+### One untested hypothesis (would need another forget/re-pair -- the user's physical tap)
 The digitizer here was the 4th report in a COMBINED report map (kbd+mouse+abs-mouse+digitizer under
 one HID service). Some iOS versions only accept a touchscreen digitizer as a DEDICATED HID device
 (its own report map / GATT HID instance, GAP appearance = digitizer, no mouse alongside). Whether a
 standalone-digitizer device flips this negative is unproven. It is a real but lower-odds avenue that
-costs one more the maintainer re-pair; deferred unless prioritised. (The absolute MOUSE is not worth retrying
+costs one more user re-pair; deferred unless prioritised. (The absolute MOUSE is not worth retrying
 -- iPadOS pointer is fundamentally relative.)
 
 ## VERDICT 2 -- STANDALONE dedicated devices (2026-07-28, iPad, on-glass observation)

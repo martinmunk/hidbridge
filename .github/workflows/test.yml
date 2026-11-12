@@ -1,0 +1,52 @@
+name: test
+
+# ---------------------------------------------------------------------------
+# GitHub Actions counterpart of the python job in .forgejo/workflows/ci.yml: ruff + the OFFLINE
+# pytest suite on a stock ubuntu runner (no Bluetooth hardware, no dbus/PyGObject). Hardware and
+# live-host tests self-skip without their BT_HID_* env vars; the dongle-backend tests skip when
+# dbus/gi are absent. The firmware compile check stays on Forgejo only.
+#
+# This file only runs on GitHub (the public push mirror of `main`). Forgejo gives
+# `.forgejo/workflows/` precedence and ignores `.github/workflows/` when both exist, so the two never
+# both run on the same platform. See PUBLISHING.md.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package + dev/mcu tooling
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,mcu]"
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pytest (offline suite)
+        run: python -m pytest -q

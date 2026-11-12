@@ -30,7 +30,7 @@ AGENT_ID="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null || tru
 # ---------------- GUARD 1a: remote-host access must be DELEGATED (MAIN agent only) ----------------
 # ssh/scp from the MAIN agent -> BLOCK. Remote-host work (SSH probing, remote diagnostics/deploy)
 # must go to a SUBAGENT (Agent/Task tool) so the grind stays out of the main context -- the main
-# agent's reasoning degrades over a long inline session (the maintainer 2026-07-12). Subagents ssh freely.
+# agent's reasoning degrades over a long inline session (the maintainer, 2026-07-12). Subagents ssh freely.
 # Word-boundary match (ssh/scp/sshpass as a command word); paths like '.ssh/config' do NOT match.
 if [ -z "$AGENT_ID" ] && printf '%s' "$cmd" | grep -qE '(^|[[:space:];&|(])(ssh|scp|sshpass)[[:space:]]'; then
   {

@@ -5,10 +5,10 @@ iPad's USB (e.g. a KVM move, an NCM bring-up, a `usbmuxd` pairing attempt), the 
 **"Trust This Computer?"** alert. It blocks the whole screen until answered. This module drives a
 paired BLE-HID backend (dongle / ESP32 / Pico -- see `bt_hid.targets`) to answer it hands-free.
 
-WHAT ACTUALLY WORKS -- arrow keys DO answer "Trust" (the maintainer, live 2026-07-14)
+WHAT ACTUALLY WORKS -- arrow keys DO answer "Trust" (the user, live 2026-07-14)
 -----------------------------------------------------------------------------
 The prior "HID-hardened / arrow keys can neither reach nor activate Trust" conclusion is **REFUTED**.
-the maintainer LIVE-VERIFIED on mini5 (after a KVM switch to dev-usb threw a fresh Trust prompt) that a
+The user LIVE-VERIFIED on mini5 (after a KVM switch to dev-usb threw a fresh Trust prompt) that a
 bonded BT keyboard CAN move the highlight onto "Trust" with ARROW keys and then activate it.
 
   * Keyboard: the FKA focus DOES move under arrow keys and the focused button DOES activate. The
@@ -101,7 +101,7 @@ def build_dialog_dismiss_plan(activate_key: str = "space", focus_tabs: int = 1,
 def build_trust_arrow_plan(*, direction: str = "right", presses: int = 2,
                            activate_key: str = "space", with_passcode: bool = True,
                            settle: float = 0.6) -> list[dict]:
-    """Answer the "Trust This Computer?" alert with ARROW-key focus move + activate (the maintainer 2026-07-14).
+    """Answer the "Trust This Computer?" alert with ARROW-key focus move + activate (the user, 2026-07-14).
 
     Default focus is on "Don't Trust" (left); "Trust" is the right button. Sends `presses` arrow
     keys toward "Trust" (default Right), then activates the focused button (Space), then -- if the
