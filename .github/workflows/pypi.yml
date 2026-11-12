@@ -1,0 +1,101 @@
+name: Publish to PyPI
+
+# ---------------------------------------------------------------------------
+# Publish the hidbridge wheel + sdist to the public PyPI using Trusted Publishing (OIDC). No API
+# token is stored anywhere.
+#
+# Releases are cut on Forgejo (the source of truth) by pushing a `wheel/release/X.Y.Z` tag. Forgejo's
+# own .forgejo/workflows/release-wheel.yml publishes that version to the private registry; the
+# Forgejo push mirror carries the same tag here and this workflow publishes the SAME version to PyPI.
+# One tag, both registries, no manual step on GitHub. The version is derived from the tag
+# (wheel/release/X.Y.Z -> X.Y.Z, stamped into python/src/hidbridge/_version.py exactly as
+# release-wheel.yml does), not from the baseline committed in the tree.
+#
+# This file only runs on GitHub. Forgejo gives `.forgejo/workflows/` precedence and ignores
+# `.github/workflows/` when both exist, so the two coexist safely. See PUBLISHING.md.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    tags: ["wheel/release/*"]
+  workflow_dispatch:
+
+# Never cancel an in-progress publish.
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Derive version from the tag + stamp _version.py
+        # wheel/release/1.2.3 -> 1.2.3. A workflow_dispatch run must be started ON a
+        # wheel/release/* tag (the "Use workflow from" picker); a branch run fails here by design.
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#wheel/release/}"
+          echo "wheel version = $VERSION (from ref $GITHUB_REF_NAME)"
+          case "$GITHUB_REF_NAME" in
+            wheel/release/[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "ref $GITHUB_REF_NAME does not look like wheel/release/<X.Y.Z>"; exit 1 ;;
+          esac
+          sed -i -E "s/^__version__ = .*/__version__ = \"${VERSION}\"/" src/hidbridge/_version.py
+          grep '__version__' src/hidbridge/_version.py
+
+      - name: Install tooling
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,mcu]" build twine
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Pytest (offline gate)
+        run: python -m pytest -q
+
+      - name: Build sdist + wheel
+        run: |
+          rm -rf dist
+          python -m build
+          ls -l dist/
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: python/dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hidbridge
+    permissions:
+      id-token: write  # required for Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: python/dist/
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist/
+          # Re-running a tag whose version is already on PyPI is a no-op, not a failure (mirrors the
+          # Forgejo workflow's idempotent upload). PyPI never accepts a changed file for a version.
+          skip-existing: true
